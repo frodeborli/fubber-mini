@@ -115,21 +115,21 @@ $userId = $db->exec('INSERT INTO users (name) VALUES (?)', [$name]);
 Timezone-aware, locale-specific formatting:
 
 ```php
-use mini\Fmt;
+use function mini\fmt;
 
-// Static formatting methods use current locale automatically
-echo Fmt::dateShort(new DateTime());                    // Uses Locale::getDefault()
-echo Fmt::dateTime(new DateTime('2024-01-15 10:30:00')); // DateTime objects
-echo Fmt::time(new DateTime());                          // Time formatting
+// Formatting methods use current locale automatically
+echo fmt()->dateShort(new DateTime());                    // Uses Locale::getDefault()
+echo fmt()->dateTimeShort(new DateTime('2024-01-15 10:30:00')); // DateTime objects
+echo fmt()->timeShort(new DateTime());                    // Time formatting
 
 // Timezone handled via DateTimeZone
 $dateInTimezone = new DateTime('now', new DateTimeZone('Europe/Oslo'));
-echo Fmt::dateShort($dateInTimezone);
+echo fmt()->dateShort($dateInTimezone);
 
 // Formatting with explicit parameters for safety
-echo Fmt::currency(199.99, 'USD');  // MUST specify currency code
-echo Fmt::percent(0.85, 1);         // Decimal places optional
-echo Fmt::fileSize(1048576);        // File sizes
+echo fmt()->currency(199.99, 'USD');  // MUST specify currency code
+echo fmt()->percent(0.85, 1);         // Decimal places optional
+echo fmt()->fileSize(1048576);        // File sizes
 ```
 
 ### Caching
@@ -438,7 +438,7 @@ if (session_status() === PHP_SESSION_ACTIVE && isset($_SESSION['user_id'])) {
 // Add custom translation filters
 translator()->getInterpolator()->addFilterHandler(function($value, $filter) {
     if ($filter === 'currency') return '$' . number_format($value, 2);
-    if ($filter === 'filesize') return \mini\Fmt::fileSize($value);
+    if ($filter === 'filesize') return fmt()->fileSize($value);
     return null; // Let other handlers try
 });
 ```
