@@ -171,13 +171,17 @@ echo fmt()->fileSize(1048576);        // File sizes
 Flexible caching with multiple backends:
 
 ```php
-$cache = cache();            // Default cache
+$cache = cache();            // Root cache
 $userCache = cache('users'); // Namespaced cache
 
 $cache->set('key', $data, 3600);  // Set with TTL
 $data = $cache->get('key');       // Get value
-$cache->delete('key');            // Remove
-$cache->clear();                  // Clear namespace
+$cache->delete('key');            // Remove specific key
+$cache->clear();                  // Clear ALL caches (only supported on root cache)
+
+// Note: Namespaced caches cannot use clear() - use delete() for specific keys
+$userCache->set('user:1', $userData, 3600);
+$userCache->delete('user:1');     // Remove specific key from namespace
 ```
 
 ## Routing: File-Based with Optional Enhancement
@@ -386,6 +390,25 @@ echo $article->getUrl();     // /articles/my-great-post
 ```bash
 composer require fubber/mini
 ```
+
+### Development Server
+
+For quick development and testing, use PHP's built-in web server:
+
+```bash
+# Run from your application directory
+php -S 127.0.0.1:8080 router.php
+
+# Or on a different port
+php -S 127.0.0.1:3000 router.php
+```
+
+This starts a local development server with:
+- **Clean URL routing** - router.php handles all requests
+- **No web server configuration** - works immediately
+- **Fast iteration** - no need to configure Apache/Nginx
+
+**Note:** PHP's built-in server is for development only. For production, use Apache, Nginx, or another production-ready web server.
 
 ### Basic Application Structure
 
