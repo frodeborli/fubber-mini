@@ -396,50 +396,65 @@ composer require fubber/mini
 For quick development and testing, use PHP's built-in web server:
 
 ```bash
-# Run from your application directory
-php -S 127.0.0.1:8080 router.php
+# Run from your project root (recommended structure with public/ directory)
+php -S 127.0.0.1:8080 -t ./public/ router.php
 
 # Or on a different port
-php -S 127.0.0.1:3000 router.php
+php -S 127.0.0.1:3000 -t ./public/ router.php
 ```
 
 This starts a local development server with:
 - **Clean URL routing** - router.php handles all requests
 - **No web server configuration** - works immediately
 - **Fast iteration** - no need to configure Apache/Nginx
+- **Secure by default** - serves only from public/ directory, keeps vendor/ and config outside web root
 
 **Note:** PHP's built-in server is for development only. For production, use Apache, Nginx, or another production-ready web server.
 
 ### Basic Application Structure
 
+**Recommended structure (web root in public/ subdirectory):**
+
 ```
 your-app/
-├── config.php                  # App configuration (required)
+├── composer.json               # Composer dependencies
+├── vendor/                     # Composer packages (outside web root)
+├── config.php                  # App configuration (outside web root)
 ├── config/
 │   ├── bootstrap.php           # Application-specific setup (optional)
 │   └── formats/
 │       ├── en.php              # English formatting
 │       └── nb_NO.php           # Norwegian formatting
-├── translations/
+├── translations/               # Translation files (outside web root)
 │   ├── default/                # Auto-generated source strings
 │   └── nb_NO/                  # Norwegian translations
-├── migrations/                 # Database migrations
-├── api/
-│   ├── ping.php               # GET /api/ping
-│   └── users/
-│       ├── index.php          # GET/POST /api/users/
-│       └── [id].php           # GET /api/users/123
-└── index.php                  # Main page
+├── migrations/                 # Database migrations (outside web root)
+├── database.sqlite3            # Database file (outside web root)
+└── public/                     # Web root - only this directory is publicly accessible
+    ├── router.php              # Router for clean URLs
+    ├── index.php               # Main page
+    ├── api/
+    │   ├── ping.php           # GET /api/ping
+    │   └── users/
+    │       ├── index.php      # GET/POST /api/users/
+    │       └── [id].php       # GET /api/users/123
+    └── assets/                 # CSS, JS, images
+        └── style.css
 ```
 
-**Note:** All PHP files that use the framework should:
-1. Load Composer's autoloader: `require_once __DIR__ . '/vendor/autoload.php';`
-2. Call `mini\bootstrap()` to initialize the framework
-3. Access config via `$GLOBALS['app']['config']`
+**Security benefits:**
+- `vendor/`, `config.php`, `database.sqlite3` are outside web root
+- Only files in `public/` are directly accessible via HTTP
+- Reduces attack surface significantly
+
+**Note:** PHP files in `public/` should load the autoloader:
+```php
+require_once __DIR__ . '/../vendor/autoload.php';
+```
 
 ### Configuration (config.php)
 
-Create a `config.php` file in your project root:
+Create a `config.php` file in your **project root** (not in public/):
 
 ```php
 <?php
@@ -540,7 +555,8 @@ The `render()` function provides simple, secure templating with variable extract
 
 ```php
 <?php
-require_once __DIR__ . '/vendor/autoload.php';
+// Example: public/users.php
+require_once __DIR__ . '/../vendor/autoload.php';
 
 use function mini\{bootstrap, render, t, db};
 
