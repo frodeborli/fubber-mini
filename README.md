@@ -10,6 +10,38 @@ A deliberately minimal PHP micro-framework for experienced developers who want p
 
 **Convention over configuration.** Sensible defaults, minimal setup, maximum productivity.
 
+## Core Functions Reference
+
+Mini provides a focused set of core functions designed for long-term stability. These functions form the public API and won't be removed or significantly changed:
+
+**Essential Functions:**
+- `mini\bootstrap()` - Initialize the framework
+- `mini\t()` - Translate text with variable interpolation
+- `mini\h()` - HTML escape for XSS protection
+- `mini\render()` - Render templates with variable extraction
+- `mini\url()` - Generate URLs with base_url handling
+
+**Data Access:**
+- `mini\db()` - Database singleton for queries
+- `mini\table()` - Repository access for typed queries
+- `mini\cache()` - PSR-16 cache with namespacing
+
+**Formatting:**
+- `mini\fmt()` - Locale-aware formatting (dates, currency, filesize)
+- `mini\collator()` - String collation for sorting
+
+**Authentication:**
+- `mini\is_logged_in()` - Check authentication status
+- `mini\require_login()` - Enforce login requirement
+- `mini\require_role()` - Enforce role-based access
+- `mini\auth()` - Access authentication system
+
+**Session:**
+- `mini\session()` - Safe session initialization
+
+**Routing:**
+- `mini\router()` - Handle dynamic routing (called by router.php)
+
 ## Core Features
 
 ### Internationalization (i18n)
@@ -118,11 +150,28 @@ $cache->clear();                  // Clear namespace
 
 **Pragmatic URL Management**
 
-Mini's routing follows the same philosophy as everything else - simple by default, powerful when needed:
+Mini's routing follows the same philosophy as everything else - simple by default, powerful when needed.
 
 ### Basic File-Based Routing
-- `/api/ping.php` → Canonical URL: `/api/ping`
-- `/api/ping/index.php` → Canonical URL: `/api/ping/`
+
+File-based routing behavior depends on whether `router.php` exists in your web root:
+
+| File Path | Without router.php | With router.php |
+|-----------|-------------------|-----------------|
+| `/api/ping.php` | `/api/ping.php` | `/api/ping` (clean URL) |
+| `/api/ping/index.php` | `/api/ping/index.php` | `/api/ping/` (clean URL) |
+| `/users.php?id=123` | `/users.php?id=123` | `/users?id=123` (no .php) |
+
+**Without router.php:**
+- Direct file access with `.php` extension visible
+- Simple, works immediately
+- No configuration needed
+
+**With router.php:**
+- Clean URLs without `.php` extensions
+- Automatic 301 redirects from old-style URLs
+- Supports custom route patterns via `config/routes.php`
+- Subfolder routing via `_routes.php` files
 
 ### Automatic Clean URL Redirects
 
@@ -204,6 +253,35 @@ return [
 - **Direct deployment** - add file, endpoint exists
 - **Enhanced when needed** - add routing only for collections/pretty URLs
 - **Performance** - minimal overhead, direct file execution
+
+### Subfolder Routing
+
+For complex applications, you can create `_routes.php` files in subfolders to handle routing for that directory:
+
+```
+/api/
+├── users.php
+├── _routes.php        # Routes specific to /api/*
+└── admin/
+    ├── dashboard.php
+    └── _routes.php    # Routes specific to /api/admin/*
+```
+
+Each `_routes.php` file works the same as `config/routes.php` but is scoped to its directory.
+
+### Special Controller Files
+
+Mini recognizes certain filenames as having special behavior:
+
+| Filename | Purpose | When Used |
+|----------|---------|-----------|
+| `router.php` | Enable clean URLs and custom routing | Must be in web root |
+| `404.php` | Handle not found errors | Called when route/file not found |
+| `403.php` | Handle access denied errors | Called on `AccessDeniedException` |
+| `500.php` | Handle server errors | Called on unhandled exceptions |
+| `_routes.php` | Subfolder-specific routing config | Can exist in any directory |
+
+**Note:** These special files use privileged names. If you need routes like `/404` or `/router`, consider naming them `_404.php`, `_router.php` to avoid conflicts.
 
 ### URL Generation: Explicit Over Magic
 
@@ -718,21 +796,38 @@ File-based architecture provides natural microservices benefits:
 
 ## Architectural Philosophy & Performance
 
-### Request-Scoped State vs. Abstractions
+### Idiomatic PHP: Use $_POST, $_GET Directly
 
-Mini embraces PHP's request-scoped nature rather than abstracting it away:
+**Mini is different.** We embrace PHP's request-scoped nature rather than abstracting it away:
 
 ```php
-// Direct access to request data
+// Controllers SHOULD use PHP's native request variables directly
 $username = $_POST['username'] ?? '';
+$userId = $_GET['id'] ?? null;
 $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+$files = $_FILES['upload'] ?? [];
 ```
 
-**Why we don't abstract `$_POST`:**
-- `$_POST` is **request-scoped**, not a true superglobal like in other languages
-- Zero performance overhead - no object instantiation per request
-- No hidden complexity - what you see is what you get
-- Native PHP patterns that every developer understands
+**Why we don't abstract `$_POST`, `$_GET`, etc.:**
+
+These aren't true superglobals - they're **request-scoped** variables that PHP manages per-request:
+
+- **Zero overhead** - No object wrapping, no middleware layers, no PSR-7 instantiation
+- **Transparent** - What you see is what you get, no hidden state transformations
+- **Battle-tested** - PHP's request handling has served billions of requests reliably
+- **Idiomatic** - Every PHP developer understands these patterns immediately
+
+**The abstraction trap:**
+
+Other frameworks wrap `$_POST` in request objects, but underneath they still use `$_POST`. This adds:
+- Object instantiation overhead on every request
+- Indirection that obscures simple operations
+- Framework-specific APIs to learn and maintain
+- No real benefit since PHP already manages request scope correctly
+
+**Mini's philosophy:**
+
+If a framework abstracts `$_POST` but ultimately reads from `$_POST` anyway, we're just adding layers without value. Mini embraces what PHP does well and doesn't apologize for it.
 
 ### Our Focus: Native PHP over PSR Abstraction
 
@@ -740,11 +835,21 @@ Mini is intentionally built on PHP's native, battle-tested request-handling mode
 
 This is a deliberate design choice that optimizes for:
 
-- **Simplicity** - fewer concepts to learn and debug
-- **Performance** - eliminates the overhead of object instantiation on every request
-- **Clarity** - explicit and direct data flow without hidden layers
+- **Simplicity** - Fewer concepts to learn and debug
+- **Performance** - Eliminates object instantiation overhead on every request
+- **Clarity** - Explicit and direct data flow without hidden layers
+- **Honesty** - We don't pretend to be framework-agnostic when PHP does the job
 
-Mini is for developers who value this directness. If your project or team has a hard requirement for PSR compliance, a framework that centers its architecture on those interfaces would be a better fit.
+**Mini is for developers who:**
+- Value directness and transparency
+- Understand that request-scoped variables aren't "globals" in the dangerous sense
+- Want to write idiomatic PHP, not framework-specific patterns
+- Prioritize performance and simplicity over abstraction
+
+**Choose another framework if:**
+- PSR-7 compliance is mandatory for your project
+- Your team requires framework-agnostic abstractions
+- You prefer middleware-based request/response handling
 
 ### Authentication: Explicit over Implicit
 
