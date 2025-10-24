@@ -23,7 +23,7 @@ Mini provides a focused set of core functions designed for long-term stability. 
 
 **Database Access - `mini\db(): DatabaseInterface`**
 
-Returns a database singleton with these methods:
+Returns a request-scoped database instance with these methods:
 - `query(string $sql, array $params = []): array` - Execute query, return all rows
 - `queryOne(string $sql, array $params = []): ?array` - Return first row or null
 - `queryField(string $sql, array $params = []): mixed` - Return first column of first row
@@ -132,7 +132,7 @@ composer exec mini translations remove-orphans     # Clean up unused translation
 Simple, powerful database abstraction:
 
 ```php
-$db = db();  // Lazy-initialized singleton
+$db = db();  // Request-scoped instance
 
 // Queries
 $user = $db->queryOne('SELECT * FROM users WHERE id = ?', [$userId]);
@@ -955,6 +955,33 @@ Our approach provides measurable benefits:
 - **Lazy Initialization by Default** - helper functions (`db()`, `cache()`) are lightweight and only initialize their respective services the first time you call them in a request
 - **Linear Performance** - application performance doesn't degrade as you add more endpoints, because endpoints are completely isolated
 - **Ultimate Simplicity** - you don't need to think about service providers, factories, or autowiring. You just call the function you need when you need it
+
+### Request-Scoped Instances: PHP's True Nature
+
+**Important terminology:** Mini uses "request-scoped instance" instead of "singleton" because that's what PHP actually provides.
+
+```php
+$db = db();        // Request-scoped database instance
+$cache = cache();  // Request-scoped cache instance
+```
+
+**Why this matters:**
+
+In traditional long-running applications (Java, Node.js), a "singleton" means a single instance that lives for the entire application lifetime, shared across all requests. PHP doesn't work this way.
+
+In PHP (especially with php-fpm):
+- **Each request starts fresh** - new process or recycled worker
+- **State doesn't persist** - after request ends, all variables are cleaned up
+- **No shared memory** - requests are isolated by default
+- **"Singleton" is per-request** - `db()` returns the same instance *within a request*, not across requests
+
+**Benefits of this honesty:**
+- **Accurate mental model** - understand what PHP actually does
+- **Future-proof** - with fibers, we might have multiple instances per request
+- **No false security** - you can't accidentally share state between requests in PHP
+- **Performance clarity** - request isolation is a feature, not a limitation
+
+This aligns with Mini's philosophy: embrace PHP's architecture honestly rather than pretending it works like other languages.
 
 ### Design Philosophy: Pragmatic Object-Oriented Programming
 
