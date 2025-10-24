@@ -16,31 +16,65 @@ Mini provides a focused set of core functions designed for long-term stability. 
 
 **Essential Functions:**
 - `mini\bootstrap()` - Initialize the framework
-- `mini\t()` - Translate text with variable interpolation
-- `mini\h()` - HTML escape for XSS protection
-- `mini\render()` - Render templates with variable extraction
-- `mini\url()` - Generate URLs with base_url handling
+- `mini\t(string $text, array $vars = []): Translatable` - Translate text with variable interpolation
+- `mini\h(string $str): string` - HTML escape for XSS protection
+- `mini\render(string $template, array $vars = []): string` - Render templates with variable extraction
+- `mini\url(string $path = '', array $query = []): string` - Generate URLs with base_url handling
 
-**Data Access:**
-- `mini\db()` - Database singleton for queries
-- `mini\table()` - Repository access for typed queries
-- `mini\cache()` - PSR-16 cache with namespacing
+**Database Access - `mini\db(): DatabaseInterface`**
 
-**Formatting:**
-- `mini\fmt()` - Locale-aware formatting (dates, currency, filesize)
-- `mini\collator()` - String collation for sorting
+Returns a database singleton with these methods:
+- `query(string $sql, array $params = []): array` - Execute query, return all rows
+- `queryOne(string $sql, array $params = []): ?array` - Return first row or null
+- `queryField(string $sql, array $params = []): mixed` - Return first column of first row
+- `queryColumn(string $sql, array $params = []): array` - Return first column as array
+- `exec(string $sql, array $params = []): bool` - Execute INSERT/UPDATE/DELETE
+- `lastInsertId(): ?string` - Get last inserted row ID
+- `tableExists(string $tableName): bool` - Check if table exists
+- `transaction(\Closure $task): mixed` - Execute closure within transaction
+
+**Cache Access - `mini\cache(?string $namespace = null): CacheInterface`**
+
+Returns PSR-16 SimpleCache implementation:
+- `get(string $key, mixed $default = null): mixed` - Retrieve value from cache
+- `set(string $key, mixed $value, null|int $ttl = null): bool` - Store value with optional TTL
+- `delete(string $key): bool` - Remove value from cache
+- `clear(): bool` - Clear all values in namespace
+- `has(string $key): bool` - Check if key exists
+- `getMultiple(iterable $keys, mixed $default = null): iterable` - Get multiple values
+- `setMultiple(iterable $values, null|int $ttl = null): bool` - Set multiple values
+- `deleteMultiple(iterable $keys): bool` - Delete multiple values
+
+**Other Data Access:**
+- `mini\table(string $name): Repository` - Repository access for typed queries
+
+**Formatting - `mini\fmt(): Fmt`**
+
+Returns formatting instance with static methods:
+- `dateShort(\DateTimeInterface $date): string` - Short date format
+- `dateLong(\DateTimeInterface $date): string` - Long date format
+- `timeShort(\DateTimeInterface $time): string` - Short time format
+- `dateTimeShort(\DateTimeInterface $dt): string` - Short datetime format
+- `dateTimeLong(\DateTimeInterface $dt): string` - Long datetime format
+- `currency(float $amount, string $currencyCode): string` - Format currency
+- `percent(float $ratio, int $decimals = 0): string` - Format percentage
+- `number(float|int $number, int $decimals = 0): string` - Format number
+- `fileSize(int $bytes): string` - Human-readable file size
+
+**Other Formatting:**
+- `mini\collator(): \Collator` - String collation for locale-aware sorting
 
 **Authentication:**
-- `mini\is_logged_in()` - Check authentication status
-- `mini\require_login()` - Enforce login requirement
-- `mini\require_role()` - Enforce role-based access
-- `mini\auth()` - Access authentication system
+- `mini\is_logged_in(): bool` - Check authentication status
+- `mini\require_login(): void` - Enforce login requirement (redirects if not logged in)
+- `mini\require_role(string $role): void` - Enforce role-based access (403 if denied)
+- `mini\auth(): ?\mini\Auth` - Access authentication system
 
 **Session:**
-- `mini\session()` - Safe session initialization
+- `mini\session(): bool` - Safe session initialization
 
 **Routing:**
-- `mini\router()` - Handle dynamic routing (called by router.php)
+- `mini\router(): void` - Handle dynamic routing (called by router.php)
 
 ## Core Features
 
