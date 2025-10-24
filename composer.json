@@ -1,0 +1,61 @@
+{
+    "name": "fubber/mini",
+    "description": "Minimalist PHP micro-framework for simple web applications with enterprise-grade i18n, caching, and database abstraction",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "framework",
+        "micro-framework",
+        "i18n",
+        "internationalization",
+        "translation",
+        "cache",
+        "database",
+        "simple",
+        "minimal",
+        "routing"
+    ],
+    "homepage": "https://github.com/frodeborli/fubber-mini",
+    "support": {
+        "issues": "https://github.com/frodeborli/fubber-mini/issues",
+        "source": "https://github.com/frodeborli/fubber-mini"
+    },
+    "authors": [
+        {
+            "name": "Frode Borli",
+            "email": "frode@borli.net"
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "mini\\": "src/"
+        },
+        "files": [
+            "functions.php"
+        ]
+    },
+    "bin": [
+        "bin/mini",
+        "bin/mini.bat",
+        "bin/mini.cmd",
+        "bin/mini.php",
+        "bin/mini-translations.php",
+        "bin/mini-migrations.php"
+    ],
+    "require": {
+        "php": ">=7.4",
+        "symfony/polyfill-intl-icu": "^1.25",
+        "symfony/polyfill-intl-messageformatter": "^1.25",
+        "psr/http-message": "^2.0",
+        "psr/http-server-handler": "^1.0",
+        "psr/simple-cache": "^1.0 || ^2.0 || ^3.0",
+        "nyholm/psr7": "^1.8",
+        "nyholm/psr7-server": "^1.1"
+    },
+    "provide": {
+        "psr/simple-cache-implementation": "1.0|2.0|3.0"
+    },
+    "suggest": {
+        "ext-intl": "For full internationalization features with all languages and locales"
+    }
+}

@@ -1,0 +1,16 @@
+{
+    "This field is required.": "This field is required.",
+    "Please enter a valid email address.": "Please enter a valid email address.",
+    "Please enter a valid URL.": "Please enter a valid URL.",
+    "Only letters, numbers, hyphens and underscores are allowed.": "Only letters, numbers, hyphens and underscores are allowed.",
+    "Please enter a valid integer.": "Please enter a valid integer.",
+    "Please enter a valid number.": "Please enter a valid number.",
+    "Must be at least {min} characters long.": "Must be at least {min} characters long.",
+    "Must be {max} characters or less.": "Must be {max} characters or less.",
+    "Must be at least {min}.": "Must be at least {min}.",
+    "Must be greater than {min}.": "Must be greater than {min}.",
+    "Must be {max} or less.": "Must be {max} or less.",
+    "Must be less than {max}.": "Must be less than {max}.",
+    "Please select a valid option.": "Please select a valid option.",
+    "Invalid format.": "Invalid format."
+}

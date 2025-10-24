@@ -1,0 +1,4 @@
+#!/usr/bin/env php
+<?php
+// Unix/Linux/macOS wrapper for mini.php
+require __DIR__ . '/mini.php';

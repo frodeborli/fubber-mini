@@ -1,0 +1,31 @@
+# Dependencies
+/vendor/
+
+# Composer lock (common for libraries to ignore)
+composer.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# Test artifacts
+/tests/database.sqlite3
+/tests/cache/
+/tests/tmp/
+
+# Example/debug files
+/examples/*.sqlite3
+/examples/cache/
+cache_example.sqlite3
+
+# Environment files
+.env
+.env.local
