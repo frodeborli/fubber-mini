@@ -279,14 +279,16 @@ composer require fubber/mini
 
 ```
 your-app/
+├── config.php                  # App configuration (required)
 ├── config/
-│   ├── config.php              # App configuration
+│   ├── bootstrap.php           # Application-specific setup (optional)
 │   └── formats/
 │       ├── en.php              # English formatting
 │       └── nb_NO.php           # Norwegian formatting
 ├── translations/
 │   ├── default/                # Auto-generated source strings
 │   └── nb_NO/                  # Norwegian translations
+├── migrations/                 # Database migrations
 ├── api/
 │   ├── ping.php               # GET /api/ping
 │   └── users/
@@ -295,13 +297,20 @@ your-app/
 └── index.php                  # Main page
 ```
 
-### Configuration (config/config.php)
+**Note:** All PHP files that use the framework should:
+1. Load Composer's autoloader: `require_once __DIR__ . '/vendor/autoload.php';`
+2. Call `mini\bootstrap()` to initialize the framework
+3. Access config via `$GLOBALS['app']['config']`
+
+### Configuration (config.php)
+
+Create a `config.php` file in your project root:
 
 ```php
 <?php
 return [
     'base_url' => 'https://your-domain.com',
-    'dbfile' => __DIR__ . '/../database.sqlite3',
+    'dbfile' => __DIR__ . '/database.sqlite3',
     'default_language' => 'en',
     'app' => [
         'name' => 'Your Application'
@@ -373,12 +382,18 @@ translator()->getInterpolator()->addFilterHandler(function($value, $filter) {
 
 ```php
 <?php
-require_once '../mini/functions.php';
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use function mini\{bootstrap, t};
+
+bootstrap();
+
+$config = $GLOBALS['app']['config'];
 
 header('Content-Type: application/json');
 
 echo json_encode([
-    'message' => t('Pong from {app}!', ['app' => config('app.name')]),
+    'message' => t('Pong from {app}!', ['app' => $config['app']['name']]),
     'timestamp' => (new DateTime())->format('c'), // ISO 8601 format
     'server_time' => (new DateTime('now', new DateTimeZone('UTC')))->format('H:i:s')
 ]);
@@ -390,9 +405,13 @@ The `render()` function provides simple, secure templating with variable extract
 
 ```php
 <?php
-require_once 'mini/functions.php';
+require_once __DIR__ . '/vendor/autoload.php';
 
-$config = config();
+use function mini\{bootstrap, render, t, db};
+
+bootstrap();
+
+$config = $GLOBALS['app']['config'];
 $users = db()->query('SELECT * FROM users ORDER BY name');
 
 echo render('templates/users.php', [
@@ -615,7 +634,7 @@ Simple, PHP-based migration system:
 
 ### Running Migrations
 ```bash
-php mini/migrate.php  # Run all pending migrations
+composer exec mini migrations  # Run all pending migrations
 ```
 
 ### Creating Migrations
@@ -734,13 +753,19 @@ Mini champions explicit function calls for security. You can see the exact secur
 ```php
 <?php
 // /api/users.php
-require_once '../mini/functions.php';
-require_once '../lib/auth.php';  // Your auth functions
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use function mini\{bootstrap, db};
+
+bootstrap();
+
+require_once __DIR__ . '/../lib/auth.php';  // Your auth functions
 
 MyApp\require_api_access();  // Call where needed
 
 // Your endpoint logic here
 $users = db()->query('SELECT * FROM users');
+header('Content-Type: application/json');
 echo json_encode($users);
 ```
 
