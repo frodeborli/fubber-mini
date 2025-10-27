@@ -3,6 +3,7 @@
 namespace mini\Database;
 
 use mini\Contracts\DatabaseInterface;
+use mini\Mini;
 use PDO;
 use PDOException;
 use Exception;
@@ -12,22 +13,22 @@ use Exception;
  *
  * Wraps any PDO instance with a clean, ergonomic API that makes database
  * operations pleasant while supporting any PDO-compatible database.
+ * Fetches PDO from container lazily to ensure proper scoping.
  */
 class PdoDatabase implements DatabaseInterface
 {
-    private PDO $pdo;
+    private ?PDO $pdo = null;
     private int $transactionDepth = 0;
 
     /**
-     * @param PDO $pdo Configured PDO instance
+     * Get PDO instance from container (lazy initialization)
      */
-    public function __construct(PDO $pdo)
+    private function lazyPdo(): PDO
     {
-        $this->pdo = $pdo;
-
-        // Ensure consistent PDO configuration
-        $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $this->pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+        if ($this->pdo === null) {
+            $this->pdo = Mini::$mini->get(PDO::class);
+        }
+        return $this->pdo;
     }
 
     /**
@@ -36,7 +37,7 @@ class PdoDatabase implements DatabaseInterface
     public function query(string $sql, array $params = []): array
     {
         try {
-            $stmt = $this->pdo->prepare($sql);
+            $stmt = $this->lazyPdo()->prepare($sql);
             $stmt->execute($params);
             return $stmt->fetchAll();
         } catch (PDOException $e) {
@@ -50,7 +51,7 @@ class PdoDatabase implements DatabaseInterface
     public function queryOne(string $sql, array $params = []): ?array
     {
         try {
-            $stmt = $this->pdo->prepare($sql);
+            $stmt = $this->lazyPdo()->prepare($sql);
             $stmt->execute($params);
             $result = $stmt->fetch();
             return $result ?: null;
@@ -65,7 +66,7 @@ class PdoDatabase implements DatabaseInterface
     public function queryField(string $sql, array $params = []): mixed
     {
         try {
-            $stmt = $this->pdo->prepare($sql);
+            $stmt = $this->lazyPdo()->prepare($sql);
             $stmt->execute($params);
             $result = $stmt->fetch();
             return $result ? array_values($result)[0] : null;
@@ -80,7 +81,7 @@ class PdoDatabase implements DatabaseInterface
     public function queryColumn(string $sql, array $params = []): array
     {
         try {
-            $stmt = $this->pdo->prepare($sql);
+            $stmt = $this->lazyPdo()->prepare($sql);
             $stmt->execute($params);
             return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
         } catch (PDOException $e) {
@@ -94,7 +95,7 @@ class PdoDatabase implements DatabaseInterface
     public function exec(string $sql, array $params = []): bool
     {
         try {
-            $stmt = $this->pdo->prepare($sql);
+            $stmt = $this->lazyPdo()->prepare($sql);
             return $stmt->execute($params);
         } catch (PDOException $e) {
             throw new Exception("Exec failed: " . $e->getMessage());
@@ -106,7 +107,7 @@ class PdoDatabase implements DatabaseInterface
      */
     public function lastInsertId(): ?string
     {
-        $id = $this->pdo->lastInsertId();
+        $id = $this->lazyPdo()->lastInsertId();
         return $id !== false ? $id : null;
     }
 
@@ -132,7 +133,7 @@ class PdoDatabase implements DatabaseInterface
 
             // Fallback for databases that don't support INFORMATION_SCHEMA (like SQLite)
             // Try to query the table and see if it fails
-            $this->pdo->prepare("SELECT 1 FROM {$tableName} LIMIT 0")->execute();
+            $this->lazyPdo()->prepare("SELECT 1 FROM {$tableName} LIMIT 0")->execute();
             return true;
         } catch (PDOException $e) {
             // If the query failed, the table likely doesn't exist
@@ -154,7 +155,7 @@ class PdoDatabase implements DatabaseInterface
         // Only start a real transaction on the outermost level
         if ($this->transactionDepth === 1) {
             try {
-                $this->pdo->beginTransaction();
+                $this->lazyPdo()->beginTransaction();
             } catch (PDOException $e) {
                 $this->transactionDepth--;
                 throw new Exception("Failed to start transaction: " . $e->getMessage());
@@ -167,7 +168,7 @@ class PdoDatabase implements DatabaseInterface
 
             // Only commit on the outermost transaction
             if ($this->transactionDepth === 1) {
-                $this->pdo->commit();
+                $this->lazyPdo()->commit();
             }
 
             $this->transactionDepth--;
@@ -177,7 +178,7 @@ class PdoDatabase implements DatabaseInterface
             // Rollback on any exception (but only if we're at the outermost level)
             if ($this->transactionDepth === 1) {
                 try {
-                    $this->pdo->rollBack();
+                    $this->lazyPdo()->rollBack();
                 } catch (PDOException $rollbackException) {
                     // Log rollback failure but throw original exception
                     error_log("Transaction rollback failed: " . $rollbackException->getMessage());
@@ -199,7 +200,7 @@ class PdoDatabase implements DatabaseInterface
      */
     public function getPdo(): PDO
     {
-        return $this->pdo;
+        return $this->lazyPdo();
     }
 
 }

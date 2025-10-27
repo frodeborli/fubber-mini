@@ -3,7 +3,8 @@
  * Example usage of mini\cache() system
  *
  * This demonstrates the PSR-16 SimpleCache implementation with
- * database storage, namespacing, and automatic garbage collection.
+ * smart driver selection (APCu > SQLite > Filesystem), namespacing,
+ * and container integration.
  */
 
 require_once 'vendor/autoload.php';
@@ -72,8 +73,11 @@ if (method_exists($cache, 'cleanup')) {
     echo "Removed $removed expired entries\n";
 }
 
+// Show which driver is being used
+$driverInfo = mini\Services\SimpleCache::getDriverInfo();
 echo "\nCache system ready for use!\n";
+echo "- Using driver: {$driverInfo['driver']} ({$driverInfo['class']})\n";
+echo "- Smart fallback: APCu > SQLite in /tmp > Filesystem in /tmp\n";
 echo "- Use cache() for global cache\n";
 echo "- Use cache('namespace') for isolated cache sections\n";
-echo "- Automatic garbage collection runs randomly (1/10000 chance)\n";
-echo "- Data stored in SQLite 'mini_cache' table\n";
+echo "- Configurable via _config/Psr/SimpleCache/CacheInterface.php\n";
