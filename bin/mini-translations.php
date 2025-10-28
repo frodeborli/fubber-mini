@@ -266,7 +266,7 @@ class TranslationManager
 
     public function validateTranslations(array $sourceData): void
     {
-        $translationsDir = './translations/default';
+        $translationsDir = './_translations/default';
         $issues = [];
 
         foreach ($sourceData as $filePath => $strings) {
@@ -317,7 +317,7 @@ class TranslationManager
                     $fullPath = $file->getRealPath();
                     $translationsDirReal = realpath($translationsDir);
 
-                    // Get path relative to translations/default/
+                    // Get path relative to _translations/default/
                     $relativePath = str_replace($translationsDirReal . '/', '', $fullPath);
                     $sourceFile = str_replace('.json', '', $relativePath);
 
@@ -331,7 +331,7 @@ class TranslationManager
 
     public function addMissingTranslations(array $sourceData): void
     {
-        $translationsDir = './translations/default';
+        $translationsDir = './_translations/default';
         $added = 0;
 
         foreach ($sourceData as $filePath => $strings) {
@@ -392,7 +392,7 @@ class TranslationManager
 
     public function removeOrphanedTranslations(array $sourceData): void
     {
-        $translationsDir = './translations/default';
+        $translationsDir = './_translations/default';
         $removed = 0;
 
         foreach ($sourceData as $filePath => $strings) {
@@ -461,8 +461,8 @@ class TranslationManager
 
     public function addLanguage(string $language, array $sourceData): void
     {
-        $defaultDir = './translations/default';
-        $langDir = "./translations/$language";
+        $defaultDir = './_translations/default';
+        $langDir = "./_translations/$language";
 
         if (!is_dir($defaultDir)) {
             echo "Error: Default translations directory not found\n";
@@ -514,8 +514,8 @@ class TranslationManager
 
     public function updateLanguage(string $language, array $sourceData): void
     {
-        $defaultDir = './translations/default';
-        $langDir = "./translations/$language";
+        $defaultDir = './_translations/default';
+        $langDir = "./_translations/$language";
 
         if (!is_dir($defaultDir)) {
             echo "Error: Default translations directory not found\n";

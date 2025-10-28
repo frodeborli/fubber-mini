@@ -52,7 +52,7 @@ use mini\Lifetime;
 // Only register if not already registered (allows app to override)
 if (!Mini::$mini->has(Translator::class)) {
     Mini::$mini->addService(Translator::class, Lifetime::Singleton, function() {
-        $translationsPath = Mini::$mini->root . '/translations';
+        $translationsPath = Mini::$mini->root . '/_translations';
         $translator = new Translator($translationsPath);
 
         // Register mini framework translation scope

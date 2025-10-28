@@ -1014,7 +1014,8 @@ project/
 │   ├── index.php        # Entry point: calls mini\router()
 │   ├── assets/          # CSS, JS, images
 │   └── ...              # Static files only
-├── translations/        # Translation files (not web-accessible)
+├── _translations/       # Translation files (not web-accessible)
+├── _migrations/         # Database migrations (not web-accessible)
 ├── vendor/              # Composer dependencies (not web-accessible)
 └── .env                 # Environment variables (not web-accessible)
 ```

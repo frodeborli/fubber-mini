@@ -335,10 +335,10 @@ class Translator
         $folderName = ($languageCode === 'en') ? 'default' : $languageCode;
 
         if ($scope !== null) {
-            // Scoped translation files go under {app}/translations/{SCOPE}/{lang}/{file}.json
+            // Scoped translation files go under {app}/_translations/{SCOPE}/{lang}/{file}.json
             return "{$this->translationsPath}/{$scope}/{$folderName}/{$sourceFile}.json";
         } else {
-            // Regular app translations go under {app}/translations/{lang}/{file}.json
+            // Regular app translations go under {app}/_translations/{lang}/{file}.json
             return "{$this->translationsPath}/{$folderName}/{$sourceFile}.json";
         }
     }

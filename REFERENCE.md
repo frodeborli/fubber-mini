@@ -280,11 +280,14 @@ All config files in `_config/` directory:
 ## CLI Commands
 
 ```bash
+composer exec mini serve                         # Start development server
+composer exec mini serve --host 0.0.0.0 --port 3000  # Custom host/port
 composer exec mini migrations                    # Run pending migrations
-composer exec mini translations                 # Validate translations
-composer exec mini translations add-missing     # Add missing translation strings
-composer exec mini translations add-language nb # Create new language
-composer exec mini translations remove-orphans  # Remove unused translations
+composer exec mini translations                  # Validate translations
+composer exec mini translations add-missing      # Add missing translation strings
+composer exec mini translations add-language nb  # Create new language
+composer exec mini translations remove-orphans   # Remove unused translations
+composer exec mini benchmark                     # Run performance benchmarks
 ```
 
 ## ICU MessageFormat Syntax

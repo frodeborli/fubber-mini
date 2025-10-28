@@ -11,6 +11,14 @@ $command = $argv[1] ?? null;
 $args = array_slice($argv, 2);
 
 $availableCommands = [
+    'serve' => [
+        'description' => 'Start development server',
+        'script' => 'mini-serve.php',
+        'examples' => [
+            'serve' => 'Start dev server on 127.0.0.1:8080',
+            'serve --host 0.0.0.0 --port 3000' => 'Start on all interfaces, port 3000'
+        ]
+    ],
     'benchmark' => [
         'description' => 'Benchmark framework performance',
         'script' => 'mini-benchmark.php',

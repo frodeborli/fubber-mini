@@ -46,9 +46,9 @@ your-app/
 │   ├── 404.php
 │   ├── 401.php
 │   └── 500.php
-├── translations/               # Translation files (outside web root)
-├── migrations/                 # Database migrations (outside web root)
-├── database.sqlite3           # Database (outside web root)
+├── _translations/              # Translation files (outside web root)
+├── _migrations/                # Database migrations (outside web root)
+├── _database.sqlite3          # Database (outside web root)
 └── html/                      # Document root (web-accessible)
     ├── index.php              # Entry point
     └── assets/                # CSS, JS, images
@@ -68,6 +68,18 @@ mini\router();  // Handles routing and bootstraps framework
 ```
 
 ### Development Server
+
+**Using Mini CLI (recommended):**
+
+```bash
+composer exec mini serve
+# Starts server on http://127.0.0.1:8080
+
+# Custom host and port:
+composer exec mini serve --host 0.0.0.0 --port 3000
+```
+
+**Using PHP directly:**
 
 ```bash
 # Run from project root
@@ -226,11 +238,11 @@ composer exec mini migrations
 
 ### Creating Migrations
 
-Create files in `migrations/` directory with sequential naming:
+Create files in `_migrations/` directory with sequential naming:
 
 ```php
 <?php
-// migrations/001_create_users_table.php
+// _migrations/001_create_users_table.php
 
 return function($db) {
     $db->exec("CREATE TABLE users (
@@ -249,7 +261,7 @@ return function($db) {
 
 ```php
 <?php
-// migrations/002_seed_initial_users.php
+// _migrations/002_seed_initial_users.php
 
 return function($db) {
     $users = [
@@ -275,7 +287,7 @@ return function($db) {
 Structure:
 
 ```
-translations/
+_translations/
 ├── default/              # Auto-generated source strings
 │   └── controller.php.json
 ├── nb/                   # Norwegian
@@ -295,7 +307,7 @@ $username = $_SESSION['username'] ?? 'Guest';
 echo t("Hello, {name}!", ['name' => $username]);
 ```
 
-**Translation file** `translations/nb/welcome.php.json`:
+**Translation file** `_translations/nb/welcome.php.json`:
 
 ```json
 {
@@ -305,7 +317,7 @@ echo t("Hello, {name}!", ['name' => $username]);
 
 **How it works:**
 1. `t()` creates a `Translatable` object with source text and variables
-2. Framework looks up translation in `translations/{language}/{source-file}.json`
+2. Framework looks up translation in `_translations/{language}/{source-file}.json`
 3. If found, uses translated text; otherwise falls back to source text
 4. Variables are interpolated into the final string
 
@@ -315,8 +327,8 @@ echo t("Hello, {name}!", ['name' => $username]);
 # Scans codebase for t() calls and creates translation files
 composer exec mini translations add-missing
 
-# Creates: translations/default/welcome.php.json with source strings
-# Creates: translations/nb/welcome.php.json (empty, ready for translation)
+# Creates: _translations/default/welcome.php.json with source strings
+# Creates: _translations/nb/welcome.php.json (empty, ready for translation)
 ```
 
 ### ICU MessageFormat (Plurals, Ordinals)
@@ -381,12 +393,12 @@ composer exec mini translations add-missing
 ```
 
 Creates:
-- `translations/default/products/list.php.json` (source strings)
-- `translations/nb/products/list.php.json` (empty, ready for translation)
+- `_translations/default/products/list.php.json` (source strings)
+- `_translations/nb/products/list.php.json` (empty, ready for translation)
 
 **3. Translate strings:**
 
-Edit `translations/nb/products/list.php.json`:
+Edit `_translations/nb/products/list.php.json`:
 
 ```json
 {
@@ -401,7 +413,7 @@ Edit `translations/nb/products/list.php.json`:
 composer exec mini translations add-language es
 ```
 
-Creates: `translations/es/products/list.php.json`
+Creates: `_translations/es/products/list.php.json`
 
 Edit and translate:
 

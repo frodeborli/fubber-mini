@@ -85,7 +85,7 @@ echo fmt()->time(new DateTime());        // "2:30 PM"
 ### File Structure
 
 ```
-translations/
+_translations/
 ├── default/                 # Default language (English)
 │   ├── pages/index.php.json
 │   └── components/header.php.json
@@ -98,7 +98,7 @@ translations/
 
 ### Translation File Format
 
-**translations/default/pages/index.php.json:**
+**_translations/default/pages/index.php.json:**
 ```json
 {
   "Welcome to Mini Framework": "Welcome to Mini Framework",
@@ -108,7 +108,7 @@ translations/
 }
 ```
 
-**translations/no/pages/index.php.json:**
+**_translations/no/pages/index.php.json:**
 ```json
 {
   "Welcome to Mini Framework": "Velkommen til Mini Framework",
@@ -255,7 +255,7 @@ When `autoCreateDefaults` is enabled (default), missing translations are automat
 echo t("New feature title");
 
 // File automatically updated:
-// translations/default/pages/current.php.json
+// _translations/default/pages/current.php.json
 {
   "New feature title": "New feature title"
 }
@@ -274,7 +274,7 @@ $translator = Mini::$mini->get(Translator::class);
 $translator->addNamedScope('MY-PACKAGE', __DIR__ . '/vendor/mypackage');
 
 // Package translations:
-// vendor/mypackage/translations/default/src/Component.php.json
+// vendor/mypackage/_translations/default/src/Component.php.json
 ```
 
 ### Translation Statistics
@@ -411,7 +411,7 @@ This sets `Mini::$mini->defaultLanguage` which is used in the translation fallba
 
 ### Translations Path
 
-By default, translations are stored in `{projectRoot}/translations/`. This is automatically configured.
+By default, translations are stored in `{projectRoot}/_translations/`. This is automatically configured.
 
 ## Testing
 

@@ -2,7 +2,7 @@
 /**
  * Migration Runner
  *
- * Runs all migration files in migrations/ directory in alphabetical order.
+ * Runs all migration files in _migrations/ directory in alphabetical order.
  * Each migration should be idempotent (safe to run multiple times).
  */
 
@@ -40,15 +40,15 @@ try {
     $db = mini\db();
     echo "Connected to database\n";
 
-    // Look for migrations directory in current working directory
-    $migrationDir = getcwd() . '/migrations';
+    // Look for _migrations directory in current working directory
+    $migrationDir = getcwd() . '/_migrations';
 
     if (!is_dir($migrationDir)) {
-        echo "Creating migrations directory...\n";
+        echo "Creating _migrations directory...\n";
         mkdir($migrationDir, 0755, true);
     }
 
-    // Get all PHP files in migrations directory
+    // Get all PHP files in _migrations directory
     $migrationFiles = glob($migrationDir . '/*.php');
     sort($migrationFiles); // Ensure alphabetical order
 
