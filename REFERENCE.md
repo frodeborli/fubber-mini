@@ -192,6 +192,13 @@ if ($nonce->verify($_POST['__nonce__'])) {
 }
 ```
 
+**Security Features:**
+- Tokens signed with HMAC-SHA256
+- Includes session ID and user agent for additional security
+- Time-based expiration (default 24 hours, customizable)
+- IP address validation
+- Self-contained tokens (no server-side storage needed)
+
 ## Core Classes
 
 ### Translatable

@@ -6,7 +6,7 @@ namespace mini;
  * WordPress-inspired nonce (CSRF) token system
  *
  * Tokens are self-contained with action, timestamp, and IP address,
- * signed with HMAC for verification.
+ * signed with HMAC using session ID, user agent, and application salt.
  *
  * Usage:
  *   $nonce = new CSRF('delete-post');
@@ -43,6 +43,28 @@ class CSRF
     }
 
     /**
+     * Build signature key from hard-to-guess components
+     *
+     * Includes application salt, session ID, and user agent to make
+     * tokens difficult to forge even if attacker knows the action.
+     */
+    private function buildSignatureKey(): string
+    {
+        $hardToGuess = Mini::$mini->salt;
+
+        // Include session ID if available
+        $sessionName = session_name() ?: '';
+        if ($sessionName && isset($_COOKIE[$sessionName])) {
+            $hardToGuess .= $_COOKIE[$sessionName];
+        }
+
+        // Include user agent for browser fingerprinting
+        $hardToGuess .= $_SERVER['HTTP_USER_AGENT'] ?? '';
+
+        return $hardToGuess;
+    }
+
+    /**
      * Generate a new token with current timestamp and IP
      */
     private function generateToken(): string
@@ -53,7 +75,7 @@ class CSRF
             $_SERVER['REMOTE_ADDR'] ?? ''
         ]);
 
-        $signature = hash_hmac('sha256', $data, Mini::$mini->salt);
+        $signature = hash_hmac('sha256', $data, $this->buildSignatureKey());
         $token = $data . '|' . $signature;
 
         return base64_encode($token);
@@ -114,9 +136,9 @@ class CSRF
             return false;
         }
 
-        // Verify signature
+        // Verify signature using same key derivation
         $data = implode('|', [$action, $time, $ip]);
-        $expectedSignature = hash_hmac('sha256', $data, Mini::$mini->salt);
+        $expectedSignature = hash_hmac('sha256', $data, $this->buildSignatureKey());
 
         return hash_equals($expectedSignature, $signature);
     }
