@@ -58,6 +58,9 @@ final class Mini implements ContainerInterface {
     /** Debug mode */
     public readonly bool $debug;
 
+    /** Application salt for CSRF tokens and other cryptographic operations */
+    public readonly string $salt;
+
     /**
      * Lifecycle hooks
      */
@@ -388,6 +391,10 @@ final class Mini implements ContainerInterface {
 
         // Application default language for translations (can override with MINI_LANG)
         $this->defaultLanguage = $_ENV['MINI_LANG'] ?? 'en';
+
+        // Application salt for cryptographic operations (CSRF tokens, etc.)
+        // Should be set in .env as MINI_SALT for production
+        $this->salt = $_ENV['MINI_SALT'] ?? hash('sha256', $this->root . PHP_VERSION . php_uname());
 
         // Register core services
         $this->registerCoreServices();

@@ -387,4 +387,15 @@ function getHttpStatusText(int $statusCode): string
     };
 }
 
-
+/**
+ * Create a CSRF token for a specific action
+ *
+ * Convenience wrapper around new CSRF().
+ *
+ * @param string $action Action name (e.g., 'delete-post', 'update-settings')
+ * @param string $fieldName HTML field name (default: '__nonce__')
+ * @return CSRF CSRF token object
+ */
+function csrf(string $action, string $fieldName = '__nonce__'): CSRF {
+    return new CSRF($action, $fieldName);
+}

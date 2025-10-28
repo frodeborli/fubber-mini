@@ -150,7 +150,14 @@ Access request data directly with native PHP:
 <?php
 // _routes/users/create.php
 
+$nonce = csrf('create-user');
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // Verify CSRF token
+    if (!$nonce->verify($_POST['__nonce__'])) {
+        throw new mini\Http\BadRequestException('Invalid CSRF token');
+    }
+
     $username = $_POST['username'] ?? '';
     $email = $_POST['email'] ?? '';
 
@@ -164,8 +171,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Show form
 echo render('users/create.php', [
-    'title' => t('Create User')
+    'title' => t('Create User'),
+    'nonce' => $nonce
 ]);
+```
+
+**In _views/users/create.php:**
+```php
+<form method="POST">
+    <?= $nonce ?>  <!-- Outputs hidden input field -->
+
+    <label><?= t('Username') ?></label>
+    <input name="username" required>
+
+    <label><?= t('Email') ?></label>
+    <input name="email" type="email" required>
+
+    <button type="submit"><?= t('Create User') ?></button>
+</form>
 ```
 
 ## Database

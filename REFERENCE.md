@@ -157,6 +157,41 @@ interface AuthInterface {
 }
 ```
 
+### CSRF Protection
+
+```php
+csrf(string $action, string $fieldName = '__nonce__'): CSRF  # Create CSRF token
+```
+
+**CSRF Class Methods:**
+```php
+$token = new CSRF('delete-post');           # Create token for action
+$token = new CSRF('update-user', 'token');  # Custom field name
+
+$token->getToken(): string                  # Get token string
+$token->verify(?string $token, float $maxAge = 86400): bool  # Verify token
+$token->__toString(): string                # Output hidden input field
+```
+
+**Usage Example:**
+```php
+// Generate token
+$nonce = csrf('delete-post');
+render('form.php', ['nonce' => $nonce]);
+
+// In template
+<form method="post">
+  <?= $nonce ?>
+  <button>Delete</button>
+</form>
+
+// Verify token
+$nonce = csrf('delete-post');
+if ($nonce->verify($_POST['__nonce__'])) {
+    // Process form
+}
+```
+
 ## Core Classes
 
 ### Translatable
@@ -191,6 +226,7 @@ class Mini implements ContainerInterface {
     public readonly string $locale;            # Default locale
     public readonly string $timezone;          # Default timezone
     public readonly string $defaultLanguage;   # Default language
+    public readonly string $salt;              # Cryptographic salt (MINI_SALT)
 
     public function addService(string $id, Lifetime $lifetime, Closure $factory): void
     public function has(string $id): bool
@@ -261,9 +297,11 @@ return [
 MINI_ROOT=/path/to/project      # Project root
 MINI_CONFIG_ROOT=/path/config   # Config directory
 MINI_ROUTES_ROOT=/path/routes   # Routes directory
+MINI_VIEWS_ROOT=/path/views      # Views directory
 MINI_LOCALE=nb_NO                # Default locale
 MINI_TIMEZONE=Europe/Oslo        # Default timezone
 MINI_LANG=nb                     # Default language
+MINI_SALT=your-random-salt-here  # Cryptographic salt (for CSRF, etc.)
 DEBUG=1                          # Debug mode
 ```
 

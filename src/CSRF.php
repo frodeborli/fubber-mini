@@ -2,57 +2,134 @@
 
 namespace mini;
 
+/**
+ * WordPress-inspired nonce (CSRF) token system
+ *
+ * Tokens are self-contained with action, timestamp, and IP address,
+ * signed with HMAC for verification.
+ *
+ * Usage:
+ *   $nonce = new CSRF('delete-post');
+ *   render('form.php', ['nonce' => $nonce]);
+ *
+ *   // In template:
+ *   <form method="post">
+ *     <?= $nonce ?>
+ *     ...
+ *   </form>
+ *
+ *   // Verify:
+ *   $nonce = new CSRF('delete-post');
+ *   if ($nonce->verify($_POST['__nonce__'])) {
+ *     // Process form
+ *   }
+ */
 class CSRF
 {
-    private static ?string $secret = null;
+    private string $action;
+    private string $fieldName;
+    private ?string $token = null;
 
-    public static function init(): void
+    /**
+     * Create a CSRF token for a specific action
+     *
+     * @param string $action Action name (e.g., 'delete-post', 'update-settings')
+     * @param string $fieldName HTML field name (default: '__nonce__')
+     */
+    public function __construct(string $action, string $fieldName = '__nonce__')
     {
-        session();
-
-        // Generate or retrieve session secret
-        if (!isset($_SESSION['csrf_secret'])) {
-            $_SESSION['csrf_secret'] = bin2hex(random_bytes(32));
-        }
-
-        self::$secret = $_SESSION['csrf_secret'];
+        $this->action = $action;
+        $this->fieldName = $fieldName;
     }
 
-    public static function getToken(string $action = 'default'): string
+    /**
+     * Generate a new token with current timestamp and IP
+     */
+    private function generateToken(): string
     {
-        if (self::$secret === null) {
-            self::init();
-        }
+        $data = implode('|', [
+            $this->action,
+            (string) microtime(true),
+            $_SERVER['REMOTE_ADDR'] ?? ''
+        ]);
 
-        $userId = $_SESSION['user_id'] ?? '';
-        $sessionId = session_id();
+        $signature = hash_hmac('sha256', $data, Mini::$mini->salt);
+        $token = $data . '|' . $signature;
 
-        return hash_hmac('sha256', $action . $userId . $sessionId, self::$secret);
+        return base64_encode($token);
     }
 
-    public static function verifyToken(string $token, string $action = 'default'): bool
+    /**
+     * Get the token string (lazy generation)
+     */
+    public function getToken(): string
     {
-        if (self::$secret === null) {
-            self::init();
+        if ($this->token === null) {
+            $this->token = $this->generateToken();
         }
-
-        $expectedToken = self::getToken($action);
-        return hash_equals($expectedToken, $token);
+        return $this->token;
     }
 
-    public static function field(string $action = 'default'): string
+    /**
+     * Verify a token
+     *
+     * @param string|null $token Token to verify (typically from $_POST)
+     * @param float $maxAge Maximum age in seconds (default: 86400 = 24 hours)
+     * @return bool True if valid and not expired
+     */
+    public function verify(?string $token, float $maxAge = 86400): bool
     {
-        $token = self::getToken($action);
-        return '<input type="hidden" name="_csrf" value="' . htmlspecialchars($token, ENT_QUOTES, 'UTF-8') . '">';
+        if ($token === null || $token === '') {
+            return false;
+        }
+
+        // Decode token
+        $decoded = base64_decode($token, true);
+        if ($decoded === false) {
+            return false;
+        }
+
+        // Split into parts: action|time|ip|signature
+        $parts = explode('|', $decoded);
+        if (count($parts) !== 4) {
+            return false;
+        }
+
+        [$action, $time, $ip, $signature] = $parts;
+
+        // Verify action matches
+        if ($action !== $this->action) {
+            return false;
+        }
+
+        // Verify not expired
+        $age = microtime(true) - (float) $time;
+        if ($age > $maxAge || $age < 0) {
+            return false;
+        }
+
+        // Verify IP matches (if IP was recorded)
+        $currentIp = $_SERVER['REMOTE_ADDR'] ?? '';
+        if ($ip !== '' && $ip !== $currentIp) {
+            return false;
+        }
+
+        // Verify signature
+        $data = implode('|', [$action, $time, $ip]);
+        $expectedSignature = hash_hmac('sha256', $data, Mini::$mini->salt);
+
+        return hash_equals($expectedSignature, $signature);
     }
 
-    public static function check(array $data, string $action = 'default'): void
+    /**
+     * Output hidden input field
+     */
+    public function __toString(): string
     {
-        $token = $data['_csrf'] ?? '';
-
-        if (!self::verifyToken($token, $action)) {
-            http_response_code(403);
-            die('CSRF token validation failed');
-        }
+        return sprintf(
+            '<input type="hidden" name="%s" value="%s">',
+            htmlspecialchars($this->fieldName, ENT_QUOTES, 'UTF-8'),
+            htmlspecialchars($this->getToken(), ENT_QUOTES, 'UTF-8')
+        );
     }
 }
