@@ -15,7 +15,7 @@ We made a conscious decision to stay close to native PHP rather than building ab
 
 This makes Mini fundamentally different from Laravel, Slim, or Symfony:
 - **Runs much faster** - No overhead from unnecessary abstractions
-- **Scales to thousands of routes** - File-based routing means no route compilation
+- **O(1) constant time routing** - File-based routing scales to tens of thousands of routes
 - **Easy to add features** - Use Symfony packages or any PSR-compatible library
 - **Shallow** - We don't wrap your code in dozens of functions and magic
 
@@ -104,8 +104,12 @@ URLs map directly to files in `_routes/`:
 ```
 /              → _routes/index.php
 /users         → _routes/users.php
+/users/        → _routes/users/index.php
 /api/posts     → _routes/api/posts.php
+/api/posts/    → _routes/api/posts/index.php
 ```
+
+**Performance:** Route lookup is O(1) constant time - only limited by filesystem scalability. Works efficiently with tens of thousands of routes.
 
 **Example:** `_routes/api/posts.php`
 
@@ -128,6 +132,7 @@ For dynamic routes, create `_config/routes.php`:
 <?php
 return [
     "/users/{id:\d+}" => fn($id) => "_routes/users/detail.php?id={$id}",
+
     "/posts/{slug}" => function(string $slug) {
         $postId = cache()->get("post_slug:{$slug}")
                   ?? db()->queryField('SELECT id FROM posts WHERE slug = ?', [$slug]);
@@ -138,6 +143,15 @@ return [
         }
 
         return "_routes/posts/detail.php?id={$postId}";
+    },
+
+    // Route different HTTP methods to different handlers
+    "/api/users" => function() {
+        return match($_SERVER['REQUEST_METHOD']) {
+            'GET' => "_routes/api/users/list.php",
+            'POST' => "_routes/api/users/create.php",
+            default => throw new mini\Http\MethodNotAllowedException()
+        };
     }
 ];
 ```
@@ -1030,10 +1044,11 @@ $users = table('users')->eq('active', 1)->all();
 
 File-based routing and lazy initialization mean Mini stays fast as your app grows:
 
-- **No route compilation** - Routes are discovered on-demand
+- **O(1) route lookup** - Constant time routing, even with tens of thousands of routes
+- **No route compilation** - Routes are discovered on-demand via filesystem
 - **No container compilation** - Services initialize when used
 - **No middleware overhead** - Direct execution path
-- **Linear scaling** - 10 routes or 10,000 routes, same performance
+- **Filesystem scalability only** - Performance limited by your filesystem, not the framework
 
 ## Extending Mini
 
@@ -1051,19 +1066,24 @@ Mini is PSR-compatible, so Symfony, League, and other packages work directly.
 
 See `PATTERNS.md` for detailed examples of overriding framework defaults (logger, cache, database, etc.).
 
-## When Mini Isn't Right
+## When to Use Mini
 
-**Choose another framework if:**
-- You need queues, events, notifications built-in (Laravel)
-- You require PSR-7/15 middleware architecture (Slim)
-- Your team needs heavy conventions and structure (Laravel, Symfony)
-- You prefer heavy abstractions over direct PHP
+**Mini is ideal for:**
+- Long-term maintainability over rapid team scaling
+- API backends and internal services
+- Systems expected to run for decades
+- Small expert teams who value architectural control
+- Performance-sensitive applications
 
-**Mini is for developers who:**
-- Value directness and transparency
-- Want to use PHP idiomatically
-- Prioritize performance and simplicity
-- Need complete features without complexity
+**Choose Laravel/Symfony if:**
+- You need batteries-included features (queues, events, ORM)
+- Large rotating teams need strong conventions
+- Rapid prototyping with extensive ecosystem matters
+- You prefer convention over explicit control
+
+**Philosophy:** Mini isn't anti-framework — it's pro-clarity. It assumes you trust yourself more than your dependencies.
+
+📖 **See [docs/WHEN-TO-USE-MINI.md](docs/WHEN-TO-USE-MINI.md) for a detailed comparison and decision guide.**
 
 ## License
 
