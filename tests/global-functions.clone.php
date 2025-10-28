@@ -16,7 +16,7 @@ if (!$autoloader) {
 
 require_once $autoloader;
 
-use mini\Repository\RepositoryInterface;
+use mini\Tables\RepositoryInterface;
 use mini\Repository;
 
 function test(string $description, callable $test): void

@@ -10,6 +10,9 @@ use mini\Mini;
 echo "Testing Database Container Service\n";
 echo str_repeat('=', 70) . "\n\n";
 
+// Bootstrap framework (required for Scoped services)
+\mini\bootstrap();
+
 // Test 1: Auto-create SQLite database (no config)
 echo "Test 1: Auto-create SQLite database\n";
 try {

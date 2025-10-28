@@ -1,506 +1,450 @@
-# Mini Framework Reference
+# Mini Framework - API Reference
+
+Quick reference for Mini framework functions and classes.
 
 ## Core Functions
 
-### Translation
-```php
-t(string $text, array $vars = []): Translatable
-```
-Create translatable text: `t("Hello {name}!", ['name' => 'World'])`
+### Framework Bootstrap
 
-### HTML Escaping
 ```php
-h(string $str): string
+bootstrap(): void       # Initialize framework (error handlers, output buffering)
+router(): void          # Handle routing (calls bootstrap() internally)
 ```
-Escape HTML: `<title><?= h($userTitle) ?></title>`
+
+### Translation
+
+```php
+t(string $text, array $vars = []): Translatable  # Create translatable text
+translator(): Translator                          # Get translator instance
+```
+
+### HTML & Output
+
+```php
+h(string $str): string                            # HTML escape
+render(string $template, array $vars = []): string  # Render template
+```
 
 ### URL Generation
+
 ```php
-url(string $path = ''): string
+url(string $path = '', array $query = []): string  # Generate URL
+redirect(string $url, int $statusCode = 302): void # Redirect
+current_url(): string                              # Get current URL
 ```
-Generate URLs: `<a href="<?= url('login.php') ?>">Login</a>`
 
-### Template Rendering
+### Session & Flash Messages
+
 ```php
-render(string $template, array $vars = []): string
+session(): bool                               # Safe session initialization
+flash_set(string $type, string $message): void  # Set flash message
+flash_get(): array                             # Get and clear flash messages
 ```
-Render template: `echo render('tpl/page.php', ['title' => t('Home'), 'data' => $data])`
 
-### Session Management
+### Database
+
 ```php
-session(): bool
+db(): DatabaseInterface  # Get request-scoped database instance
 ```
-Start session safely: `session(); $_SESSION['user_id'] = $id;`
 
-## Routing System
-
-### Implicit Routes
-Create PHP files that map to URLs automatically:
-- `/users/index.php` → `/users/` (preferred pattern - nginx adds trailing slash)
-- `/users.php` → `/users`
-- `/api/user.php` → `/api/user`
-
-### Explicit Routes
+**DatabaseInterface Methods:**
 ```php
-// config/routes.php
-return [
-    "/users/{id}" => fn($id) => "/user_detail.php?id=$id",
-    "/api/users/{id}/posts/{slug}" => fn($slug, $id) => "/api_posts.php?user_id=$id&slug=$slug",
-    "/blog/{year}/{month}" => fn($month, $year) => "/blog_archive.php?year=$year&month=$month"
-];
+query(string $sql, array $params = []): array          # All rows
+queryOne(string $sql, array $params = []): ?array      # First row or null
+queryField(string $sql, array $params = []): mixed     # First field of first row
+queryColumn(string $sql, array $params = []): array    # First column as array
+exec(string $sql, array $params = []): bool|int        # Execute (returns last insert ID or true)
+lastInsertId(): ?string                                 # Get last insert ID
+tableExists(string $tableName): bool                   # Check if table exists
+transaction(\Closure $task): mixed                      # Run closure in transaction
 ```
-Router only handles URL rewriting, not HTTP verbs (GET/POST/etc).
 
-### HTTP Exception Handling
+### Tables (Query Builder)
+
 ```php
-// Only works when using router
-throw new \mini\Http\NotFoundException("Page not found");           // 404
-throw new \mini\Http\AccessDeniedException("Access denied");        // 403
-throw new \mini\Http\BadRequestException("Invalid request");        // 400
-throw new \mini\HttpException(500, "Internal error");               // Custom codes
+table(string $name): Repository  # Get table repository
 ```
-Exceptions automatically render appropriate error pages.
 
-### HTTP Components
-- **ErrorHandler**: Handles HTTP exceptions and renders error pages
-- **OutputBuffer**: Manages output buffering for clean error handling
-- **SimpleRouter**: File-based routing with pattern matching
-
-## Database & Repositories
-
-Mini provides a powerful, layered approach to data access. You can work directly with the database for simple queries or use the high-level Repository system and query builder for more structured, object-oriented access.
-
-### High-Level: The Repository System
-
-#### Table Query Builder
-Immutable query builder for repositories:
+**Repository Methods:**
 ```php
-table('users')->eq('status', 'active')->order('name')->limit(10)->all()
-table('posts')->gte('created_at', $date)->first()
-table('products')->lte('price', 100)->count()
+eq(string $field, mixed $value): Repository       # WHERE field = value
+gte(string $field, mixed $value): Repository      # WHERE field >= value
+lte(string $field, mixed $value): Repository      # WHERE field <= value
+gt(string $field, mixed $value): Repository       # WHERE field > value
+lt(string $field, mixed $value): Repository       # WHERE field < value
+in(string $field, array $values): Repository      # WHERE field IN (...)
+like(string $field, string $pattern): Repository  # WHERE field LIKE pattern
+order(string $field, string $direction = 'asc'): Repository  # ORDER BY
+limit(int $limit): Repository                     # LIMIT
+offset(int $offset): Repository                   # OFFSET
+all(): array                                      # Fetch all results
+first(): ?object                                  # Fetch first result
+count(): int                                      # Count results
+page(int $page, int $perPage = 20): array        # Paginated results
 ```
 
-#### Table Methods
+### Cache
+
 ```php
-$table->eq(string $field, mixed $value): Table               # Equality condition
-$table->gte(string $field, mixed $value): Table             # Greater than or equal
-$table->lte(string $field, mixed $value): Table             # Less than or equal
-$table->gt(string $field, mixed $value): Table              # Greater than
-$table->lt(string $field, mixed $value): Table              # Less than
-$table->like(string $field, string $pattern): Table         # Pattern matching
-$table->in(string $field, array $values): Table             # Value in array
-$table->query(array|string $params): Table                  # Query with parameters
-$table->orderBy(string $field, string $direction = 'asc'): Table  # Order results
-$table->limit(int $limit): Table                            # Limit results
-$table->offset(int $offset): Table                          # Offset results
-$table->all(): array                                        # Get all results
-$table->one(): ?object                                      # Get first result (alias)
-$table->first(): ?object                                    # Get first result
-$table->count(): int                                        # Count results
-$table->page(int $page, int $perPage = 20): array          # Paginated results
-$table->load(mixed $id): object                             # Load by ID
-$table->create(): object                                    # Create new model
+cache(?string $namespace = null): CacheInterface  # Get cache instance
 ```
 
-#### Repository Interface
+**CacheInterface Methods (PSR-16):**
 ```php
-interface RepositoryInterface {
-    public function findById(mixed $id): ?object
-    public function save(object $model): object
-    public function delete(object $model): bool
-    public function validate(object $model): array
-    public function create(): object
-    public function convertConditionValue(string $field, mixed $value): mixed
-}
+get(string $key, mixed $default = null): mixed
+set(string $key, mixed $value, null|int $ttl = null): bool
+delete(string $key): bool
+clear(): bool
+has(string $key): bool
+getMultiple(iterable $keys, mixed $default = null): iterable
+setMultiple(iterable $values, null|int $ttl = null): bool
+deleteMultiple(iterable $keys): bool
 ```
 
-#### Repository Access
+### Logging
+
 ```php
-repositories(): CollectionInterface
-table(string $name): Table
+log(): LoggerInterface  # Get PSR-3 logger instance
 ```
-Access data: `table('users')->eq('active', true)->first()`, Get repos: `repositories()->get('users')`
 
-#### Repository Types
-- **Abstract Database Repository**: Base class for database repositories with built-in validation, field mapping, and ModelTracker integration
-- **CSV Repository**: File-based repository for CSV data sources with full Table query support
-
-### Low-Level: Direct Database Access
-
-#### Database Access
+**LoggerInterface Methods (PSR-3):**
 ```php
-db(): DB
+emergency(string $message, array $context = []): void
+alert(string $message, array $context = []): void
+critical(string $message, array $context = []): void
+error(string $message, array $context = []): void
+warning(string $message, array $context = []): void
+notice(string $message, array $context = []): void
+info(string $message, array $context = []): void
+debug(string $message, array $context = []): void
 ```
-Get database: `$user = db()->queryOne('SELECT * FROM users WHERE id = ?', [$id])`
 
-#### Database Query Methods
+### Internationalization
+
 ```php
-$db->query(string $sql, array $params = []): array           # All results as arrays
-$db->queryOne(string $sql, array $params = []): ?array      # First row only
-$db->queryField(string $sql, array $params = []): mixed     # First column of first row
-$db->queryColumn(string $sql, array $params = []): array    # First column as array
-$db->exec(string $sql, array $params = []): bool            # Execute statement
-$db->lastInsertId(): ?string                                 # Last inserted ID
-$db->tableExists(string $tableName): bool                   # Check table existence
-$db->transaction(\Closure $task): mixed                     # Execute in transaction
-$db->getPdo(): PDO                                          # Access underlying PDO
+fmt(): Fmt              # Get formatter instance
 ```
 
-## Internationalization (i18n)
-
-Mini's i18n system is enterprise-grade, providing a complete solution for translation, locale-aware formatting, and language management.
-
-### Translation System
-
-#### Translatable Class
-Immutable translation request object implementing Stringable:
-```php
-$translatable = t("Hello {name}!", ['name' => 'World']);
-echo $translatable;  // Automatically translated via __toString()
-$translatable->getSourceText();     # Get original text
-$translatable->getVars();           # Get variables
-$translatable->getSourceFile();     # Get calling file context
-```
-
-#### File Structure
-```
-translations/
-├── default/           # Auto-generated source strings
-│   └── controller.php.json
-├── nb/               # Norwegian translations (language only)
-│   └── controller.php.json
-└── es/               # Spanish translations
-    └── controller.php.json
-```
-
-#### Advanced Translation Features
-```php
-// Conditional translations using QueryParser syntax
-{
-  "You have {count} items": {
-    "count=0": "You have no items",
-    "count=1": "You have one item",
-    "count[>]=2": "You have {count} items",
-    "count[>=]=100&premium=true": "You have {count} premium items"
-  }
-}
-
-// ICU MessageFormat support for complex pluralization
-{
-  "apples": "{count, plural, =0 {no apples} =1 {one apple} other {# apples}}"
-}
-
-// Custom interpolation filters
-translator()->getInterpolator()->addFilterHandler(function($value, $filter) {
-    if ($filter === 'reverse') return strrev($value);
-    if ($filter === 'upper') return strtoupper($value);
-    return null; // Let other handlers try
-});
-
-// Advanced QueryParser conditions
-// Supports: =, !=, <, <=, >, >=, [in], [not_in], [like], [not_like]
-// Boolean logic: &(AND), |(OR), !(NOT)
-// Example: "status=active&(role=admin|role=moderator)&!banned=true"
-```
-
-#### Translator Access
-```php
-translator(): Translator
-```
-Get translator: `translator()->trySetLanguageCode('nb')`
-
-### Locale-Aware Formatting (Fmt Class)
-
-All methods are static and use `Locale::getDefault()`.
-
-#### Currency
+**Fmt Static Methods:**
 ```php
 Fmt::currency(float $amount, string $currencyCode): string
-```
-Display currency: `echo Fmt::currency(19.99, 'NOK')` // kr 19,99
-
-#### Dates
-```php
-Fmt::dateShort(DateTimeInterface $date): string
-Fmt::dateLong(DateTimeInterface $date): string
-Fmt::dateTime(DateTimeInterface $date): string
-Fmt::time(DateTimeInterface $date): string
-```
-Format dates: `echo Fmt::dateShort(new DateTime())` // 26.9.2024
-
-#### Numbers
-```php
+Fmt::dateShort(\DateTimeInterface $date): string
+Fmt::dateLong(\DateTimeInterface $date): string
+Fmt::timeShort(\DateTimeInterface $time): string
+Fmt::dateTimeShort(\DateTimeInterface $dt): string
+Fmt::dateTimeLong(\DateTimeInterface $dt): string
 Fmt::number(float|int $number, int $decimals = 0): string
-Fmt::percent(float $ratio, int $decimals = 1): string
-```
-Display numbers: `echo Fmt::percent(0.85, 1)` // 85,0%
-
-#### File Sizes
-```php
+Fmt::percent(float $ratio, int $decimals = 0): string
 Fmt::fileSize(int $bytes): string
 ```
-Display file size: `echo Fmt::fileSize(1048576)` // 1,0 MB
 
-### Core Locale Management
-
-Current locale is managed via `Locale::setDefault()` and `Locale::getDefault()`. Region (e.g., `nb_NO`) affects formatting via `Fmt`, while language (e.g., `nb`) affects translations via `t()`.
+### Authentication
 
 ```php
-Locale::setDefault('nb_NO'); // Sets Norwegian (Norway) for formatting
-// Translation files use language only: translations/nb/
-// Formatting uses full locale: currency, dates, numbers
+setupAuth(\Closure $factory): void  # Register auth implementation
+auth(): ?AuthInterface              # Get auth instance
+is_logged_in(): bool                # Check if user is authenticated
+require_login(): void               # Require authentication (throws 401)
+require_role(string $role): void    # Require specific role (throws 403)
 ```
 
-#### Factory Functions
+**AuthInterface (implement this):**
 ```php
-numberFormatter(?string $locale = null, int $style = NumberFormatter::DECIMAL): NumberFormatter
-messageFormatter(string $pattern, ?string $locale = null): MessageFormatter
-intlDateFormatter(?int $dateType = IntlDateFormatter::MEDIUM, ?int $timeType = IntlDateFormatter::SHORT, ?string $locale = null, ?string $timezone = null, ?string $pattern = null): IntlDateFormatter
-collator(): Collator
+interface AuthInterface {
+    public function isAuthenticated(): bool;
+    public function getUserId(): mixed;
+    public function hasRole(string $role): bool;
+}
 ```
 
-Access PHP intl classes: `$formatter = numberFormatter('nb_NO', NumberFormatter::CURRENCY)`
+## Core Classes
 
-#### Locale Utilities
+### Translatable
+
 ```php
-parseLocale(?string $locale = null): array           # Parse locale into components
-localeLanguage(?string $locale = null): string       # Extract language (nb from nb_NO)
-localeRegion(?string $locale = null): ?string        # Extract region (NO from nb_NO)
-canonicalizeLocale(string $locale): string           # Canonicalize locale format
+class Translatable implements \Stringable {
+    public function getSourceText(): string
+    public function getVars(): array
+    public function getSourceFile(): ?string
+    public function __toString(): string  # Returns translated text
+}
 ```
-Parse locales: `parseLocale('nb_NO')` returns `['language' => 'nb', 'region' => 'NO']`
 
-## Caching
+### Translator
 
-### Cache Access
 ```php
-cache(?string $namespace = null): SimpleCacheInterface
+class Translator {
+    public function setLanguageCode(string $languageCode): void
+    public function trySetLanguageCode(string $languageCode): bool
+    public function getLanguageCode(): string
+}
 ```
-Get cache: `cache('users')->set('user:123', $userData, 3600)`
 
-### Cache Methods (PSR-16 Compatible)
+### Mini (Container)
+
 ```php
-$cache->get(string $key, mixed $default = null): mixed
-$cache->set(string $key, mixed $value, null|int|\DateInterval $ttl = null): bool
-$cache->delete(string $key): bool
-$cache->clear(): bool
-$cache->has(string $key): bool
-$cache->getMultiple(iterable $keys, mixed $default = null): iterable
-$cache->setMultiple(iterable $values, null|int|\DateInterval $ttl = null): bool
-$cache->deleteMultiple(iterable $keys): bool
+class Mini implements ContainerInterface {
+    public static Mini $mini;                  # Global instance
+    public readonly string $root;              # Project root
+    public readonly PathsRegistry $paths;      # Path registries
+    public readonly bool $debug;               # Debug mode
+    public readonly string $locale;            # Default locale
+    public readonly string $timezone;          # Default timezone
+    public readonly string $defaultLanguage;   # Default language
+
+    public function addService(string $id, Lifetime $lifetime, Closure $factory): void
+    public function has(string $id): bool
+    public function get(string $id): mixed
+    public function loadConfig(string $filename, mixed $default = null): mixed
+    public function loadServiceConfig(string $className, mixed $default = null): mixed
+}
 ```
 
-### Cache Implementations
-- **DatabaseCache**: Database-backed cache with TTL support
-- **NamespacedCache**: Wraps any cache with automatic key prefixing
+### Lifetime Enum
 
-## Security
-
-### CSRF Protection
 ```php
-CSRF::field(string $action): string          # Returns <input type="hidden" name="_token" value="...">
-CSRF::check(array $data, string $action): void   # Validates $_POST/_GET data, dies on failure
-CSRF::getToken(string $action): string       # Get raw token for AJAX/custom use
-CSRF::verifyToken(string $token, string $action): bool  # Manual token verification
+enum Lifetime {
+    case Singleton;   # One instance per application
+    case Scoped;      # One instance per request
+    case Transient;   # New instance every time
+}
 ```
-Protect forms: `echo CSRF::field('edit_user')` in form, `CSRF::check($_POST, 'edit_user')` in handler
 
-### Input Validation
+## HTTP Exceptions
+
 ```php
-Invalid::required(mixed $value): ?Translatable
-Invalid::email(string $email): ?Translatable
-Invalid::maxLength(string $value, int $max): ?Translatable
-Invalid::minLength(string $value, int $min): ?Translatable
-Invalid::numeric(mixed $value): ?Translatable
-Invalid::url(string $url): ?Translatable
-```
-Validate input: `if ($error = Invalid::email($email)) $errors[] = $error;`
-
-## HTTP Utilities
-
-### HTTP Functions
-```php
-redirect(string $url): void
-current_url(): string
-flash_set(string $type, string $message): void
-flash_get(): array
-```
-Redirect: `redirect(url('login.php'))`, Flash messages: `flash_set('success', 'Saved!')`
-
-## Utility Classes
-
-### QueryParser
-Parse and evaluate query conditions with advanced operators:
-```php
-$parser = new QueryParser();
-$parser->evaluate("status=active&role[in]=admin,moderator", $data)
-$parser->evaluate("count>10&(premium=true|vip=true)", $data)
-```
-Supports: `=`, `!=`, `<`, `<=`, `>`, `>=`, `[in]`, `[not_in]`, `[like]`, `[not_like]`, boolean logic `&`, `|`, `!`
-
-### StringInterpolator
-Advanced string interpolation with filter support:
-```php
-$interpolator = new StringInterpolator();
-$interpolator->addFilterHandler(fn($value, $filter) => $filter === 'upper' ? strtoupper($value) : null);
-$interpolator->interpolate("Hello {name:upper}!", ['name' => 'world']) // "Hello WORLD!"
+throw new Http\NotFoundException($message);        # 404
+throw new Http\AccessDeniedException($message);    # 401/403
+throw new Http\BadRequestException($message);      # 400
+throw new Http\HttpException($code, $message);     # Custom code
 ```
 
-### ModelTracker
-Track changes to model objects for dirty checking:
-```php
-$tracker = new ModelTracker();
-$tracker->track($model);
-$tracker->isDirty($model, 'name')
-$tracker->getChangedFields($model)
+## Routing
+
+### File-Based Routes
+
+Files in `_routes/` directory map to URLs:
+
+```
+_routes/index.php              → /
+_routes/users.php              → /users
+_routes/api/posts.php          → /api/posts
 ```
 
-### PathsRegistry
-Manage searchable paths for configurations and templates:
-```php
-$registry = new PathsRegistry();
-$registry->add('/path/to/configs');
-$configFile = $registry->findFirst('database.php');
-```
+### Pattern Routes
 
-### InstanceStore
-Generic singleton storage for framework components:
-```php
-$store = new InstanceStore();
-$store->set('key', $instance);
-$instance = $store->get('key');
-```
+In `_config/routes.php`:
 
-## Configuration Files
-
-All configuration files are in `/config/` and use PHP return statements.
-
-### Required Configurations
-
-#### `config.php`
-Main configuration. Must return array with keys:
-- `base_url` - Application base URL
-- `dbfile` - SQLite database path (if using default PDO factory)
-- `app['name']` - Application name
-- `i18n['default_language']` - Default language code
-- `i18n['supported_languages']` - Array of supported language codes
-
-#### `bootstrap.php` (optional)
-Project-specific initialization. Executed after mini framework setup.
-
-#### `routes.php` (optional)
 ```php
 return [
-    "/pattern/{param}" => fn($param) => "/target.php?param=$param"
+    "/users/{id:\d+}" => fn($id) => "_routes/users/detail.php?id={$id}",
+    "/posts/{slug}" => fn($slug) => "_routes/posts/detail.php?slug={$slug}"
 ];
 ```
-Define explicit URL routing patterns. Keys are URL patterns with `{param}` placeholders, values are callables that return target URLs.
 
-### Factory Configurations
+### Directory Routes
 
-#### `pdo.php` (optional)
-Must return a working PDO instance. Defaults to invoking `$config['pdo_factory']` if defined, finally defaults to SQLite at `/database.sqlite3`.
+In `_routes/api/_routes.php`:
 
-#### `number-formatter.php` (optional)
 ```php
-return function(string $locale, int $style): NumberFormatter {
-    $formatter = new NumberFormatter($locale, $style);
-    // Custom configuration
-    return $formatter;
-};
+return [
+    "/api/users" => fn() => "_routes/api/users.php",
+    "/api/posts/{id}" => fn($id) => "_routes/api/posts/detail.php?id={$id}"
+];
 ```
 
-#### `intl-date-formatter.php` (optional)
-```php
-return function(?int $dateType, ?int $timeType, ?string $locale, ?string $timezone, ?string $pattern): IntlDateFormatter {
-    return new IntlDateFormatter($locale, $dateType, $timeType, $timezone, null, $pattern);
-};
-```
+## Configuration
 
-#### `message-formatter.php` (optional)
-```php
-return function(string $pattern, ?string $locale): MessageFormatter {
-    return new MessageFormatter($locale, $pattern);
-};
-```
+### Environment Variables
 
-#### `collator.php` (optional)
-```php
-return function(?string $locale): Collator {
-    $collator = new Collator($locale ?? Locale::getDefault());
-    $collator->setAttribute(Collator::NUMERIC_COLLATION, Collator::ON);
-    return $collator;
-};
-```
-
-## Framework Bootstrap
-
-### Core Bootstrap
-```php
-bootstrap(array $options = [], bool $disable_router = false): void
-router(): void
-getCachedConfig(string $configKey, string $filename): mixed
-```
-Initialize framework: `bootstrap()` sets up locale, config, routing. Access config: `getCachedConfig('database', 'config.php')`
-
-### Routing Functions
-```php
-handleCleanUrlRedirects(): void
-tryFileBasedRouting(string $path, string $projectRoot, string $baseUrl): ?string
-includeTarget(string $target, string $projectRoot): void
-handle404(string $projectRoot): void
-```
-Internal routing functions used by the framework.
-
-### Bootstrap Process
-
-1. Framework loads `mini/functions.php`
-2. Framework detects locale from Accept-Language header
-3. Framework calls `Locale::setDefault()` with detected locale
-4. Framework loads configuration from `config.php`
-5. Framework executes `config/bootstrap.php` if it exists
-6. Application code runs with properly configured environment
-
-## Migration System
-
-### Running Migrations
 ```bash
-php bin/migrate.php
+MINI_ROOT=/path/to/project      # Project root
+MINI_CONFIG_ROOT=/path/config   # Config directory
+MINI_ROUTES_ROOT=/path/routes   # Routes directory
+MINI_LOCALE=nb_NO                # Default locale
+MINI_TIMEZONE=Europe/Oslo        # Default timezone
+MINI_LANG=nb                     # Default language
+DEBUG=1                          # Debug mode
 ```
 
-### Migration Files
-```php
-// migrations/001_create_table.php
-return function($db) {
-    $db->exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
-    echo "Created users table\n";
-};
-```
+### Config Files
 
-Files are executed in filename order. Each file must return a callable that accepts a DB instance.
+All config files in `_config/` directory:
 
-## Command Line Interface
+- `bootstrap.php` - Application initialization
+- `routes.php` - Pattern-based routes
+- `PDO.php` - PDO factory override
+- `Psr/Log/LoggerInterface.php` - Logger override
+- `Psr/SimpleCache/CacheInterface.php` - Cache override
 
-### Composer Scripts
+## CLI Commands
+
 ```bash
-composer exec mini migrations                    # Run all pending migrations
-composer exec mini translations                 # Validate all translation files
+composer exec mini migrations                    # Run pending migrations
+composer exec mini translations                 # Validate translations
 composer exec mini translations add-missing     # Add missing translation strings
-composer exec mini translations add-language es # Create new language files
+composer exec mini translations add-language nb # Create new language
 composer exec mini translations remove-orphans  # Remove unused translations
-composer exec mini serve                        # Start development server (if implemented)
-composer exec mini test                         # Run framework tests (if implemented)
-composer exec mini cache:clear                  # Clear application cache (if implemented)
-composer exec mini routes                       # Display registered routes (if implemented)
 ```
 
-## File Naming Conventions
+## ICU MessageFormat Syntax
 
-### Controllers
-Single PHP files: `login.php`, `project_edit.php`
+### Plurals
 
-### Templates
-PHP files in `tpl/` directory: `tpl/login.php`, `tpl/layout.php`
+```php
+t("{count, plural, =0{no items} =1{one item} other{# items}}", ['count' => 5])
+```
 
-### Tests
-Test files in `mini/tests/`: `Translator.php`, `Fmt.basic.php`
+### Ordinals
+
+```php
+t("{place, selectordinal, one{#st} two{#nd} few{#rd} other{#th}}", ['place' => 21])
+```
+
+### Select
+
+```php
+t("{gender, select, male{He} female{She} other{They}}", ['gender' => 'male'])
+```
+
+### Date/Time/Number Formatting
+
+```php
+t("Today is {date, date, full}", ['date' => new DateTime()])
+t("Price: {amount, number, currency}", ['amount' => 19.99])
+```
+
+## Testing Helpers
+
+```php
+function test(string $description, callable $test): void {
+    try {
+        $test();
+        echo "✓ {$description}\n";
+    } catch (\Exception $e) {
+        echo "✗ {$description}\n";
+        echo "  Error: {$e->getMessage()}\n";
+    }
+}
+
+function assertEqual($expected, $actual, string $message = ''): void {
+    if ($expected !== $actual) {
+        throw new \Exception($message ?: "Expected != Actual");
+    }
+}
+```
+
+## Native PHP Integrations
+
+Mini uses native PHP directly where appropriate:
+
+### Request Data
+
+```php
+$_GET['param']              # Query parameters
+$_POST['field']             # Form data
+$_FILES['upload']           # File uploads
+$_SERVER['REQUEST_METHOD']  # HTTP method
+$_SERVER['HTTP_*']          # Request headers
+$_COOKIE['name']            # Cookies
+```
+
+### Locale & Formatting
+
+```php
+\Locale::setDefault('nb_NO')             # Set locale
+\Locale::getDefault()                     # Get locale
+date_default_timezone_set('Europe/Oslo')  # Set timezone
+date_default_timezone_get()               # Get timezone
+```
+
+### Intl Classes
+
+```php
+$formatter = new \NumberFormatter(\Locale::getDefault(), \NumberFormatter::CURRENCY);
+$formatter = new \IntlDateFormatter(\Locale::getDefault(), ...);
+$formatter = new \MessageFormatter(\Locale::getDefault(), $pattern);
+$collator = new \Collator(\Locale::getDefault());
+```
+
+## Service Override Pattern
+
+Override framework services in `app/bootstrap.php` (autoloaded via composer):
+
+```php
+// composer.json
+{
+    "autoload": {
+        "files": ["app/bootstrap.php"]
+    }
+}
+```
+
+```php
+// app/bootstrap.php
+use mini\Mini;
+use mini\Lifetime;
+use Psr\Log\LoggerInterface;
+
+Mini::$mini->addService(LoggerInterface::class, Lifetime::Singleton, function() {
+    return new \Monolog\Logger('app');
+});
+```
+
+See `PATTERNS.md` for detailed examples.
+
+## Performance Tips
+
+1. **Use direct SQL for simple queries** - Skip the query builder when not needed
+2. **Cache expensive operations** - Use `cache()` for computed results
+3. **Lazy initialization** - Services only load when used
+4. **File-based routing** - No route compilation needed
+5. **Request-scoped caching** - Database, cache, logger instances reused within request
+
+## Common Patterns
+
+### Form Handling
+
+```php
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $username = $_POST['username'] ?? '';
+    $email = $_POST['email'] ?? '';
+
+    // Validate, save, redirect
+    db()->exec('INSERT INTO users (username, email) VALUES (?, ?)', [$username, $email]);
+    redirect(url('users'));
+}
+
+echo render('templates/form.php', ['title' => t('Create User')]);
+```
+
+### API Endpoints
+
+```php
+header('Content-Type: application/json');
+
+try {
+    $users = db()->query('SELECT * FROM users')->fetchAll();
+    echo json_encode($users);
+} catch (\Exception $e) {
+    log()->error('Failed to fetch users', ['exception' => $e]);
+    http_response_code(500);
+    echo json_encode(['error' => 'Internal server error']);
+}
+```
+
+### Protected Routes
+
+```php
+require_login();
+require_role('admin');
+
+$users = db()->query('SELECT * FROM users')->fetchAll();
+echo render('templates/admin/users.php', ['users' => $users]);
+```
+
+## See Also
+
+- **README.md** - Getting started and philosophy
+- **PATTERNS.md** - Advanced patterns (service overrides, middleware, response processing)
+- **CLAUDE.md** - Development guide for Claude Code

@@ -11,6 +11,9 @@ use mini\Services\SimpleCache;
 echo "Testing SimpleCache Service Class\n";
 echo str_repeat('=', 70) . "\n\n";
 
+// Bootstrap framework (required for some service access)
+\mini\bootstrap();
+
 // Test 1: Driver detection and info
 echo "Test 1: Driver detection\n";
 $driverInfo = SimpleCache::getDriverInfo();

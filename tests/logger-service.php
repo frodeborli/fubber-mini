@@ -11,6 +11,9 @@ use mini\Logger\LoggerService;
 echo "Testing Logger Service Class\n";
 echo str_repeat('=', 70) . "\n\n";
 
+// Bootstrap framework (required for Scoped services)
+\mini\bootstrap();
+
 // Test 1: Container integration
 echo "Test 1: Container integration\n";
 try {
@@ -26,12 +29,12 @@ try {
         echo "✗ Logger is NOT singleton (different instances)\n";
     }
 
-    // Test via logger() function
-    $logger3 = \mini\logger();
+    // Test via log() function
+    $logger3 = \mini\log();
     if ($logger === $logger3) {
-        echo "✓ logger() function returns same instance\n";
+        echo "✓ log() function returns same instance\n";
     } else {
-        echo "✗ logger() function returns different instance\n";
+        echo "✗ log() function returns different instance\n";
     }
 } catch (\Exception $e) {
     echo "✗ Error: " . $e->getMessage() . "\n";
@@ -41,7 +44,7 @@ echo "\n";
 // Test 2: Basic logging (will go to error_log)
 echo "Test 2: Basic PSR-3 logging\n";
 try {
-    $logger = \mini\logger();
+    $logger = \mini\log();
 
     // Capture error_log output
     $errorLogFile = sys_get_temp_dir() . '/mini-logger-test.log';

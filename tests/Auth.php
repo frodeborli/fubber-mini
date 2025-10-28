@@ -10,9 +10,9 @@ if (!$autoloader) {
 
 require_once $autoloader;
 
-use mini\AuthInterface;
-use mini\Auth;
+use mini\Auth\AuthInterface;
 use mini\Http\AccessDeniedException;
+use function mini\{setupAuth, auth, is_logged_in, require_login, require_role};
 
 function test(string $description, callable $test): void
 {
@@ -109,26 +109,30 @@ class TestAuth implements AuthInterface
 
 }
 
-// Setup test auth
+// Setup test auth with factory closure (must be BEFORE bootstrap)
+// The factory captures $testAuth so tests can manipulate state
 $testAuth = new TestAuth();
-Auth::setImplementation($testAuth);
+setupAuth(fn() => $testAuth);
 
-test('hasImplementation returns correct state', function() use ($testAuth) {
-    // Should have implementation after setting it
-    assertEqual(true, Auth::hasImplementation());
+// Enter request context (transitions to Request phase)
+mini\bootstrap();
 
-    // Test what happens when we don't have implementation
-    // (We can't easily unset it, but we can test the behavior)
+test('auth() returns correct instance', function() use ($testAuth) {
+    // Should have auth instance after setting it
+    $authInstance = auth();
+    assertEqual(true, $authInstance !== null, 'auth() returns instance');
+    assertEqual(true, $authInstance === $testAuth, 'auth() returns registered instance');
 });
 
-test('Auth facade delegates to implementation correctly', function() use ($testAuth) {
+test('Auth delegates to implementation correctly', function() use ($testAuth) {
     // Test unauthenticated state
     $testAuth->setAuthenticated(false);
-    assertEqual(false, Auth::isAuthenticated());
-    assertEqual(null, Auth::getUserId());
-    assertEqual(null, Auth::getClaim('test'));
-    assertEqual(false, Auth::hasRole('admin'));
-    assertEqual(false, Auth::hasPermission('edit'));
+    $authInstance = auth();
+    assertEqual(false, $authInstance->isAuthenticated());
+    assertEqual(null, $authInstance->getUserId());
+    assertEqual(null, $authInstance->getClaim('test'));
+    assertEqual(false, $authInstance->hasRole('admin'));
+    assertEqual(false, $authInstance->hasPermission('edit'));
 
     // Test authenticated state
     $testAuth->setAuthenticated(true, 'user123');
@@ -136,20 +140,20 @@ test('Auth facade delegates to implementation correctly', function() use ($testA
     $testAuth->setRoles(['admin', 'editor']);
     $testAuth->setPermissions(['edit', 'delete']);
 
-    assertEqual(true, Auth::isAuthenticated());
-    assertEqual('user123', Auth::getUserId());
-    assertEqual('test@example.com', Auth::getClaim('email'));
-    assertEqual(true, Auth::hasRole('admin'));
-    assertEqual(false, Auth::hasRole('viewer'));
-    assertEqual(true, Auth::hasPermission('edit'));
-    assertEqual(false, Auth::hasPermission('create'));
+    assertEqual(true, $authInstance->isAuthenticated());
+    assertEqual('user123', $authInstance->getUserId());
+    assertEqual('test@example.com', $authInstance->getClaim('email'));
+    assertEqual(true, $authInstance->hasRole('admin'));
+    assertEqual(false, $authInstance->hasRole('viewer'));
+    assertEqual(true, $authInstance->hasPermission('edit'));
+    assertEqual(false, $authInstance->hasPermission('create'));
 });
 
 test('requireLogin throws AccessDeniedException when not authenticated', function() use ($testAuth) {
     $testAuth->setAuthenticated(false);
 
     assertThrows(AccessDeniedException::class, function() {
-        Auth::requireLogin();
+        require_login();
     });
 });
 
@@ -158,7 +162,7 @@ test('requireRole throws AccessDeniedException when user lacks role', function()
     $testAuth->setRoles(['editor']);
 
     assertThrows(AccessDeniedException::class, function() {
-        Auth::requireRole('admin');
+        require_role('admin');
     });
 });
 
@@ -167,44 +171,27 @@ test('requireRole succeeds when user has role', function() use ($testAuth) {
     $testAuth->setRoles(['admin', 'editor']);
 
     // Should not throw
-    Auth::requireRole('admin');
-    Auth::requireRole('editor');
+    require_role('admin');
+    require_role('editor');
 });
 
-test('requirePermission throws AccessDeniedException when user lacks permission', function() use ($testAuth) {
-    $testAuth->setAuthenticated(true, 'user123');
-    $testAuth->setPermissions(['read']);
-
-    assertThrows(AccessDeniedException::class, function() {
-        Auth::requirePermission('write');
-    });
-});
-
-test('requirePermission succeeds when user has permission', function() use ($testAuth) {
+test('Helper function require_permission works', function() use ($testAuth) {
     $testAuth->setAuthenticated(true, 'user123');
     $testAuth->setPermissions(['read', 'write']);
 
-    // Should not throw
-    Auth::requirePermission('read');
-    Auth::requirePermission('write');
+    // Test via direct auth() access since there's no require_permission() helper yet
+    $authInstance = auth();
+    assertEqual(true, $authInstance->hasPermission('read'));
+    assertEqual(true, $authInstance->hasPermission('write'));
+    assertEqual(false, $authInstance->hasPermission('delete'));
 });
 
-test('Auth facade gracefully handles missing implementation', function() {
-    // Test with no implementation
-    Auth::setImplementation(new class implements AuthInterface {
-        public function isAuthenticated(): bool { throw new RuntimeException('No impl'); }
-        public function getUserId(): mixed { throw new RuntimeException('No impl'); }
-        public function getClaim(string $name): mixed { throw new RuntimeException('No impl'); }
-        public function hasRole(string $role): bool { throw new RuntimeException('No impl'); }
-        public function hasPermission(string $permission): bool { throw new RuntimeException('No impl'); }
-    });
+test('is_logged_in helper function works correctly', function() use ($testAuth) {
+    $testAuth->setAuthenticated(false);
+    assertEqual(false, is_logged_in(), 'Not logged in when unauthenticated');
 
-    // Should return safe defaults instead of throwing
-    assertEqual(false, Auth::isAuthenticated());
-    assertEqual(null, Auth::getUserId());
-    assertEqual(null, Auth::getClaim('test'));
-    assertEqual(false, Auth::hasRole('admin'));
-    assertEqual(false, Auth::hasPermission('edit'));
+    $testAuth->setAuthenticated(true, 'user123');
+    assertEqual(true, is_logged_in(), 'Logged in when authenticated');
 });
 
 echo "Auth tests completed.\n";

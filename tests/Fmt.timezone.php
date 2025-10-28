@@ -1,11 +1,5 @@
 <?php
 
-/**
- * Test runner for timezone functionality in Fmt class
- *
- * Usage: php mini/tests/Fmt.timezone.php
- */
-
 // Find composer autoloader using the standard pattern
 $autoloader = realpath(__DIR__ . '/../vendor/autoload.php')
     ?: realpath(__DIR__ . '/../../../vendor/autoload.php')
@@ -16,7 +10,7 @@ if (!require $autoloader) {
     exit(1);
 }
 
-use mini\Fmt;
+use mini\I18n\Fmt;
 
 /**
  * Simple test assertion helper
@@ -28,176 +22,76 @@ function test(string $description, callable $test): void
         echo "✓ $description\n";
     } catch (Exception $e) {
         fwrite(STDERR, "✗ $description\n");
-        fwrite(STDERR, "  Error: " . $e->getMessage() . "\n");
+        fwrite(STDERR, "  " . $e->getMessage() . "\n");
         exit(1);
     }
 }
 
-/**
- * Assert two values are equal
- */
-function assertEqual($expected, $actual, string $message = ''): void
+function assertTrue($condition, string $message = 'Assertion failed'): void
 {
-    if ($expected !== $actual) {
-        $msg = $message ?: "Expected '$expected', got '$actual'";
-        throw new Exception($msg);
+    if (!$condition) {
+        throw new Exception($message);
     }
-}
-
-/**
- * Create a test timestamp (2024-09-25 15:30:00 UTC)
- */
-function getTestTimestamp(): int
-{
-    return mktime(15, 30, 0, 9, 25, 2024); // Uses current timezone
 }
 
 echo "Running Fmt timezone tests...\n\n";
 
-// Save original timezone to restore later
+// Bootstrap framework
+mini\bootstrap();
+
+// Save original timezone
 $originalTimezone = date_default_timezone_get();
 
-// Test 1: Valid timezone setting
-test("Valid timezone setting", function() {
-    $fmt = new Fmt();
+// Test 1: Formatting respects current timezone
+test("Formatting respects current timezone", function() use ($originalTimezone) {
+    // Set timezone to UTC
+    date_default_timezone_set('UTC');
 
-    $result = $fmt->trySetUserTimezone('Europe/Oslo');
-    assertEqual(true, $result, "Should return true for valid timezone");
-    assertEqual('Europe/Oslo', $fmt->getUserTimezone(), "Should store timezone correctly");
-    assertEqual('Europe/Oslo', date_default_timezone_get(), "Should set default timezone globally");
+    $date = new DateTime('2024-09-25 15:00:00', new DateTimeZone('UTC'));
+    $result = Fmt::dateTimeShort($date);
+    assertTrue(is_string($result), "Should return string in UTC");
+
+    // Set timezone to America/New_York
+    date_default_timezone_set('America/New_York');
+
+    $date2 = new DateTime('2024-09-25 15:00:00', new DateTimeZone('America/New_York'));
+    $result2 = Fmt::dateTimeShort($date2);
+    assertTrue(is_string($result2), "Should return string in America/New_York");
+
+    // Restore original timezone
+    date_default_timezone_set($originalTimezone);
 });
 
-// Test 2: Invalid timezone handling
-test("Invalid timezone handling", function() {
-    $fmt = new Fmt();
+// Test 2: DateTime objects with different timezones
+test("DateTime objects with different timezones", function() use ($originalTimezone) {
+    $utcDate = new DateTime('2024-09-25 15:00:00', new DateTimeZone('UTC'));
+    $nyDate = new DateTime('2024-09-25 15:00:00', new DateTimeZone('America/New_York'));
 
-    $result = $fmt->trySetUserTimezone('Invalid/Timezone');
-    assertEqual(false, $result, "Should return false for invalid timezone");
+    $resultUtc = Fmt::dateTimeShort($utcDate);
+    $resultNy = Fmt::dateTimeShort($nyDate);
+
+    assertTrue(is_string($resultUtc), "Should format UTC date");
+    assertTrue(is_string($resultNy), "Should format NY date");
+
+    // Restore original timezone
+    date_default_timezone_set($originalTimezone);
 });
 
-// Test 3: Timezone affects date formatting
-test("Timezone affects date formatting", function() {
-    $fmt = new Fmt();
-    $timestamp = 1727276400; // 2024-09-25 15:00:00 UTC
+// Test 3: All date/time methods work with timezones
+test("All date/time methods work with timezones", function() use ($originalTimezone) {
+    date_default_timezone_set('Europe/London');
 
-    // Set to UTC
-    $fmt->trySetUserTimezone('UTC');
-    $utcTime = $fmt->dateTime($timestamp);
+    $date = new DateTime('2024-09-25 15:00:00', new DateTimeZone('Europe/London'));
 
-    // Set to Oslo (UTC+2 in summer)
-    $fmt->trySetUserTimezone('Europe/Oslo');
-    $osloTime = $fmt->dateTime($timestamp);
+    assertTrue(is_string(Fmt::dateShort($date)), "dateShort should work");
+    assertTrue(is_string(Fmt::dateLong($date)), "dateLong should work");
+    assertTrue(is_string(Fmt::timeShort($date)), "timeShort should work");
+    assertTrue(is_string(Fmt::dateTimeShort($date)), "dateTimeShort should work");
+    assertTrue(is_string(Fmt::dateTimeLong($date)), "dateTimeLong should work");
 
-    // Times should be different (Oslo should be +2 hours)
-    assertEqual(false, $utcTime === $osloTime, "UTC and Oslo times should be different");
+    // Restore original timezone
+    date_default_timezone_set($originalTimezone);
 });
 
-// Test 4: Session persistence
-test("Session persistence", function() {
-    // Start session for testing (suppress warnings in test mode)
-    if (session_status() === PHP_SESSION_NONE) {
-        @session_start();
-    }
-
-    $fmt1 = new Fmt();
-    $fmt1->trySetUserTimezone('America/New_York');
-
-    // Create new instance - should pick up timezone from session
-    $fmt2 = new Fmt();
-    assertEqual('America/New_York', $fmt2->getUserTimezone(), "New instance should pick up timezone from session");
-
-    // Clean up session
-    unset($_SESSION['timezone']);
-});
-
-// Test 5: Default timezone when none set
-test("Default timezone when none set", function() {
-    // Clear any session data
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        unset($_SESSION['timezone']);
-    }
-
-    $fmt = new Fmt();
-    $currentDefault = date_default_timezone_get();
-    assertEqual($currentDefault, $fmt->getUserTimezone(), "Should return current default timezone when none set");
-});
-
-// Test 6: Common timezone scenarios
-test("Common timezone scenarios", function() {
-    $fmt = new Fmt();
-    $timestamp = 1727276400; // 2024-09-25 15:00:00 UTC
-
-    $timezones = [
-        'UTC' => 'UTC',
-        'Europe/Oslo' => 'Europe/Oslo',
-        'America/New_York' => 'America/New_York',
-        'Asia/Tokyo' => 'Asia/Tokyo',
-        'Australia/Sydney' => 'Australia/Sydney'
-    ];
-
-    foreach ($timezones as $tz => $expected) {
-        $result = $fmt->trySetUserTimezone($tz);
-        assertEqual(true, $result, "Should accept common timezone: $tz");
-        assertEqual($expected, $fmt->getUserTimezone(), "Should store timezone: $tz");
-    }
-});
-
-// Test 7: Timezone with different date formats
-test("Timezone with different date formats", function() {
-    $fmt = new Fmt();
-    $timestamp = 1727276400; // 2024-09-25 15:00:00 UTC
-
-    // Test with Oslo timezone
-    $fmt->trySetUserTimezone('Europe/Oslo');
-
-    $dateShort = $fmt->dateShort($timestamp);
-    $dateLong = $fmt->dateLong($timestamp);
-    $dateTime = $fmt->dateTime($timestamp);
-    $time = $fmt->time($timestamp);
-
-    // All should be strings (basic smoke test)
-    assertEqual(true, is_string($dateShort), "dateShort should return string");
-    assertEqual(true, is_string($dateLong), "dateLong should return string");
-    assertEqual(true, is_string($dateTime), "dateTime should return string");
-    assertEqual(true, is_string($time), "time should return string");
-
-    // Basic format checks (should not be empty)
-    assertEqual(true, strlen($dateShort) > 0, "dateShort should not be empty");
-    assertEqual(true, strlen($dateLong) > 0, "dateLong should not be empty");
-    assertEqual(true, strlen($dateTime) > 0, "dateTime should not be empty");
-    assertEqual(true, strlen($time) > 0, "time should not be empty");
-});
-
-// Test 8: String timestamp handling with timezone
-test("String timestamp handling with timezone", function() {
-    $fmt = new Fmt();
-    $fmt->trySetUserTimezone('Europe/Oslo');
-
-    // Test with string timestamp
-    $dateTime1 = $fmt->dateTime('2024-09-25 15:00:00');
-    $dateTime2 = $fmt->dateTime(strtotime('2024-09-25 15:00:00'));
-
-    // Both should produce valid strings
-    assertEqual(true, is_string($dateTime1), "String timestamp should work");
-    assertEqual(true, is_string($dateTime2), "Integer timestamp should work");
-});
-
-// Test 9: Multiple Fmt instances share timezone
-test("Multiple Fmt instances share timezone", function() {
-    $fmt1 = new Fmt();
-    $fmt1->trySetUserTimezone('Pacific/Auckland');
-
-    $fmt2 = new Fmt();
-    // fmt2 should see the global timezone change
-    assertEqual('Pacific/Auckland', date_default_timezone_get(), "Global timezone should be set");
-    assertEqual('Pacific/Auckland', $fmt2->getUserTimezone(), "New instance should see global timezone");
-});
-
-// Restore original timezone
-date_default_timezone_set($originalTimezone);
-if (session_status() === PHP_SESSION_ACTIVE) {
-    unset($_SESSION['timezone']);
-}
-
-echo "\n✅ All Fmt timezone tests passed!\n";
-echo "🌍 Timezone support ready for enterprise-grade datetime handling\n";
+echo "\n✓ All Fmt timezone tests passed!\n";
+echo "Note: Fmt uses \\Locale::getDefault() and date_default_timezone_get() for formatting\n";

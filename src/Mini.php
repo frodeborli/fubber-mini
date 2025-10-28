@@ -59,6 +59,12 @@ final class Mini implements ContainerInterface {
     public readonly bool $debug;
 
     /**
+     * Lifecycle hooks
+     */
+    public readonly Hooks\Event $onRequestReceived; // Fires at start of bootstrap() (each request)
+    public readonly Hooks\Event $onAfterBootstrap;  // Fires at end of bootstrap() (each request)
+
+    /**
      * Caches instances using a scope object; each request will
      * have a scope object which is garbage collected when the
      * request ends.
@@ -66,6 +72,16 @@ final class Mini implements ContainerInterface {
      * @var WeakMap<object, object>
      */
     private readonly WeakMap $instanceCache;
+
+    /**
+     * Current application lifecycle phase
+     *
+     * Bootstrap: Services can be registered, Scoped services cannot be accessed
+     * Request: Services cannot be registered, Scoped services can be accessed
+     *
+     * @var Phase
+     */
+    private Phase $phase = Phase::Bootstrap;
 
     /**
      * Service definitions (factory closures + lifetime)
@@ -77,28 +93,65 @@ final class Mini implements ContainerInterface {
     public function __construct() {
         self::$mini = $this;
         $this->instanceCache = new WeakMap();
+
+        // Initialize lifecycle hooks
+        $this->onRequestReceived = new Hooks\Event('on-request-received');
+        $this->onAfterBootstrap = new Hooks\Event('on-after-bootstrap');
+
         $this->bootstrap();
+    }
+
+    /**
+     * Transition to Request phase
+     *
+     * Called by mini\bootstrap() to transition from Bootstrap → Request phase.
+     * After this:
+     * - Services can no longer be registered (container is locked)
+     * - Scoped services can be accessed (request context available)
+     */
+    public function enterRequestContext(): void {
+        $this->phase = Phase::Request;
+    }
+
+    /**
+     * Transition back to Bootstrap phase
+     *
+     * Called after request completes in long-running servers.
+     * Use this to reset for the next request.
+     */
+    public function exitRequestContext(): void {
+        $this->phase = Phase::Bootstrap;
     }
 
     /**
      * An object that uniquely identifies the current request scope.
      * This function is intended to be used for caching in WeakMap, instances
      * that are request specific and should survive for the duration
-     * of the request only. 
+     * of the request only.
      *
-     * {@todo} This function must support customization of some form; for
-     * example if a framework is able to have nested fibers that all belong
-     * to the same request scope. For now, this is enough.
-     * 
-     * @return object 
+     * Returns:
+     * - Current Fiber if in fiber context (Swerve, ReactPHP, RoadRunner)
+     * - $this if in traditional PHP-FPM request (after bootstrap() called)
+     *
+     * @return object
+     * @throws \LogicException If called in Bootstrap phase (before mini\bootstrap())
      */
     public function getRequestScope(): object {
         $fiber = Fiber::getCurrent();
         if ($fiber !== null) {
             return $fiber;
-        } else {
-            return $this;
         }
+
+        // Not in fiber - check if we're in Request phase
+        if ($this->phase !== Phase::Request) {
+            throw new \LogicException(
+                'Cannot access Scoped services in Bootstrap phase. ' .
+                'Scoped services (db(), auth(), etc.) can only be accessed after calling mini\bootstrap(). ' .
+                'Current phase: ' . $this->phase->name
+            );
+        }
+
+        return $this;
     }
 
     /**
@@ -182,14 +235,27 @@ final class Mini implements ContainerInterface {
     /**
      * Register a service with the container
      *
+     * Can only be called in Bootstrap phase (before mini\bootstrap()).
+     * The container is locked once request handling begins.
+     *
      * @param string $id Service identifier (typically class name)
      * @param Lifetime $lifetime Service lifetime (Singleton, Scoped, or Transient)
      * @param Closure $factory Factory function that creates the service instance
+     * @throws \LogicException If called in Request phase or if service already registered
      */
     public function addService(string $id, Lifetime $lifetime, Closure $factory): void {
+        if ($this->phase !== Phase::Bootstrap) {
+            throw new \LogicException(
+                "Cannot register services in Request phase. " .
+                "Services must be registered during application bootstrap (before calling mini\bootstrap()). " .
+                "Attempted to register: $id"
+            );
+        }
+
         if (isset($this->services[$id])) {
             throw new \LogicException("Service already registered: $id");
         }
+
         $this->services[$id] = ['factory' => $factory, 'lifetime' => $lifetime];
     }
 
@@ -325,18 +391,28 @@ final class Mini implements ContainerInterface {
 
     /**
      * Register core framework services in the container
+     *
+     * Only registers services that haven't already been registered.
+     * This allows applications to override framework defaults by registering
+     * their own services in app/bootstrap.php (via composer autoload files).
      */
     private function registerCoreServices(): void
     {
-        // Register PDO service - delegated to service class
-        $this->addService(\PDO::class, Lifetime::Scoped, fn() => Services\PDO::factory());
+        // Register PDO service if not already registered
+        if (!$this->has(\PDO::class)) {
+            $this->addService(\PDO::class, Lifetime::Scoped, fn() => Services\PDO::factory());
+        }
 
-        // Register DatabaseInterface - delegated to service class
-        $this->addService(Contracts\DatabaseInterface::class, Lifetime::Scoped, fn() => Services\DatabaseInterface::factory());
+        // Register DatabaseInterface if not already registered
+        if (!$this->has(Contracts\DatabaseInterface::class)) {
+            $this->addService(Contracts\DatabaseInterface::class, Lifetime::Scoped, fn() => Services\DatabaseInterface::factory());
+        }
 
-        // Register SimpleCache service - delegated to service class
-        $this->addService(\Psr\SimpleCache\CacheInterface::class, Lifetime::Singleton, fn() => Services\SimpleCache::factory());
+        // Register SimpleCache service if not already registered
+        if (!$this->has(\Psr\SimpleCache\CacheInterface::class)) {
+            $this->addService(\Psr\SimpleCache\CacheInterface::class, Lifetime::Singleton, fn() => Services\SimpleCache::factory());
+        }
 
-        // Note: Logger service is registered in src/Logger/functions.php
+        // Note: Logger, I18n, Auth, and Tables services are registered in their respective functions.php files
     }
 }

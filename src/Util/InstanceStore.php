@@ -107,11 +107,38 @@ class InstanceStore implements CollectionInterface
 
     /**
      * Get instance by key (WeakMap-style method)
+     * @param string $key
      * @return T|null
      */
     public function get(mixed $key): mixed
     {
         return $this->instances[$key] ?? null;
+    }
+
+    /**
+     * Get instance by member access
+     * 
+     * @param string $key
+     * @return T
+     */
+    public function __get(mixed $key): mixed
+    {
+        if (!isset($this->instances[$key])) {
+            throw new \RuntimeException("Key '$key' does not exist in instance store");
+        }
+        return $this->instances[$key];
+    }
+
+    /**
+     * Set instance by member access
+     * 
+     * @param string $key 
+     * @param T $value 
+     * @throws InvalidArgumentException 
+     */
+    public function __set(mixed $key, mixed $value): void
+    {
+        $this->set($key, $value);
     }
 
     /**

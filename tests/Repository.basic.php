@@ -32,10 +32,10 @@ function assertEqual($expected, $actual, string $message = ''): void
     }
 }
 
-use mini\Repository\AbstractDatabaseRepository;
-use mini\Repository\CsvRepository;
+use mini\Tables\AbstractDatabaseRepository;
+use mini\Tables\CsvRepository;
 use mini\Util\InstanceStore;
-use mini\Repository\RepositoryInterface;
+use mini\Tables\RepositoryInterface;
 use mini\DB;
 
 // Test model classes

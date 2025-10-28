@@ -34,6 +34,9 @@ function assertEqual($expected, $actual, string $message = ''): void
 
 use mini\Database\PdoDatabase;
 
+// Bootstrap framework (required for Scoped services)
+mini\bootstrap();
+
 // Create test database
 $pdo = new PDO('sqlite::memory:');
 $db = new PdoDatabase($pdo);

@@ -1,0 +1,41 @@
+{
+    "name": "fubber/mini-logger",
+    "description": "PSR-3 logging system for mini framework - provides standardized logging with built-in error_log support and configurable custom loggers",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "mini",
+        "logger",
+        "logging",
+        "psr-3",
+        "error-log",
+        "monolog"
+    ],
+    "homepage": "https://github.com/frodeborli/fubber-mini",
+    "support": {
+        "issues": "https://github.com/frodeborli/fubber-mini/issues",
+        "source": "https://github.com/frodeborli/fubber-mini"
+    },
+    "authors": [
+        {
+            "name": "Frode Borli",
+            "email": "frode@borli.net"
+        }
+    ],
+    "require": {
+        "php": ">=7.4",
+        "fubber/mini": "^1.0",
+        "psr/log": "^1.0 || ^2.0 || ^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "mini\\Logger\\": "./"
+        },
+        "files": [
+            "functions.php"
+        ]
+    },
+    "provide": {
+        "psr/log-implementation": "1.0|2.0|3.0"
+    }
+}

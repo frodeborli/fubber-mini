@@ -23,8 +23,8 @@ use mini\Attributes\IntegerColumn;
 use mini\Attributes\BooleanColumn;
 use mini\Attributes\DateTimeColumn;
 use mini\Attributes\JsonColumn;
-use mini\Repository\AttributeDatabaseRepository;
-use mini\CodecStrategies\SQLiteCodecStrategy;
+use mini\Tables\AttributeDatabaseRepository;
+use mini\Tables\CodecStrategies\SQLiteCodecStrategy;
 use mini\Database\PdoDatabase;
 
 function test(string $description, callable $test): void
@@ -75,6 +75,9 @@ class AttributeUser
 }
 
 echo "Testing attribute-driven repository system...\n\n";
+
+// Bootstrap framework (required for Scoped services)
+mini\bootstrap();
 
 // Create in-memory SQLite database for testing
 $pdo = new PDO('sqlite::memory:');

@@ -11,6 +11,13 @@ $command = $argv[1] ?? null;
 $args = array_slice($argv, 2);
 
 $availableCommands = [
+    'benchmark' => [
+        'description' => 'Benchmark framework performance',
+        'script' => 'mini-benchmark.php',
+        'examples' => [
+            'benchmark' => 'Run HTTP benchmark'
+        ]
+    ],
     'translations' => [
         'description' => 'Manage translation files',
         'script' => 'mini-translations.php',

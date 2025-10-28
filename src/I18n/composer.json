@@ -1,0 +1,44 @@
+{
+    "name": "fubber/mini-i18n",
+    "description": "Internationalization system for mini framework - provides translation, localization, and formatting with ICU MessageFormatter support",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "mini",
+        "i18n",
+        "internationalization",
+        "translation",
+        "localization",
+        "l10n",
+        "icu",
+        "messageformatter",
+        "intl",
+        "formatting"
+    ],
+    "homepage": "https://github.com/frodeborli/fubber-mini",
+    "support": {
+        "issues": "https://github.com/frodeborli/fubber-mini/issues",
+        "source": "https://github.com/frodeborli/fubber-mini"
+    },
+    "authors": [
+        {
+            "name": "Frode Borli",
+            "email": "frode@borli.net"
+        }
+    ],
+    "require": {
+        "php": ">=7.4",
+        "fubber/mini": "^1.0",
+        "ext-intl": "*",
+        "symfony/polyfill-intl-icu": "^1.25",
+        "symfony/polyfill-intl-messageformatter": "^1.25"
+    },
+    "autoload": {
+        "psr-4": {
+            "mini\\I18n\\": "./"
+        },
+        "files": [
+            "functions.php"
+        ]
+    }
+}

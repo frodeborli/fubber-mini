@@ -1,387 +1,25 @@
 # Mini Framework
 
-A deliberately minimal PHP micro-framework for experienced developers who want powerful features without architectural complexity.
+A PHP framework that stays close to native PHP. Complete with routing, database, i18n, caching, and migrations—without wrapping everything in layers of abstraction.
 
-## Philosophy
+**Performance:** ~0.2-0.5ms per request on PHP's built-in server
 
-**Get out of the way.** Mini provides enterprise-grade i18n, caching, database abstraction, and formatting—then disappears. No dependency injection containers, no service discovery, no magic. Just the tools you need to build applications quickly and reliably.
+## Why Mini?
 
-**Fault isolation over global coupling.** Each endpoint is an independent PHP file. If `/api/analytics.php` has a bug, the rest of your application keeps running. This isn't just convenient—it's operational resilience.
+We made a conscious decision to stay close to native PHP rather than building abstractions for the sake of abstractions. This means:
 
-**Convention over configuration.** Sensible defaults, minimal setup, maximum productivity.
+- **Use `$_POST` and `$_GET` directly** - No request object wrappers. PHP already handles request scope correctly.
+- **Use `\Locale::setDefault()` directly** - No framework wrappers for what PHP does well.
+- **Use `new \Collator()` directly** - Native PHP intl classes work fine.
+- **Use PDO with light helpers** - Direct SQL when you need it, query builders when convenient.
 
-## Core Functions Reference
+This makes Mini fundamentally different from Laravel, Slim, or Symfony:
+- **Runs much faster** - No overhead from unnecessary abstractions
+- **Scales to thousands of routes** - File-based routing means no route compilation
+- **Easy to add features** - Use Symfony packages or any PSR-compatible library
+- **Shallow** - We don't wrap your code in dozens of functions and magic
 
-Mini provides a focused set of core functions designed for long-term stability. These functions form the public API and won't be removed or significantly changed:
-
-**Essential Functions:**
-- `mini\bootstrap()` - Initialize the framework
-- `mini\t(string $text, array $vars = []): Translatable` - Translate text with variable interpolation
-- `mini\h(string $str): string` - HTML escape for XSS protection
-- `mini\render(string $template, array $vars = []): string` - Render templates with variable extraction
-- `mini\url(string $path = '', array $query = []): string` - Generate URLs with base_url handling
-
-**Database Access - `mini\db(): DatabaseInterface`**
-
-Returns a request-scoped database instance with these methods:
-- `query(string $sql, array $params = []): array` - Execute query, return all rows
-- `queryOne(string $sql, array $params = []): ?array` - Return first row or null
-- `queryField(string $sql, array $params = []): mixed` - Return first column of first row
-- `queryColumn(string $sql, array $params = []): array` - Return first column as array
-- `exec(string $sql, array $params = []): bool` - Execute INSERT/UPDATE/DELETE
-- `lastInsertId(): ?string` - Get last inserted row ID
-- `tableExists(string $tableName): bool` - Check if table exists
-- `transaction(\Closure $task): mixed` - Execute closure within transaction
-
-**Cache Access - `mini\cache(?string $namespace = null): CacheInterface`**
-
-Returns PSR-16 SimpleCache implementation:
-- `get(string $key, mixed $default = null): mixed` - Retrieve value from cache
-- `set(string $key, mixed $value, null|int $ttl = null): bool` - Store value with optional TTL
-- `delete(string $key): bool` - Remove value from cache
-- `clear(): bool` - Clear all values in namespace
-- `has(string $key): bool` - Check if key exists
-- `getMultiple(iterable $keys, mixed $default = null): iterable` - Get multiple values
-- `setMultiple(iterable $values, null|int $ttl = null): bool` - Set multiple values
-- `deleteMultiple(iterable $keys): bool` - Delete multiple values
-
-**Other Data Access:**
-- `mini\table(string $name): Repository` - Repository access for typed queries
-
-**Formatting - `mini\fmt(): Fmt`**
-
-Returns formatting instance with static methods:
-- `dateShort(\DateTimeInterface $date): string` - Short date format
-- `dateLong(\DateTimeInterface $date): string` - Long date format
-- `timeShort(\DateTimeInterface $time): string` - Short time format
-- `dateTimeShort(\DateTimeInterface $dt): string` - Short datetime format
-- `dateTimeLong(\DateTimeInterface $dt): string` - Long datetime format
-- `currency(float $amount, string $currencyCode): string` - Format currency
-- `percent(float $ratio, int $decimals = 0): string` - Format percentage
-- `number(float|int $number, int $decimals = 0): string` - Format number
-- `fileSize(int $bytes): string` - Human-readable file size
-
-**Other Formatting:**
-- `mini\collator(): \Collator` - String collation for locale-aware sorting
-
-**Authentication:**
-- `mini\is_logged_in(): bool` - Check authentication status
-- `mini\require_login(): void` - Enforce login requirement (redirects if not logged in)
-- `mini\require_role(string $role): void` - Enforce role-based access (403 if denied)
-- `mini\auth(): ?\mini\Auth` - Access authentication system
-
-**Session:**
-- `mini\session(): bool` - Safe session initialization
-
-**Routing:**
-- `mini\router(): void` - Handle dynamic routing (called by router.php)
-
-## Core Features
-
-### Internationalization (i18n)
-
-Enterprise-grade translation system with both **standard ICU MessageFormat** and **advanced conditional logic** for business rules:
-
-```php
-// Basic usage
-echo t("Hello, {name}!", ['name' => $username]);
-
-// ICU MessageFormat (RECOMMENDED for pluralization/ordinals)
-echo t("You have {count, plural, =0{no messages} =1{one message} other{# messages}}", ['count' => $messageCount]);
-echo t("You finished {place, selectordinal, one{#st} two{#nd} few{#rd} other{#th}}!", ['place' => 21]);
-
-// Custom filters for domain-specific formatting
-translator()->getInterpolator()->addFilterHandler(function($value, $filter) {
-    if ($filter === 'currency') return '$' . number_format($value, 2);
-    return null;
-});
-echo t("Price: {amount|currency}", ['amount' => 199.99]);
-```
-
-**Standard i18n Features (use ICU MessageFormat):**
-- **Pluralization** (`{count, plural, one{#} other{#}}`)
-- **Ordinals** (`{rank, selectordinal, one{#st} other{#th}}`)
-- **Select formats** (`{gender, select, male{he} female{she} other{they}}`)
-- **Number/date formatting** with locale-aware rules
-- **Full Unicode CLDR compliance** for all languages
-
-**Advanced Conditional Logic (for business rules):**
-- **Multi-variable conditions** (`count=1&priority=high`)
-- **Range queries** (`score:gte=90`, `total:lt=50`)
-- **Complex business logic** in translation files (not code)
-- **A/B testing** and feature flag support in messages
-- **Configuration-driven** messaging for non-technical teams
-
-**Core Translation Features:**
-- **Fallback chains** (target → regional → default → source text)
-- **Auto-generation** of translation files from source code
-- **Professional CLI tool** for translation management
-- **Variable interpolation** with custom filters
-- **Context extraction** for translators
-
-**Translation Management CLI:**
-```bash
-composer exec mini translations                    # Validate translations
-composer exec mini translations add-missing        # Add missing strings
-composer exec mini translations add-language es    # Create Spanish translations
-composer exec mini translations remove-orphans     # Clean up unused translations
-```
-
-### Database
-
-Simple, powerful database abstraction:
-
-```php
-$db = db();  // Request-scoped instance
-
-// Queries
-$user = $db->queryOne('SELECT * FROM users WHERE id = ?', [$userId]);
-$users = $db->query('SELECT * FROM users WHERE active = 1');
-$count = $db->queryField('SELECT COUNT(*) FROM users');
-
-// Updates
-$db->exec('UPDATE users SET last_login = NOW() WHERE id = ?', [$userId]);
-$userId = $db->exec('INSERT INTO users (name) VALUES (?)', [$name]);
-```
-
-### Localized Formatting
-
-Timezone-aware, locale-specific formatting:
-
-```php
-use function mini\fmt;
-
-// Formatting methods use current locale automatically
-echo fmt()->dateShort(new DateTime());                    // Uses Locale::getDefault()
-echo fmt()->dateTimeShort(new DateTime('2024-01-15 10:30:00')); // DateTime objects
-echo fmt()->timeShort(new DateTime());                    // Time formatting
-
-// Timezone handled via DateTimeZone
-$dateInTimezone = new DateTime('now', new DateTimeZone('Europe/Oslo'));
-echo fmt()->dateShort($dateInTimezone);
-
-// Formatting with explicit parameters for safety
-echo fmt()->currency(199.99, 'USD');  // MUST specify currency code
-echo fmt()->percent(0.85, 1);         // Decimal places optional
-echo fmt()->fileSize(1048576);        // File sizes
-```
-
-### Caching
-
-Flexible caching with multiple backends:
-
-```php
-$cache = cache();            // Root cache
-$userCache = cache('users'); // Namespaced cache
-
-$cache->set('key', $data, 3600);  // Set with TTL
-$data = $cache->get('key');       // Get value
-$cache->delete('key');            // Remove specific key
-$cache->clear();                  // Clear ALL caches (only supported on root cache)
-
-// Note: Namespaced caches cannot use clear() - use delete() for specific keys
-$userCache->set('user:1', $userData, 3600);
-$userCache->delete('user:1');     // Remove specific key from namespace
-```
-
-## Routing: File-Based with Optional Enhancement
-
-**Pragmatic URL Management**
-
-Mini's routing follows the same philosophy as everything else - simple by default, powerful when needed.
-
-### Basic File-Based Routing
-
-File-based routing behavior depends on whether `router.php` exists in your web root:
-
-| File Path | Without router.php | With router.php |
-|-----------|-------------------|-----------------|
-| `/api/ping.php` | `/api/ping.php` | `/api/ping` (clean URL) |
-| `/api/ping/index.php` | `/api/ping/index.php` | `/api/ping/` (clean URL) |
-| `/users.php?id=123` | `/users.php?id=123` | `/users?id=123` (no .php) |
-
-**Without router.php:**
-- Direct file access with `.php` extension visible
-- Simple, works immediately
-- No configuration needed
-
-**With router.php:**
-- Clean URLs without `.php` extensions
-- Automatic 301 redirects from old-style URLs
-- Supports custom route patterns via `config/routes.php`
-- Subfolder routing via `_routes.php` files
-
-### Automatic Clean URL Redirects
-
-When `/router.php` exists in your application root, `mini\bootstrap()` automatically handles clean URL redirects:
-
-**PHP Extension Hiding:**
-- Browser requests `/users.php?id=123` → 301 redirect to `/users?id=123`
-- Browser requests `/api/ping.php` → 301 redirect to `/api/ping`
-
-**Index File Handling:**
-- Browser requests `/users/index.php` → 301 redirect to `/users/`
-- Router then internally includes `/users/index.php` for `/users/` requests
-
-**How it works:**
-1. User visits `/users.php?id=123` (old-style URL with visible PHP extension)
-2. `mini\bootstrap()` detects the `.php` extension
-3. Issues 301 redirect to `/users?id=123` (clean URL)
-4. `/router.php` handles the clean URL and internally includes the appropriate file
-
-**Internal routing process:**
-1. Browser requests `/users/123` (clean URL)
-2. Router matches pattern and determines target file
-3. Sets `$_GET['id'] = "123"`
-4. Internally includes `/users.php` (no redirect to user's browser)
-5. `/users.php` executes with the populated `$_GET` array
-
-This ensures:
-- **SEO-friendly URLs** - no `.php` extensions visible
-- **Backward compatibility** - old URLs still work via redirects
-- **Automatic canonicalization** - all URLs are consistently clean
-
-### Enhanced Routing for Collections
-
-When you need pretty URLs for collections, create `config/routes.php`:
-
-```php
-<?php
-return [
-    "/users/{id:\d+}" => fn($id) => "/api/users.php?id={$id}",
-    "/articles/{slug}" => function(string $slug) {
-        // Find article ID from cache/database
-        $articleId = cache()->get("article_slug:{$slug}")
-                   ?? db()->queryField('SELECT id FROM articles WHERE slug = ?', [$slug]);
-
-        if (!$articleId) {
-            http_response_code(404);
-            return "/404.php";
-        }
-
-        return "/article.php?id={$articleId}";
-    }
-];
-```
-
-**This enables:**
-- `/articles/my-great-post` → internally includes `article.php` with `$_GET['id'] = "12345"`
-- `/users/123` → internally includes `api/users.php` with `$_GET['id'] = "123"`
-- Database lookups for slug-to-ID mapping
-- Custom 404 handling per route
-
-### Why This Approach Works
-
-**File-based foundation:**
-```
-/api/users.php               # Direct endpoint
-/article.php                 # Article display
-/404.php                     # Error handling
-```
-
-**Router enhancement:**
-- **Optional** - only needed for pretty URLs
-- **Simple mapping** - routes to existing files
-- **No controllers** - routes point to the actual PHP files
-- **Custom logic** - closures can handle complex routing needs
-
-**Advantages:**
-- **No route definitions for simple cases** - filesystem IS the routing table
-- **Fault isolation** - broken endpoint doesn't crash the app
-- **Direct deployment** - add file, endpoint exists
-- **Enhanced when needed** - add routing only for collections/pretty URLs
-- **Performance** - minimal overhead, direct file execution
-
-### Subfolder Routing
-
-For complex applications, you can create `_routes.php` files in subfolders to handle routing for that directory:
-
-```
-/api/
-├── users.php
-├── _routes.php        # Routes specific to /api/*
-└── admin/
-    ├── dashboard.php
-    └── _routes.php    # Routes specific to /api/admin/*
-```
-
-Each `_routes.php` file works the same as `config/routes.php` but is scoped to its directory.
-
-### Special Controller Files
-
-Mini recognizes certain filenames as having special behavior:
-
-| Filename | Purpose | When Used |
-|----------|---------|-----------|
-| `router.php` | Enable clean URLs and custom routing | Must be in web root |
-| `404.php` | Handle not found errors | Called when route/file not found |
-| `403.php` | Handle access denied errors | Called on `AccessDeniedException` |
-| `500.php` | Handle server errors | Called on unhandled exceptions |
-| `_routes.php` | Subfolder-specific routing config | Can exist in any directory |
-
-**Note:** These special files use privileged names. If you need routes like `/404` or `/router`, consider naming them `_404.php`, `_router.php` to avoid conflicts.
-
-### URL Generation: Explicit Over Magic
-
-Mini does **not** provide reverse routing or named routes. Instead, you hardcode URLs using the `url()` helper:
-
-```php
-// In templates and endpoints
-echo url('api/users');                    // /api/users
-echo url('articles/my-great-post');       // /articles/my-great-post
-echo url("users/{$userId}");              // /users/123
-
-// In forms and links
-<form action="<?= url('api/login') ?>">
-<a href="<?= url("articles/{$article['slug']}") ?>">Read More</a>
-```
-
-**Why no reverse routing?**
-
-1. **URL structure rarely changes** - we've almost never encountered the desire to significantly restructure URLs in production applications
-
-2. **External constraints remain** - even if you change internal routing, external inbound links, bookmarks, and SEO won't change. You're bound by previous URL choices regardless.
-
-3. **Explicit cost for rare changes** - when URL structure does change, you'll need to:
-   - Update hardcoded URLs (find/replace across codebase)
-   - Create redirects from old endpoints to maintain external links
-   - This explicit cost reflects the real impact of URL changes
-
-4. **Simplicity over abstraction** - no route names to remember, no reverse routing configuration, just direct URL construction
-
-**The `url()` function:**
-- Handles base URL configuration
-- Ensures consistent URL generation
-- Works with both file-based and enhanced routing
-- Simple string concatenation - no magic
-
-**Custom URL generation encouraged:**
-
-You're absolutely encouraged to implement your own URL generation methods:
-
-```php
-class User {
-    public function getUrl(): string {
-        return url("users/{$this->id}");
-    }
-
-    public function getEditUrl(): string {
-        return url("users/{$this->id}/edit");
-    }
-}
-
-class Article {
-    public function getUrl(): string {
-        return url("articles/{$this->slug}");
-    }
-}
-
-// Usage
-echo $user->getUrl();        // /users/123
-echo $article->getUrl();     // /articles/my-great-post
-```
-
-**The difference:** We won't provide a central facility that you need to learn to configure. Instead, implement URL generation wherever it makes sense for your domain models and use cases.
+**If you don't like this approach, pick a different framework.** We're not trying to be everything to everyone.
 
 ## Quick Start
 
@@ -391,406 +29,204 @@ echo $article->getUrl();     // /articles/my-great-post
 composer require fubber/mini
 ```
 
-### Development Server
-
-For quick development and testing, use PHP's built-in web server:
-
-```bash
-# Run from your project root (recommended structure with public/ directory)
-php -S 127.0.0.1:8080 -t ./public/ router.php
-
-# Or on a different port
-php -S 127.0.0.1:3000 -t ./public/ router.php
-```
-
-This starts a local development server with:
-- **Clean URL routing** - router.php handles all requests
-- **No web server configuration** - works immediately
-- **Fast iteration** - no need to configure Apache/Nginx
-- **Secure by default** - serves only from public/ directory, keeps vendor/ and config outside web root
-
-**Note:** PHP's built-in server is for development only. For production, use Apache, Nginx, or another production-ready web server.
-
-### Basic Application Structure
-
-**Recommended structure (web root in public/ subdirectory):**
+### Project Structure
 
 ```
 your-app/
-├── composer.json               # Composer dependencies
-├── vendor/                     # Composer packages (outside web root)
-├── config.php                  # App configuration (outside web root)
-├── config/
-│   ├── bootstrap.php           # Application-specific setup (optional)
-│   └── formats/
-│       ├── en.php              # English formatting
-│       └── nb_NO.php           # Norwegian formatting
+├── composer.json
+├── vendor/
+├── _config/                    # Config files (outside web root)
+│   └── bootstrap.php          # Optional app initialization
+├── _routes/                    # Route handlers (outside web root)
+│   ├── index.php              # Handles /
+│   ├── users.php              # Handles /users
+│   └── api/
+│       └── posts.php          # Handles /api/posts
+├── _errors/                    # Error pages (outside web root)
+│   ├── 404.php
+│   ├── 401.php
+│   └── 500.php
 ├── translations/               # Translation files (outside web root)
-│   ├── default/                # Auto-generated source strings
-│   └── nb_NO/                  # Norwegian translations
 ├── migrations/                 # Database migrations (outside web root)
-├── database.sqlite3            # Database file (outside web root)
-└── public/                     # Web root - only this directory is publicly accessible
-    ├── router.php              # Router for clean URLs
-    ├── index.php               # Main page
-    ├── api/
-    │   ├── ping.php           # GET /api/ping
-    │   └── users/
-    │       ├── index.php      # GET/POST /api/users/
-    │       └── [id].php       # GET /api/users/123
-    └── assets/                 # CSS, JS, images
-        └── style.css
+├── database.sqlite3           # Database (outside web root)
+└── html/                      # Document root (web-accessible)
+    ├── index.php              # Entry point
+    └── assets/                # CSS, JS, images
 ```
 
-**Security benefits:**
-- `vendor/`, `config.php`, `database.sqlite3` are outside web root
-- Only files in `public/` are directly accessible via HTTP
-- Reduces attack surface significantly
+**Security:** Everything except `html/` is outside the web root.
 
-**Note:** PHP files in `public/` should load the autoloader:
+### Entry Point
+
+Create `html/index.php`:
+
 ```php
+<?php
 require_once __DIR__ . '/../vendor/autoload.php';
+
+mini\router();  // Handles routing and bootstraps framework
 ```
 
-### Configuration (config.php)
+### Development Server
 
-Create a `config.php` file in your **project root** (not in public/):
+```bash
+# Run from project root
+php -S 127.0.0.1:8080 -t ./html/
+```
+
+Visit: `http://127.0.0.1:8080`
+
+**Note:** The dev server is for development only. Use Apache/Nginx in production.
+
+## Routing
+
+### File-Based Routing
+
+URLs map directly to files in `_routes/`:
+
+```
+/              → _routes/index.php
+/users         → _routes/users.php
+/api/posts     → _routes/api/posts.php
+```
+
+**Example:** `_routes/api/posts.php`
+
+```php
+<?php
+// No bootstrap() needed - router() already called it
+
+header('Content-Type: application/json');
+
+$posts = db()->query('SELECT * FROM posts ORDER BY created_at DESC')->fetchAll();
+
+echo json_encode($posts);
+```
+
+### Pattern-Based Routing
+
+For dynamic routes, create `_config/routes.php`:
 
 ```php
 <?php
 return [
-    'base_url' => 'https://your-domain.com',
-    'dbfile' => __DIR__ . '/database.sqlite3',
-    'default_language' => 'en',
-    'app' => [
-        'name' => 'Your Application'
-    ]
+    "/users/{id:\d+}" => fn($id) => "_routes/users/detail.php?id={$id}",
+    "/posts/{slug}" => function(string $slug) {
+        $postId = cache()->get("post_slug:{$slug}")
+                  ?? db()->queryField('SELECT id FROM posts WHERE slug = ?', [$slug]);
+
+        if (!$postId) {
+            http_response_code(404);
+            return "_errors/404.php";
+        }
+
+        return "_routes/posts/detail.php?id={$postId}";
+    }
 ];
 ```
 
-### Application Bootstrap (config/bootstrap.php)
+### Request Handling
 
-The bootstrap file is automatically included by the Mini framework and is where you configure application-specific settings:
+Access request data directly with native PHP:
 
 ```php
 <?php
-// config/bootstrap.php
+// _routes/users/create.php
 
-use function mini\{db, translator, fmt};
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $username = $_POST['username'] ?? '';
+    $email = $_POST['email'] ?? '';
 
-// Language detection with priority: URL param > user preference > browser > default
-$languageCode = $_GET['lang'] ?? null;
+    db()->exec(
+        'INSERT INTO users (username, email) VALUES (?, ?)',
+        [$username, $email]
+    );
 
-// Get user language preference if logged in
-if (!$languageCode && session_status() === PHP_SESSION_ACTIVE && isset($_SESSION['user_id'])) {
-    try {
-        $languageCode = db()->queryField('SELECT language FROM users WHERE id = ?', [$_SESSION['user_id']]);
-    } catch (\Exception $e) {
-        // Language column might not exist yet - gracefully continue
-    }
+    redirect(url('users'));
 }
 
-// Set language if we found one
-if ($languageCode && translator()->trySetLanguageCode($languageCode)) {
-    // Language is now handled automatically by Locale::setDefault() in mini\bootstrap()
-}
+// Show form
+echo render('templates/users/create.php', [
+    'title' => t('Create User')
+]);
+```
 
-// Set user timezone from preference
-if (session_status() === PHP_SESSION_ACTIVE && isset($_SESSION['user_id'])) {
-    try {
-        $userTimezone = db()->queryField('SELECT timezone FROM users WHERE id = ?', [$_SESSION['user_id']]);
-        if ($userTimezone) {
-            // Timezone handling is now via DateTimeZone or intlDateFormatter factory function
-        }
-    } catch (\Exception $e) {
-        // Timezone column might not exist yet - use default
-    }
-}
+## Database
 
-// Add custom translation filters
-translator()->getInterpolator()->addFilterHandler(function($value, $filter) {
-    if ($filter === 'currency') return '$' . number_format($value, 2);
-    if ($filter === 'filesize') return fmt()->fileSize($value);
-    return null; // Let other handlers try
+### Basic Queries
+
+```php
+// Get database instance (request-scoped)
+$db = db();
+
+// Fetch all rows
+$users = $db->query('SELECT * FROM users WHERE active = 1')->fetchAll();
+
+// Fetch one row
+$user = $db->queryOne('SELECT * FROM users WHERE id = ?', [$userId]);
+
+// Fetch single value
+$count = $db->queryField('SELECT COUNT(*) FROM users');
+
+// Fetch column
+$ids = $db->queryColumn('SELECT id FROM users WHERE active = 1');
+
+// Execute statement
+$db->exec('UPDATE users SET last_login = NOW() WHERE id = ?', [$userId]);
+
+// Get last insert ID
+$userId = $db->exec('INSERT INTO users (name) VALUES (?)', [$name]);
+$newId = $db->lastInsertId();
+```
+
+### Transactions
+
+```php
+$result = db()->transaction(function($db) use ($userId, $amount) {
+    // Deduct from user account
+    $db->exec('UPDATE accounts SET balance = balance - ? WHERE user_id = ?',
+        [$amount, $userId]);
+
+    // Create transaction record
+    $db->exec('INSERT INTO transactions (user_id, amount, type) VALUES (?, ?, ?)',
+        [$userId, $amount, 'withdrawal']);
+
+    return true;
 });
 ```
 
-**Bootstrap features:**
-- **Automatic inclusion** - loaded by Mini framework after core initialization
-- **Language detection** - URL parameters, user preferences, browser detection
-- **User-specific settings** - timezone and language from user profiles
-- **Custom filters** - extend translation system with domain-specific formatting
-- **Graceful degradation** - handles missing database columns during development
-
-**What belongs in bootstrap:**
-- Application-wide configuration that depends on user context
-- Custom translation filters and formatters
-- User preference detection and application
-- Feature flags and environment-specific setup
-
-### Basic Endpoint (api/ping.php)
+### Tables (Query Builder)
 
 ```php
-<?php
-require_once __DIR__ . '/../vendor/autoload.php';
+// Using the table() query builder
+table('users')
+    ->eq('status', 'active')
+    ->gte('created_at', $date)
+    ->order('name')
+    ->limit(10)
+    ->all();
 
-use function mini\{bootstrap, t};
+// Get one record
+$user = table('users')->eq('id', 123)->first();
 
-bootstrap();
+// Count records
+$count = table('posts')->eq('published', true)->count();
 
-$config = $GLOBALS['app']['config'];
-
-header('Content-Type: application/json');
-
-echo json_encode([
-    'message' => t('Pong from {app}!', ['app' => $config['app']['name']]),
-    'timestamp' => (new DateTime())->format('c'), // ISO 8601 format
-    'server_time' => (new DateTime('now', new DateTimeZone('UTC')))->format('H:i:s')
-]);
+// Pagination
+$page = table('users')->page(2, 20);  // Page 2, 20 per page
 ```
 
-## Template Rendering with `mini\render()`
-
-The `render()` function provides simple, secure templating with variable extraction:
-
-```php
-<?php
-// Example: public/users.php
-require_once __DIR__ . '/../vendor/autoload.php';
-
-use function mini\{bootstrap, render, t, db};
-
-bootstrap();
-
-$config = $GLOBALS['app']['config'];
-$users = db()->query('SELECT * FROM users ORDER BY name');
-
-echo render('templates/users.php', [
-    'title' => t('User List'),
-    'users' => $users,
-    'config' => $config
-]);
-```
-
-**Template file (templates/users.php):**
-```php
-<?php $content = ob_start(); ?>
-
-<h1><?= h($title) ?></h1>
-
-<ul>
-    <?php foreach ($users as $user): ?>
-        <li><?= h($user['name']) ?> - <?= h($user['email']) ?></li>
-    <?php endforeach; ?>
-</ul>
-
-<?php $content = ob_get_clean(); ?>
-<?= render('templates/layout.php', compact('title', 'config', 'content')) ?>
-```
-
-**Key features:**
-- **Variable extraction** - array keys become variables
-- **Nested rendering** - templates can render other templates
-- **XSS protection** - always use `h()` for output escaping
-- **No magic** - just PHP with helper functions
-
-## Advanced Translation Features
-
-### Conditional Translations with QueryParser
-
-Mini provides a unique conditional translation system for business logic that goes beyond standard i18n:
-
-#### **When to Use Conditional Translations**
-
-**❌ Don't use for standard i18n (use ICU MessageFormat instead):**
-```php
-// BAD: Don't reinvent pluralization
-"message": {
-  "count=0": "No messages",
-  "count=1": "One message",
-  "": "{count} messages"
-}
-
-// GOOD: Use ICU MessageFormat
-t("You have {count, plural, =0{no messages} =1{one message} other{# messages}}", ['count' => $count])
-```
-
-**✅ Do use for business logic and multi-variable conditions:**
-```json
-{
-  "shipping_message": {
-    "total:gte=50&country=US": "🚛 Free shipping to US!",
-    "total:gte=100&country=CA": "🚛 Free shipping to Canada!",
-    "weight:gt=20": "📦 Oversized shipping applies",
-    "": "Shipping calculated at checkout"
-  },
-  "membership_status": {
-    "points:gte=10000&tenure:gte=24": "💎 Diamond Member (Lifetime benefits!)",
-    "points:gte=5000": "🥇 Gold Member",
-    "points:gte=1000": "🥈 Silver Member",
-    "": "Basic Member"
-  }
-}
-```
-
-#### **QueryParser Syntax**
-
-**Operators:**
-- `=` - Exact match (`status=pending`)
-- `:gte=` - Greater than or equal (`score:gte=90`)
-- `:gt=` - Greater than (`age:gt=18`)
-- `:lte=` - Less than or equal (`total:lte=100`)
-- `:lt=` - Less than (`usage:lt=80`)
-- `&` - AND logic (`items:gte=3&member_level=gold`)
-
-**Usage:**
-```php
-// In your code
-echo t("shipping_message", [
-    'total' => 75.50,
-    'country' => 'US',
-    'weight' => 15
-]);
-// Result: "🚛 Free shipping to US!"
-```
-
-#### **Transformations System**
-
-For language-specific formatting rules beyond ICU:
-
-**translations/default/transformations.json:**
-```json
-{
-  "{grade}": {
-    "grade:gte=97": "A+ (Outstanding!)",
-    "grade:gte=93": "A (Excellent)",
-    "grade:gte=90": "A- (Great)",
-    "grade:gte=87": "B+ (Good)",
-    "": "Grade: {grade}%"
-  }
-}
-```
-
-**Usage:**
-```php
-echo t("Your grade: {score:grade}", ['score' => 95]);
-// Result: "Your grade: A (Excellent)"
-```
-
-**⚠️ Recommendation:** Use ICU MessageFormat for standard i18n, conditional translations for business logic only.
-
-### ICU MessageFormat Integration
-
-Mini automatically detects and processes ICU MessageFormat patterns:
-
-```php
-// ICU patterns are processed with PHP's MessageFormatter
-echo t("Today is {date, date, full}", ['date' => new DateTime()]);
-echo t("Price: {amount, number, currency}", ['amount' => 19.99]);
-echo t("{count, plural, =0{No items} one{One item} other{# items}}", ['count' => 5]);
-```
-
-### Translation Resolution & Language Detection
-
-Mini uses a sophisticated multi-step process to find the best translation:
-
-1. **Language Detection Priority:**
-   - URL parameter (`?lang=no`)
-   - User preference (from database)
-   - Browser `Accept-Language` header
-   - Default language from config
-
-2. **File Resolution with Fallback Chain:**
-   ```
-   translations/nb_NO/api/users.php.json    # Target language
-   translations/no/api/users.php.json       # Regional fallback
-   translations/default/api/users.php.json  # Source strings
-   Source text itself                       # Final fallback
-   ```
-
-3. **Translation Selection within File:**
-   - Exact string match
-   - Conditional match using QueryParser
-   - Fallback to default language
-   - Return source text
-
-### QueryParser: Conditional Translation Logic
-
-The QueryParser enables complex translation rules using query-string syntax:
-
-```json
-{
-  "You have {count} messages": {
-    "count=0": "You have no messages",
-    "count=1": "You have one message",
-    "count:gte=2": "You have {count} messages"
-  },
-  "{ordinal}": {
-    "ordinal:gte=10&ordinal:lte=13": "{ordinal}th",
-    "ordinal:like=*1": "{ordinal}st",
-    "ordinal:like=*2": "{ordinal}nd",
-    "ordinal:like=*3": "{ordinal}rd",
-    "": "{ordinal}th"
-  }
-}
-```
-
-**Supported operators:**
-- `=` - Exact match
-- `gt`, `gte`, `lt`, `lte` - Numeric comparisons
-- `like` - Pattern matching with `*` wildcards
-- `&` - AND logic for multiple conditions
-
-### Transformations with `transformations.json`
-
-Language-specific transformations are applied automatically:
-
-**translations/default/transformations.json:**
-```json
-{
-  "{ordinal}": {
-    "ordinal:gte=10&ordinal:lte=13": "{ordinal}th",
-    "ordinal:like=*1": "{ordinal}st",
-    "ordinal:like=*2": "{ordinal}nd",
-    "ordinal:like=*3": "{ordinal}rd",
-    "": "{ordinal}th"
-  },
-  "{plural}": {
-    "plural=1": "",
-    "": "s"
-  }
-}
-```
-
-**Usage:**
-```php
-echo t("You are {rank:ordinal}", ['rank' => 21]);     // "You are 21st"
-echo t("Dog{count:plural}", ['count' => 3]);          // "Dogs"
-```
-
-**Norwegian transformations.json might override:**
-```json
-{
-  "{ordinal}": {
-    "": "{ordinal}."
-  }
-}
-```
-
-Result: `t("You are {rank:ordinal}", ['rank' => 21])` → "You are 21." (Norwegian style)
-
-## Database Migrations
-
-Simple, PHP-based migration system:
+## Migrations
 
 ### Running Migrations
+
 ```bash
-composer exec mini migrations  # Run all pending migrations
+composer exec mini migrations
 ```
 
 ### Creating Migrations
 
-Migrations are PHP files in `migrations/` directory:
+Create files in `migrations/` directory with sequential naming:
 
 ```php
 <?php
@@ -809,11 +245,11 @@ return function($db) {
 };
 ```
 
-### Migration with Seed Data
+### Seeding Data
 
 ```php
 <?php
-// migrations/002_seed_initial_data.php
+// migrations/002_seed_initial_users.php
 
 return function($db) {
     $users = [
@@ -822,385 +258,696 @@ return function($db) {
     ];
 
     foreach ($users as [$username, $email, $hash]) {
-        $db->exec("INSERT INTO users (username, email, password_hash)
-                   VALUES (?, ?, ?)", [$username, $email, $hash]);
+        $db->exec(
+            "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+            [$username, $email, $hash]
+        );
     }
 
     echo "Seeded " . count($users) . " users\n";
 };
 ```
 
-**Migration features:**
-- **Sequential execution** - filename-based ordering
-- **One-time execution** - tracks completed migrations
-- **Simple PHP functions** - no complex migration classes
-- **Database agnostic** - works with any PDO-supported database
-- **Seed data support** - include test/initial data in migrations
+## Internationalization (i18n)
 
-## Enterprise Integration
+### Translation Files
 
-### Translation Management
+Structure:
 
-The included CLI tool provides professional translation workflows:
-
-- **Token-level parsing** of source code for 100% accuracy
-- **Git-integrated** - translations version with your code
-- **Context extraction** - translators see surrounding code
-- **Validation & QA** - detect orphaned/missing translations
-- **Language scaffolding** - create complete language files
-- **Multiple export formats** (JSON, CSV) for external tools
-
-### Custom UIs with Claude Code
-
-Instead of shipping a one-size-fits-all admin interface, enterprises can have Claude Code build exactly what they need:
-
-- **Instant customization** - UI built in minutes, not months
-- **Perfect integration** - connects to existing tools
-- **Zero vendor lock-in** - you own the code
-- **Company branding** - matches your design system
-
-### Fault Isolation
-
-File-based architecture provides natural microservices benefits:
-- **Independent failure modes** - broken endpoints don't crash the app
-- **Progressive deployment** - update files individually
-- **Zero-downtime updates** - replace files while serving traffic
-- **Natural load balancing** - different files can be on different servers
-
-## Architectural Philosophy & Performance
-
-### Idiomatic PHP: Use $_POST, $_GET Directly
-
-**Mini is different.** We embrace PHP's request-scoped nature rather than abstracting it away:
-
-```php
-// Controllers SHOULD use PHP's native request variables directly
-$username = $_POST['username'] ?? '';
-$userId = $_GET['id'] ?? null;
-$userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
-$files = $_FILES['upload'] ?? [];
+```
+translations/
+├── default/              # Auto-generated source strings
+│   └── controller.php.json
+├── nb/                   # Norwegian
+│   └── controller.php.json
+└── es/                   # Spanish
+    └── controller.php.json
 ```
 
-**Why we don't abstract `$_POST`, `$_GET`, etc.:**
+### Basic Translation
 
-These aren't true superglobals - they're **request-scoped** variables that PHP manages per-request:
+**In your route handler:**
 
-- **Zero overhead** - No object wrapping, no middleware layers, no PSR-7 instantiation
-- **Transparent** - What you see is what you get, no hidden state transformations
-- **Battle-tested** - PHP's request handling has served billions of requests reliably
-- **Idiomatic** - Every PHP developer understands these patterns immediately
+```php
+// _routes/welcome.php
 
-**The abstraction trap:**
+$username = $_SESSION['username'] ?? 'Guest';
+echo t("Hello, {name}!", ['name' => $username]);
+```
 
-Other frameworks wrap `$_POST` in request objects, but underneath they still use `$_POST`. This adds:
-- Object instantiation overhead on every request
-- Indirection that obscures simple operations
-- Framework-specific APIs to learn and maintain
-- No real benefit since PHP already manages request scope correctly
+**Translation file** `translations/nb/welcome.php.json`:
 
-**Mini's philosophy:**
+```json
+{
+  "Hello, {name}!": "Hei, {name}!"
+}
+```
 
-If a framework abstracts `$_POST` but ultimately reads from `$_POST` anyway, we're just adding layers without value. Mini embraces what PHP does well and doesn't apologize for it.
+**How it works:**
+1. `t()` creates a `Translatable` object with source text and variables
+2. Framework looks up translation in `translations/{language}/{source-file}.json`
+3. If found, uses translated text; otherwise falls back to source text
+4. Variables are interpolated into the final string
 
-### Our Focus: Native PHP over PSR Abstraction
+**Auto-generating translation files:**
 
-Mini is intentionally built on PHP's native, battle-tested request-handling model. This means we don't provide abstractions for interfaces like PSR-7, PSR-15, or PSR-11 out of the box.
+```bash
+# Scans codebase for t() calls and creates translation files
+composer exec mini translations add-missing
 
-This is a deliberate design choice that optimizes for:
+# Creates: translations/default/welcome.php.json with source strings
+# Creates: translations/nb/welcome.php.json (empty, ready for translation)
+```
 
-- **Simplicity** - Fewer concepts to learn and debug
-- **Performance** - Eliminates object instantiation overhead on every request
-- **Clarity** - Explicit and direct data flow without hidden layers
-- **Honesty** - We don't pretend to be framework-agnostic when PHP does the job
+### ICU MessageFormat (Plurals, Ordinals)
+
+```php
+// Plurals
+echo t("{count, plural, =0{no messages} =1{one message} other{# messages}}",
+    ['count' => $messageCount]);
+
+// Ordinals
+echo t("You finished {place, selectordinal, one{#st} two{#nd} few{#rd} other{#th}}!",
+    ['place' => 21]);
+// Output: "You finished 21st!"
+
+// Gender/Select
+echo t("{gender, select, male{He} female{She} other{They}} replied",
+    ['gender' => $user->gender]);
+```
+
+### Formatting Before Translation
+
+```php
+// Format values in PHP before passing to t()
+echo t("Price: {amount}", [
+    'amount' => fmt()->currency(19.99, 'USD')
+]);
+
+echo t("Size: {size}", [
+    'size' => fmt()->fileSize($bytes)
+]);
+```
+
+### Translation Management CLI
+
+```bash
+composer exec mini translations                    # Validate translations
+composer exec mini translations add-missing        # Add missing strings
+composer exec mini translations add-language nb    # Create Norwegian translations
+composer exec mini translations remove-orphans     # Clean up unused translations
+```
+
+### Complete Translation Workflow Example
+
+**1. Write your code with t() calls:**
+
+```php
+// _routes/products/list.php
+
+$products = db()->query('SELECT * FROM products')->fetchAll();
+
+echo render('templates/products/list.php', [
+    'title' => t('Product Catalog'),
+    'products' => $products,
+    'empty_message' => t('No products found.')
+]);
+```
+
+**2. Auto-generate translation files:**
+
+```bash
+composer exec mini translations add-missing
+```
+
+Creates:
+- `translations/default/products/list.php.json` (source strings)
+- `translations/nb/products/list.php.json` (empty, ready for translation)
+
+**3. Translate strings:**
+
+Edit `translations/nb/products/list.php.json`:
+
+```json
+{
+  "Product Catalog": "Produktkatalog",
+  "No products found.": "Ingen produkter funnet."
+}
+```
+
+**4. Add more languages:**
+
+```bash
+composer exec mini translations add-language es
+```
+
+Creates: `translations/es/products/list.php.json`
+
+Edit and translate:
+
+```json
+{
+  "Product Catalog": "Catálogo de Productos",
+  "No products found.": "No se encontraron productos."
+}
+```
+
+**5. Users see content in their language:**
+
+```php
+// _config/bootstrap.php configured with LOK cookie
+// User with LOK=nb_NO sees: "Produktkatalog"
+// User with LOK=es_ES sees: "Catálogo de Productos"
+// User with LOK=en_US sees: "Product Catalog" (original)
+```
+
+## Locale & Formatting
+
+### Configuring Locale from Cookies
+
+Here's a practical example using cookies to store user preferences:
+
+```php
+// _config/bootstrap.php
+
+// Read user's locale and timezone from cookies
+$locale = $_COOKIE['LOK'] ?? 'en_US';           // e.g., 'nb_NO'
+$timezone = $_COOKIE['TZ'] ?? 'UTC';             // e.g., 'Europe/Oslo'
+
+// Set locale for formatting (affects Fmt methods, number/date formatters)
+\Locale::setDefault($locale);
+
+// Set timezone for date/time operations
+date_default_timezone_set($timezone);
+
+// Extract language code from locale for translations (nb from nb_NO)
+$language = \Locale::getPrimaryLanguage($locale);  // 'nb' from 'nb_NO'
+translator()->trySetLanguageCode($language);
+
+// Now all formatting and translations use the user's preferences:
+// - Fmt::currency() formats according to $locale
+// - Fmt::dateShort() formats according to $locale
+// - t() translates to $language
+// - new DateTime() uses $timezone
+```
+
+**Setting the cookies** (from a user settings page):
+
+```php
+// _routes/settings/save.php
+
+$locale = $_POST['locale'] ?? 'en_US';      // e.g., 'nb_NO', 'en_US', 'de_DE'
+$timezone = $_POST['timezone'] ?? 'UTC';    // e.g., 'Europe/Oslo', 'America/New_York'
+
+// Validate timezone
+if (!in_array($timezone, \DateTimeZone::listIdentifiers())) {
+    $timezone = 'UTC';
+}
+
+// Set cookies (1 year expiration)
+setcookie('LOK', $locale, time() + 31536000, '/');
+setcookie('TZ', $timezone, time() + 31536000, '/');
+
+// Redirect to apply new settings
+redirect(url('settings'));
+```
+
+**Priority order** for detecting locale:
+
+```php
+// _config/bootstrap.php
+
+// Priority: URL param > Cookie > Browser > Default
+$locale = $_GET['lang']                          // ?lang=nb_NO (highest priority)
+          ?? $_COOKIE['LOK']                      // LOK cookie
+          ?? \Locale::acceptFromHttp($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '')  // Browser
+          ?? 'en_US';                            // Default fallback
+
+\Locale::setDefault($locale);
+
+$language = \Locale::getPrimaryLanguage($locale);
+translator()->trySetLanguageCode($language);
+```
+
+**Complete Settings Page Example:**
+
+```php
+// _routes/settings.php
+
+$currentLocale = $_COOKIE['LOK'] ?? 'en_US';
+$currentTimezone = $_COOKIE['TZ'] ?? 'UTC';
+
+echo render('templates/settings.php', [
+    'title' => t('Settings'),
+    'locale' => $currentLocale,
+    'timezone' => $currentTimezone,
+    'locales' => [
+        'en_US' => t('English (United States)'),
+        'en_GB' => t('English (United Kingdom)'),
+        'nb_NO' => t('Norwegian (Norway)'),
+        'de_DE' => t('German (Germany)'),
+        'es_ES' => t('Spanish (Spain)'),
+        'fr_FR' => t('French (France)')
+    ],
+    'timezones' => [
+        'UTC' => 'UTC',
+        'Europe/Oslo' => 'Europe/Oslo',
+        'Europe/London' => 'Europe/London',
+        'America/New_York' => 'America/New_York',
+        'America/Los_Angeles' => 'America/Los_Angeles',
+        'Asia/Tokyo' => 'Asia/Tokyo'
+    ]
+]);
+```
+
+```php
+// templates/settings.php
+<?php $content = ob_start(); ?>
+
+<h1><?= h($title) ?></h1>
+
+<form method="POST" action="<?= url('settings/save') ?>">
+    <label>
+        <?= t('Language & Region') ?>
+        <select name="locale">
+            <?php foreach ($locales as $code => $name): ?>
+                <option value="<?= h($code) ?>" <?= $code === $locale ? 'selected' : '' ?>>
+                    <?= h($name) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+
+    <label>
+        <?= t('Timezone') ?>
+        <select name="timezone">
+            <?php foreach ($timezones as $tz => $label): ?>
+                <option value="<?= h($tz) ?>" <?= $tz === $timezone ? 'selected' : '' ?>>
+                    <?= h($label) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+
+    <button type="submit"><?= t('Save Settings') ?></button>
+</form>
+
+<?php
+$content = ob_get_clean();
+echo render('templates/layout.php', compact('title', 'content'));
+?>
+```
+
+### Formatting
+
+```php
+use mini\I18n\Fmt;
+
+// All methods use \Locale::getDefault()
+
+// Currency
+echo Fmt::currency(19.99, 'USD');     // $19.99 (en_US) or USD 19,99 (nb_NO)
+
+// Dates
+echo Fmt::dateShort(new DateTime());               // 10/28/2025
+echo Fmt::dateLong(new DateTime());                // October 28, 2025
+echo Fmt::timeShort(new DateTime());               // 2:30 PM
+echo Fmt::dateTimeShort(new DateTime());           // 10/28/2025, 2:30 PM
+
+// Numbers
+echo Fmt::number(1234.56, 2);         // 1,234.56 (en_US) or 1 234,56 (nb_NO)
+echo Fmt::percent(0.85, 1);           // 85.0% (en_US) or 85,0 % (nb_NO)
+
+// File sizes
+echo Fmt::fileSize(1048576);          // 1.0 MB
+```
+
+## Caching
+
+### Basic Caching
+
+```php
+$cache = cache();  // Root cache
+
+// Set with TTL (in seconds)
+$cache->set('user:123', $userData, 3600);
+
+// Get value
+$data = $cache->get('user:123');
+
+// Get with default
+$data = $cache->get('user:123', ['default' => 'value']);
+
+// Delete
+$cache->delete('user:123');
+
+// Has
+if ($cache->has('user:123')) {
+    // ...
+}
+```
+
+### Namespaced Caching
+
+```php
+$userCache = cache('users');
+$postCache = cache('posts');
+
+$userCache->set('user:123', $userData, 3600);
+$postCache->set('post:456', $postData, 3600);
+
+// Isolated namespaces
+$userCache->get('user:123');  // Returns userData
+$postCache->get('user:123');  // Returns null (different namespace)
+```
+
+## Logging
+
+### Basic Logging
+
+```php
+// Get logger instance (PSR-3 compatible)
+$logger = log();
+
+// Log levels
+$logger->debug('Debug message');
+$logger->info('Info message');
+$logger->notice('Notice message');
+$logger->warning('Warning message');
+$logger->error('Error message');
+$logger->critical('Critical message');
+$logger->alert('Alert message');
+$logger->emergency('Emergency message');
+```
+
+### Context & Interpolation
+
+```php
+// With context
+log()->info('User {user} logged in from {ip}', [
+    'user' => $username,
+    'ip' => $_SERVER['REMOTE_ADDR']
+]);
+
+// With exception
+try {
+    // ... code
+} catch (\Exception $e) {
+    log()->error('Operation failed: {message}', [
+        'message' => $e->getMessage(),
+        'exception' => $e
+    ]);
+}
+```
+
+## Templates
+
+### Rendering Templates
+
+```php
+// _routes/users.php
+
+$users = db()->query('SELECT * FROM users ORDER BY name')->fetchAll();
+
+echo render('templates/users.php', [
+    'title' => t('User List'),
+    'users' => $users
+]);
+```
+
+### Template File
+
+```php
+<?php
+// templates/users.php
+$content = ob_start();
+?>
+
+<h1><?= h($title) ?></h1>
+
+<ul>
+    <?php foreach ($users as $user): ?>
+        <li>
+            <a href="<?= url("users/{$user['id']}") ?>">
+                <?= h($user['name']) ?>
+            </a>
+        </li>
+    <?php endforeach; ?>
+</ul>
+
+<?php
+$content = ob_get_clean();
+echo render('templates/layout.php', compact('title', 'content'));
+?>
+```
+
+### Layout File
+
+```php
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title><?= h($title) ?></title>
+</head>
+<body>
+    <?= $content ?>
+</body>
+</html>
+```
+
+## Testing
+
+Tests go in `tests/` directory. Mini uses a simple test helper pattern:
+
+```php
+<?php
+// tests/MyFeature.php
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+function test(string $description, callable $test): void {
+    try {
+        $test();
+        echo "✓ {$description}\n";
+    } catch (\Exception $e) {
+        echo "✗ {$description}\n";
+        echo "  Error: {$e->getMessage()}\n";
+    }
+}
+
+function assertEqual($expected, $actual, string $message = ''): void {
+    if ($expected !== $actual) {
+        throw new \Exception($message ?: "Expected: " . var_export($expected, true) . ", Got: " . var_export($actual, true));
+    }
+}
+
+// Tests
+test('Basic functionality works', function() {
+    $result = 2 + 2;
+    assertEqual(4, $result);
+});
+
+test('Database query returns results', function() {
+    mini\bootstrap();
+    $users = db()->query('SELECT * FROM users')->fetchAll();
+    assertEqual(true, is_array($users));
+});
+```
+
+Run tests:
+
+```bash
+php tests/MyFeature.php
+```
+
+## Authentication
+
+Mini provides auth helpers, but you implement the authentication logic:
+
+### Setting Up Auth
+
+```php
+// _config/bootstrap.php
+
+use mini\Auth\AuthInterface;
+
+class MyAuth implements AuthInterface {
+    public function isAuthenticated(): bool {
+        session_start();
+        return isset($_SESSION['user_id']);
+    }
+
+    public function getUserId(): mixed {
+        return $_SESSION['user_id'] ?? null;
+    }
+
+    public function hasRole(string $role): bool {
+        if (!$this->isAuthenticated()) {
+            return false;
+        }
+
+        $userRole = db()->queryField(
+            'SELECT role FROM users WHERE id = ?',
+            [$this->getUserId()]
+        );
+
+        return $userRole === $role;
+    }
+}
+
+// Register auth implementation
+setupAuth(fn() => new MyAuth());
+```
+
+### Using Auth
+
+```php
+// _routes/admin/dashboard.php
+
+require_login();                  // Throws 401 if not logged in
+require_role('admin');            // Throws 403 if not admin
+
+echo render('templates/admin/dashboard.php', [
+    'title' => t('Admin Dashboard')
+]);
+```
+
+## Core Functions Reference
+
+```php
+// Translation
+t(string $text, array $vars = []): Translatable
+
+// HTML escaping
+h(string $str): string
+
+// Template rendering
+render(string $template, array $vars = []): string
+
+// URL generation
+url(string $path = '', array $query = []): string
+
+// Redirects
+redirect(string $url, int $statusCode = 302): void
+
+// Current URL
+current_url(): string
+
+// Flash messages
+flash_set(string $type, string $message): void
+flash_get(): array
+
+// Session
+session(): bool
+
+// Database
+db(): DatabaseInterface
+
+// Cache
+cache(?string $namespace = null): CacheInterface
+
+// Logger
+log(): LoggerInterface
+
+// Tables (query builder)
+table(string $name): Repository
+
+// Translator (language management)
+translator(): Translator
+
+// Formatting
+fmt(): Fmt
+
+// Auth
+auth(): ?AuthInterface
+is_logged_in(): bool
+require_login(): void
+require_role(string $role): void
+
+// Framework
+bootstrap(): void
+router(): void
+```
+
+## Philosophy: Why Native PHP?
+
+Other frameworks wrap PHP in layers of abstraction. We don't.
+
+### `$_POST` and `$_GET` Are Not Dangerous
+
+```php
+// Mini - direct and clear
+$username = $_POST['username'] ?? '';
+$email = $_POST['email'] ?? '';
+
+// Framework wrappers add overhead for no real benefit
+$username = $request->input('username', '');  // Laravel
+$email = $request->getParsedBody()['email'] ?? '';  // PSR-7
+```
+
+**Our view:** `$_POST` and `$_GET` are request-scoped. PHP manages them correctly. Wrapping them in objects adds indirection without solving any actual problem.
+
+### Locale Management Is Built-In
+
+```php
+// Mini - use PHP's native locale handling
+\Locale::setDefault('nb_NO');
+$formatter = new \NumberFormatter(\Locale::getDefault(), \NumberFormatter::CURRENCY);
+
+// We don't wrap what PHP does well
+```
+
+### Direct SQL When You Need It
+
+```php
+// Mini - direct SQL is fine
+$users = db()->query('SELECT * FROM users WHERE active = 1')->fetchAll();
+
+// Query builder when convenient
+$users = table('users')->eq('active', 1)->all();
+
+// We give you both - use what fits
+```
+
+## Performance
+
+File-based routing and lazy initialization mean Mini stays fast as your app grows:
+
+- **No route compilation** - Routes are discovered on-demand
+- **No container compilation** - Services initialize when used
+- **No middleware overhead** - Direct execution path
+- **Linear scaling** - 10 routes or 10,000 routes, same performance
+
+## Extending Mini
+
+### Use Any PSR Package
+
+```bash
+composer require symfony/mailer
+composer require league/flysystem
+composer require respect/validation
+```
+
+Mini is PSR-compatible, so Symfony, League, and other packages work directly.
+
+### Override Framework Services
+
+See `PATTERNS.md` for detailed examples of overriding framework defaults (logger, cache, database, etc.).
+
+## When Mini Isn't Right
+
+**Choose another framework if:**
+- You need queues, events, notifications built-in (Laravel)
+- You require PSR-7/15 middleware architecture (Slim)
+- Your team needs heavy conventions and structure (Laravel, Symfony)
+- You prefer heavy abstractions over direct PHP
 
 **Mini is for developers who:**
 - Value directness and transparency
-- Understand that request-scoped variables aren't "globals" in the dangerous sense
-- Want to write idiomatic PHP, not framework-specific patterns
-- Prioritize performance and simplicity over abstraction
-
-**Choose another framework if:**
-- PSR-7 compliance is mandatory for your project
-- Your team requires framework-agnostic abstractions
-- You prefer middleware-based request/response handling
-
-### Authentication: Explicit over Implicit
-
-Mini champions explicit function calls for security. You can see the exact security checks right at the top of your endpoint file:
-
-```php
-<?php
-// /api/users.php
-require_once __DIR__ . '/../vendor/autoload.php';
-
-use function mini\{bootstrap, db};
-
-bootstrap();
-
-require_once __DIR__ . '/../lib/auth.php';  // Your auth functions
-
-MyApp\require_api_access();  // Call where needed
-
-// Your endpoint logic here
-$users = db()->query('SELECT * FROM users');
-header('Content-Type: application/json');
-echo json_encode($users);
-```
-
-**Your auth functions (`lib/auth.php`):**
-```php
-<?php
-namespace MyApp;
-
-function require_api_access(): void {
-    $token = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-    if (!validate_api_token($token)) {
-        http_response_code(401);
-        echo json_encode(['error' => 'Unauthorized']);
-        exit;
-    }
-}
-
-function require_admin(): void {
-    session_start();
-    if (!isset($_SESSION['user_id']) || !is_admin($_SESSION['user_id'])) {
-        http_response_code(403);
-        echo json_encode(['error' => 'Forbidden']);
-        exit;
-    }
-}
-```
-
-**Benefits:**
-- **Explicit** - you see exactly what auth is required
-- **Flexible** - different endpoints can have different requirements
-- **Testable** - auth functions can be unit tested independently
-- **No magic** - no hidden middleware configuration to debug
-
-### Performance by Design: Sidestepping Complexity
-
-Many modern frameworks rely on Dependency Injection containers to manage complexity. While powerful, these systems introduce their own layers of abstraction, configuration, and potential performance overhead, often requiring a build or cache-compilation step to be fast.
-
-Mini's philosophy is simpler: avoid the need for a container in the first place.
-
-```php
-// Direct, efficient access
-$user = db()->queryOne('SELECT * FROM users WHERE id = ?', [$userId]);
-```
-
-Our approach provides measurable benefits:
-
-- **Zero Overhead** - with no container to build or resolve, every request is leaner
-- **Lazy Initialization by Default** - helper functions (`db()`, `cache()`) are lightweight and only initialize their respective services the first time you call them in a request
-- **Linear Performance** - application performance doesn't degrade as you add more endpoints, because endpoints are completely isolated
-- **Ultimate Simplicity** - you don't need to think about service providers, factories, or autowiring. You just call the function you need when you need it
-
-### Request-Scoped Instances: PHP's True Nature
-
-**Important terminology:** Mini uses "request-scoped instance" instead of "singleton" because that's what PHP actually provides.
-
-```php
-$db = db();        // Request-scoped database instance
-$cache = cache();  // Request-scoped cache instance
-```
-
-**Why this matters:**
-
-In traditional long-running applications (Java, Node.js), a "singleton" means a single instance that lives for the entire application lifetime, shared across all requests. PHP doesn't work this way.
-
-In PHP (especially with php-fpm):
-- **Each request starts fresh** - new process or recycled worker
-- **State doesn't persist** - after request ends, all variables are cleaned up
-- **No shared memory** - requests are isolated by default
-- **"Singleton" is per-request** - `db()` returns the same instance *within a request*, not across requests
-
-**Benefits of this honesty:**
-- **Accurate mental model** - understand what PHP actually does
-- **Future-proof** - with fibers, we might have multiple instances per request
-- **No false security** - you can't accidentally share state between requests in PHP
-- **Performance clarity** - request isolation is a feature, not a limitation
-
-This aligns with Mini's philosophy: embrace PHP's architecture honestly rather than pretending it works like other languages.
-
-### Design Philosophy: Pragmatic Object-Oriented Programming
-
-Mini embraces pragmatic OOP where it makes sense:
-
-```php
-$db = db();                    // Returns a database instance
-$translator = translator();    // Returns a translator instance
-$cache = cache('users');       // Returns a cache instance
-```
-
-**Our approach to interfaces:**
-- We don't create interfaces for everything (no `QueryParserInterface`, `TranslatorInterface`)
-- We focus on doing a few things exceptionally well rather than maximum abstraction
-- If you have issues with our implementations, we welcome pull requests
-- We leave the choice of OOP vs. functional patterns to developers
-
-**Why this works:**
-- **Focused scope** - Mini does specific things very well
-- **Community-driven improvements** - better implementations come through contributions
-- **Developer freedom** - use the patterns that fit your application
-- **Less complexity** - no need to learn abstract interfaces for concrete implementations
-
-### Development Velocity
-
-**Mini development workflow:**
-1. Create `/api/feature.php`
-2. Write business logic with direct PHP
-3. Deploy file
-4. Feature is live
-
-**Key advantages:**
-- **No configuration** - works out of the box
-- **No abstractions to learn** - use PHP as intended
-- **No build step** - direct deployment
-- **No framework coupling** - business logic is portable
-
-### Authorization & Session Management
-
-**Lazy Session Initialization**
-
-Sessions are started automatically only when needed, following Mini's lazy initialization principle:
-
-```php
-// These functions automatically handle session startup
-function is_logged_in(): bool              // Starts session if needed
-function require_login()                   // Calls is_logged_in() → auto-starts session
-function require_role(string $role)        // Calls require_login() → auto-starts session
-
-// Usage - no manual session calls needed
-require_login();                           // Login required
-require_role('system_admin');              // Role-specific access control
-```
-
-**Clean Authorization Patterns**
-
-Instead of repetitive access control code:
-
-```php
-// Old approach (repetitive)
-require_login();
-if (!isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'admin') {
-    http_response_code(403);
-    echo render('tpl/403.php', ['title' => 'Access Denied']);
-    exit;
-}
-
-// Mini approach (clean)
-require_role('admin');  // One line handles everything
-```
-
-**Benefits:**
-- **Automatic session management** - No manual `session_start()` calls needed
-- **Centralized authorization** - Consistent access control patterns
-- **Performance optimization** - Sessions only started when actually needed
-- **Developer friendly** - Less boilerplate, fewer bugs
-
-### CLI Tools & Developer Experience
-
-**Unified Command Interface**
-
-Mini provides professional CLI tools via Composer's standard workflow:
-
-```bash
-composer exec mini                          # Show all available commands
-composer exec mini translations             # Validate translation files
-composer exec mini translations add-missing # Add missing strings automatically
-composer exec mini migrations              # Run database migrations
-```
-
-**Cross-Platform Support**
-
-The CLI automatically works across all platforms:
-- **Linux/macOS**: Uses native executable wrappers
-- **Windows**: Provides `.bat` and `.cmd` wrappers
-- **Universal**: Falls back to PHP execution
-
-**Extensible Architecture**
-
-Adding new commands requires only:
-1. Drop script in `mini/bin/mini-{command}.php`
-2. Update CLI dispatcher
-3. Commands are automatically discovered
-
-**Development Workflow Benefits:**
-- **Discoverable** - `composer exec mini` shows all tools
-- **Consistent** - Same interface pattern across all tools
-- **Professional** - Matches patterns from Laravel, Symfony, Doctrine
-- **Standard** - Uses `composer exec` best practices
-
-## Translation Strategy Guide
-
-### ICU MessageFormat vs. Mini Conditional Translations
-
-**Use ICU MessageFormat for standard internationalization:**
-
-| **Use Case** | **ICU MessageFormat** | **Mini Conditional** |
-|-------------|---------------------|---------------------|
-| **Pluralization** | ✅ `{count, plural, one{#} other{#}}` | ❌ Don't reinvent |
-| **Ordinals** | ✅ `{rank, selectordinal, one{#st} other{#th}}` | ❌ Don't reinvent |
-| **Gender/Select** | ✅ `{gender, select, male{he} other{they}}` | ❌ Don't reinvent |
-| **Date/Number Format** | ✅ `{date, date, full}` | ❌ Don't reinvent |
-| **Multi-variable logic** | ❌ Cannot do | ✅ `count=1&priority=high` |
-| **Range conditions** | ❌ Cannot do | ✅ `score:gte=90` |
-| **Business rules** | ❌ Cannot do | ✅ `total:gte=50&country=US` |
-| **A/B testing** | ❌ Cannot do | ✅ `experiment=variant_a` |
-
-**Decision Tree:**
-
-```
-Is this standard i18n (plurals, ordinals, gender, dates)?
-├─ YES → Use ICU MessageFormat
-└─ NO → Is this business logic with multiple variables?
-   ├─ YES → Use Mini conditional translations
-   └─ NO → Use controller logic + separate translation keys
-```
-
-**Examples:**
-
-```php
-// ✅ GOOD: Standard i18n with ICU
-t("You have {count, plural, =0{no messages} =1{one message} other{# messages}}")
-t("You finished {place, selectordinal, one{#st} two{#nd} few{#rd} other{#th}}!")
-
-// ✅ GOOD: Business logic with Mini conditionals
-t("shipping_status", ['total' => 75, 'country' => 'US', 'weight' => 10])
-// → "🚛 Free shipping to US!" (from conditional JSON)
-
-// ✅ GOOD: Controller logic for complex scenarios
-if ($user->isVip() && $cart->hasItems() && $promotion->isActive()) {
-    $message = t('vip_promotion_active');
-} else {
-    $message = t('standard_checkout');
-}
-
-// ❌ BAD: Reinventing ICU features
-"messages": {
-  "count=0": "No messages",
-  "count=1": "One message",
-  "": "{count} messages"
-}
-```
-
-### When to Choose Mini
-
-**Mini is ideal when:**
-- Performance matters more than abstraction
-- Development speed is critical
-- Team prefers explicit over implicit
-- You want enterprise features without enterprise complexity
-- Fault isolation is important
-- **Business logic needs to drive translation selection**
-- **Non-technical teams need to manage messaging rules**
-
-**Choose another framework when:**
-- PSR compliance is mandatory
-- Middleware-based architecture is required
-- You need framework-specific ecosystem packages
-- You require extensive interface abstractions for every component
-- **Simple applications without complex business messaging needs**
+- Want to use PHP idiomatically
+- Prioritize performance and simplicity
+- Need complete features without complexity
 
 ## License
 

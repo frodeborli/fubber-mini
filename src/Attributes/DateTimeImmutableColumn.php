@@ -3,10 +3,10 @@
 namespace mini\Attributes;
 
 use Attribute;
-use mini\Contracts\CodecStrategyInterface;
-use mini\Contracts\FieldCodecInterface;
-use mini\CodecStrategies\ScalarCodecStrategy;
-use mini\CodecStrategies\SQLiteCodecStrategy;
+use mini\Tables\Codecs\CodecStrategyInterface;
+use mini\Tables\Codecs\FieldCodecInterface;
+use mini\Tables\CodecStrategies\ScalarCodecStrategy;
+use mini\Tables\CodecStrategies\SQLiteCodecStrategy;
 
 /**
  * DATETIME column attribute for DateTimeImmutable objects

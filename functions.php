@@ -53,9 +53,13 @@ function render($template, $vars = []) {
 
 /**
  * Redirect to URL and exit
+ *
+ * @param string $url Target URL for redirect
+ * @param int $statusCode HTTP status code (301 for permanent, 302 for temporary)
  */
-function redirect($url) {
-    header("Location: $url");
+function redirect(string $url, int $statusCode = 302): void {
+    http_response_code($statusCode);
+    header('Location: ' . $url);
     exit;
 }
 
@@ -161,11 +165,14 @@ function cache(?string $namespace = null): \Psr\SimpleCache\CacheInterface {
     return $cache;
 }
 
+
 /**
  * Bootstrap the mini framework for controller files
  *
  * Call this at the top of any directly-accessible PHP file in the document root.
  * Sets up error handling, output buffering, and clean URL redirects.
+ *
+ * Marks entry into request context, enabling access to Scoped services.
  *
  * Safe to call multiple times (idempotent after first call).
  */
@@ -176,6 +183,13 @@ function bootstrap(): void
         return; // Already bootstrapped
     }
     $initialized = true;
+
+    // Fire onRequestReceived at the very beginning
+    Mini::$mini->onRequestReceived->trigger();
+
+    // Mark that we're now in request handling context
+    // This enables access to Scoped services (db(), auth(), etc.)
+    Mini::$mini->enterRequestContext();
 
     // Clean up pre-existing output handlers
     $previousLevel = -1;
@@ -192,46 +206,63 @@ function bootstrap(): void
         throw new \ErrorException($message, 0, $severity, $file, $line);
     });
 
-    // Set up exception handler (renders error pages)
-    set_exception_handler(function(\Throwable $exception) {
-        error_log("Uncaught exception: " . $exception->getMessage() . " in " . $exception->getFile() . " line " . $exception->getLine());
-        error_log("Stack trace: " . $exception->getTraceAsString());
+    // Set up exception handler (renders error pages) - only if none exists
+    $existingHandler = set_exception_handler(null);
+    if ($existingHandler !== null) {
+        // Developer has their own exception handler - keep it
+        set_exception_handler($existingHandler);
+    } else {
+        // No handler exists - set Mini's default handler
+        set_exception_handler(function(\Throwable $exception) {
+            error_log("Uncaught exception: " . $exception->getMessage() . " in " . $exception->getFile() . " line " . $exception->getLine());
+            error_log("Stack trace: " . $exception->getTraceAsString());
 
-        if (headers_sent()) {
-            if (Mini::$mini->debug) {
-                echo $exception;
-            } else {
-                echo get_class($exception) . " thrown in " . $exception->getFile() . " line " . $exception->getLine();
-            }
-            die();
-        }
-
-        if (ob_get_level() > 0) {
-            ob_clean();
-        }
-
-        if ($exception instanceof \mini\Http\AccessDeniedException) {
-            handleAccessDeniedException($exception);
-        } elseif ($exception instanceof \mini\Http\HttpException) {
-            handleHttpException($exception);
-        } else {
-            try {
-                showErrorPage(500, $exception);
-            } catch (\Throwable $e) {
-                http_response_code(500);
-                echo "<h1>Internal Server Error</h1>";
-                echo "<p>An unexpected error occurred.</p>";
+            if (headers_sent()) {
                 if (Mini::$mini->debug) {
-                    echo "<pre>" . htmlspecialchars($exception->getMessage()) . "</pre>";
-                    echo "<hr><p>Error page also failed:</p>";
-                    echo "<pre>" . htmlspecialchars($e->getMessage()) . "</pre>";
+                    echo $exception;
+                } else {
+                    echo get_class($exception) . " thrown in " . $exception->getFile() . " line " . $exception->getLine();
+                }
+                die();
+            }
+
+            if (ob_get_level() > 0) {
+                ob_clean();
+            }
+
+            if ($exception instanceof \mini\Http\AccessDeniedException) {
+                handleAccessDeniedException($exception);
+            } elseif ($exception instanceof \mini\Http\HttpException) {
+                handleHttpException($exception);
+            } else {
+                try {
+                    showErrorPage(500, $exception);
+                } catch (\Throwable $e) {
+                    http_response_code(500);
+                    echo "<h1>Internal Server Error</h1>";
+                    echo "<p>An unexpected error occurred.</p>";
+                    if (Mini::$mini->debug) {
+                        echo "<pre>" . htmlspecialchars($exception->getMessage()) . "</pre>";
+                        echo "<hr><p>Error page also failed:</p>";
+                        echo "<pre>" . htmlspecialchars($e->getMessage()) . "</pre>";
+                    }
                 }
             }
-        }
-    });
+        });
+    }
 
-    // Start strategic output buffering for exception recovery
-    ob_start(null, 8192, PHP_OUTPUT_HANDLER_FLUSHABLE | PHP_OUTPUT_HANDLER_CLEANABLE);
+    // Start unlimited output buffering for exception recovery
+    // Buffer size 0 = unlimited, never auto-flush (prevents partial output on errors)
+    ob_start(null, 0);
+
+    // Parse application/json request bodies to $_POST (PHP doesn't do this natively)
+    if (str_contains($_SERVER['CONTENT_TYPE'] ?? '', 'application/json')) {
+        $json = file_get_contents('php://input');
+        $data = json_decode($json, true);
+        if (json_last_error() === JSON_ERROR_NONE && is_array($data)) {
+            $_POST = $data;
+        }
+    }
 
     // If routing is enabled and accessing /index.php directly, redirect to /
     if (isset($GLOBALS['mini_routing_enabled']) && $GLOBALS['mini_routing_enabled']) {
@@ -245,16 +276,15 @@ function bootstrap(): void
             if ($query) {
                 $redirectTo .= '?' . $query;
             }
-            header('Location: ' . $redirectTo, true, 301);
+
+            http_response_code(301);
+            header('Location: ' . $redirectTo);
             exit;
         }
     }
 
-    // Include project-specific bootstrap for custom initialization
-    $projectBootstrap = Mini::$mini->root . '/_config/bootstrap.php';
-    if (file_exists($projectBootstrap)) {
-        require_once $projectBootstrap;
-    }
+    // Fire onAfterBootstrap at the very end
+    Mini::$mini->onAfterBootstrap->trigger();
 }
 
 /**
@@ -279,244 +309,14 @@ function router(): void
     $requestUri = $_SERVER['REQUEST_URI'] ?? '';
     $router = new \mini\SimpleRouter();
     $router->handleRequest($requestUri);
-}
 
-function request(): \Psr\Http\Message\ServerRequestInterface
-{
-    // Cache request per PHP request lifecycle (static variable)
-    static $request = null;
-
-    if ($request === null) {
-        $psr17Factory = new \Nyholm\Psr7\Factory\Psr17Factory();
-
-        $creator = new \Nyholm\Psr7Server\ServerRequestCreator(
-            $psr17Factory,
-            $psr17Factory,
-            $psr17Factory,
-            $psr17Factory
-        );
-
-        $request = $creator->fromGlobals();
-    }
-
-    return $request;
-}
-
-function response(): \Psr\Http\Message\ResponseInterface
-{
-    $psr17Factory = new \Nyholm\Psr7\Factory\Psr17Factory();
-    return $psr17Factory->createResponse(200);
-}
-
-function json_response(int|float|bool|string|null|\JsonSerializable|array $value, int $status = 200): \Psr\Http\Message\ResponseInterface
-{
-    return response()
-        ->withStatus($status)
-        ->withHeader('Content-Type', 'application/json')
-        ->withBody(\Nyholm\Psr7\Stream::create(json_encode($value)));
-}
-
-function html_response(string $html, int $status = 200): \Psr\Http\Message\ResponseInterface
-{
-    return response()
-        ->withStatus($status)
-        ->withHeader('Content-Type', 'text/html; charset=utf-8')
-        ->withBody(\Nyholm\Psr7\Stream::create($html));
-}
-
-/**
- * Save a model (automatically detects insert vs update)
- *
- * @throws ValidationException If validation fails
- * @throws AccessDeniedException If access is denied
- */
-function model_save(object $model): bool
-{
-    return table(get_class($model))->saveModel($model);
-}
-
-/**
- * Delete a model
- *
- * @throws AccessDeniedException If access is denied
- */
-function model_delete(object $model): bool
-{
-    return table(get_class($model))->deleteModel($model);
-}
-
-/**
- * Check if a model has unsaved changes
- */
-function model_dirty(object $model): bool
-{
-    return table(get_class($model))->isDirty($model);
-}
-
-/**
- * Validate a model without saving
- *
- * @return array<string, Translatable>|null Returns null if valid, errors array if invalid
- */
-function model_invalid(object $model): ?array
-{
-    return table(get_class($model))->validateModel($model);
-}
-
-/**
- * Get the global codec registry for type-specific codec registration
- *
- * @return \mini\Util\InstanceStore
- */
-function codecs(): \mini\Util\InstanceStore
-{
-    static $codecs = null;
-
-    if ($codecs === null) {
-        $codecs = new \mini\Util\InstanceStore(CodecInterface::class);
-        registerBuiltinCodecs();
-    }
-
-    return $codecs;
-}
-
-/**
- * Register built-in codec types
- *
- * Called automatically during framework initialization to provide
- * out-of-the-box support for common PHP types.
- */
-function registerBuiltinCodecs(): void
-{
-    static $registered = false;
-    if ($registered) return;
-    $registered = true;
-
-    // DateTime support - handles both string and integer backends
-    codecs()->set(\DateTime::class, new class
-        implements \mini\Codecs\StringCodecInterface, \mini\Codecs\IntegerCodecInterface {
-
-        public function fromBackendString(string $value): \DateTime
-        {
-            return new \DateTime($value);
-        }
-
-        public function toBackendString(mixed $value): string
-        {
-            return $value->format('Y-m-d H:i:s');
-        }
-
-        public function fromBackendInteger(int $value): \DateTime
-        {
-            $dt = new \DateTime();
-            $dt->setTimestamp($value);
-            return $dt;
-        }
-
-        public function toBackendInteger(mixed $value): int
-        {
-            return $value->getTimestamp();
-        }
-    });
-
-    // DateTimeImmutable support - handles both string and integer backends
-    codecs()->set(\DateTimeImmutable::class, new class
-        implements \mini\Codecs\StringCodecInterface, \mini\Codecs\IntegerCodecInterface {
-
-        public function fromBackendString(string $value): \DateTimeImmutable
-        {
-            return new \DateTimeImmutable($value);
-        }
-
-        public function toBackendString(mixed $value): string
-        {
-            return $value->format('Y-m-d H:i:s');
-        }
-
-        public function fromBackendInteger(int $value): \DateTimeImmutable
-        {
-            $dt = new \DateTimeImmutable();
-            return $dt->setTimestamp($value);
-        }
-
-        public function toBackendInteger(mixed $value): int
-        {
-            return $value->getTimestamp();
-        }
-    });
-}
-
-/**
- * Setup authentication system with application implementation
- *
- * Applications should call this during bootstrap to register their
- * AuthInterface implementation with the framework.
- */
-function setupAuth(\mini\AuthInterface $auth): void
-{
-    \mini\Auth::setImplementation($auth);
-}
-
-/**
- * Get the auth facade instance
- *
- * Provides access to authentication methods like requireLogin(), hasRole(), etc.
- * Returns null if no auth system is registered.
- */
-function auth(): ?\mini\Auth
-{
-    try {
-        return \mini\Auth::isAuthenticated() !== null ? new \mini\Auth() : null;
-    } catch (\RuntimeException) {
-        return null;
+    // Explicitly flush output buffer on successful completion
+    // (Exception handler discards buffer via ob_end_clean())
+    if (ob_get_level() > 0) {
+        ob_end_flush();
     }
 }
 
-/**
- * Check if user is currently authenticated
- */
-function is_logged_in(): bool
-{
-    return \mini\Auth::isAuthenticated();
-}
-
-/**
- * Require user to be logged in, redirect to login if not
- */
-function require_login(): void
-{
-    \mini\Auth::requireLogin();
-}
-
-/**
- * Require user to have a specific role
- *
- * @throws \mini\Http\AccessDeniedException If user doesn't have the required role
- */
-function require_role(string $role): void
-{
-    \mini\Auth::requireRole($role);
-}
-
-/**
- * Handle AccessDeniedException with proper 401/403 logic
- */
-function handleAccessDeniedException(\mini\Http\AccessDeniedException $exception): void
-{
-    // Determine correct HTTP status based on authentication state
-    if (\mini\Auth::hasImplementation()) {
-        if (\mini\Auth::isAuthenticated()) {
-            // User is authenticated but lacks permission → 403 Forbidden
-            showErrorPage(403, $exception);
-        } else {
-            // User is not authenticated → 401 Unauthorized
-            showErrorPage(401, $exception);
-        }
-    } else {
-        // No auth system registered - default to 401 (needs authentication)
-        showErrorPage(401, $exception);
-    }
-}
 
 /**
  * Handle other HTTP exceptions
@@ -531,8 +331,6 @@ function handleHttpException(\mini\Http\HttpException $exception): void
  */
 function showErrorPage(int $statusCode, \Throwable $exception): void
 {
-    http_response_code($statusCode);
-
     // Error pages stored in project root (not web-accessible, like 404.php)
     $errorFile = Mini::$mini->root . "/_errors/{$statusCode}.php";
 
@@ -544,6 +342,9 @@ function showErrorPage(int $statusCode, \Throwable $exception): void
             $errorFile = Mini::$mini->root . "/_errors/401.php";
         }
     }
+
+    // Set response code
+    http_response_code($statusCode);
 
     if (file_exists($errorFile)) {
         // Make exception available to error page
@@ -582,17 +383,4 @@ function getHttpStatusText(int $statusCode): string
     };
 }
 
-/**
- * Clean output buffer before sending PSR-7 response
- *
- * Called by SimpleRouter when a controller returns a PSR-7 response.
- * Clears any buffered output to ensure clean response delivery.
- */
-function cleanGlobalControllerOutput(): void
-{
-    // Clean output buffer if it exists (started by bootstrap())
-    if (ob_get_level() > 0) {
-        ob_clean();
-    }
-}
 

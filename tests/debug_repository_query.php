@@ -2,9 +2,9 @@
 
 require_once __DIR__ . '/../../vendor/autoload.php';
 
-use mini\Repository\DatabaseRepository;
+use mini\Tables\DatabaseRepository;
 use mini\Util\InstanceStore;
-use mini\Repository\RepositoryInterface;
+use mini\Tables\RepositoryInterface;
 use mini\Contracts\DatabaseInterface;
 use mini\Database\PdoDatabase;
 

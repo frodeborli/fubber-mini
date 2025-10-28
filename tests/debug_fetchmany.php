@@ -2,7 +2,7 @@
 
 require_once __DIR__ . '/../../vendor/autoload.php';
 
-use mini\Repository\DatabaseRepository;
+use mini\Tables\DatabaseRepository;
 use mini\DB;
 
 class TestUser {

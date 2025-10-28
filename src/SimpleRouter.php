@@ -2,15 +2,10 @@
 
 namespace mini;
 
-use Psr\Http\Message\ResponseInterface;
-use Psr\Http\Server\RequestHandlerInterface;
-
 class SimpleRouter
 {
     private array $routes;
     private string $scope;
-    private string $projectRoot;
-    private array $config;
 
     public function __construct(array $routes = [], string $scope = '')
     {
@@ -19,24 +14,15 @@ class SimpleRouter
     }
 
     /**
-     * Handle a complete routing request with file-based and hierarchical routing
+     * Handle a complete routing request
+     * Searches _routes/ directory for route handlers
      */
     public function handleRequest(string $requestUri): void
     {
-        $this->projectRoot = $GLOBALS['app']['root'] ?? dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 3);
-
-        // Load config if not already loaded by bootstrap
-        if (isset($GLOBALS['app']['config'])) {
-            $this->config = $GLOBALS['app']['config'];
-        } else {
-            $configPath = $this->projectRoot . '/config.php';
-            $this->config = file_exists($configPath) ? require $configPath : [];
-        }
-
         $path = parse_url($requestUri, PHP_URL_PATH) ?? '';
-        $baseUrl = $this->config['base_url'] ?? '';
+        $baseUrl = Mini::$mini->baseUrl ?? '';
 
-        // 1. Try automatic file-based routing first
+        // 1. Try file-based routing in _routes/ directory
         $target = $this->tryFileBasedRouting($path, $baseUrl);
         if ($target) {
             $this->routes = [$path => $target];
@@ -50,24 +36,28 @@ class SimpleRouter
         $routeInfo = $this->findScopedRouteFile($strippedPath);
 
         if ($routeInfo) {
-            $routes = require $routeInfo['file'];
-            // Include base URL prefix in the basePath for proper pattern matching
-            $basePath = '';
-            if (!empty($baseUrl)) {
-                $basePath = parse_url($baseUrl, PHP_URL_PATH) ?? '';
-            }
-            $fullBasePath = $basePath . $routeInfo['basePath'];
+            $result = require $routeInfo['file'];
 
-            $this->routes = $this->processRoutesWithScope($routes, $routeInfo['scope'], $fullBasePath);
-            $this->scope = $routeInfo['scope'];
+            // Handle routes array
+            if (is_array($result)) {
+                // Include base URL prefix in the basePath for proper pattern matching
+                $basePath = '';
+                if (!empty($baseUrl)) {
+                    $basePath = parse_url($baseUrl, PHP_URL_PATH) ?? '';
+                }
+                $fullBasePath = $basePath . $routeInfo['basePath'];
 
-            if ($this->resolve($requestUri)) {
-                return;
+                $this->routes = $this->processRoutesWithScope($result, $routeInfo['scope'], $fullBasePath);
+                $this->scope = $routeInfo['scope'];
+
+                if ($this->resolve($requestUri)) {
+                    return;
+                }
             }
         }
 
-        // 3. Try global config/routes.php with stripped path
-        $globalRoutesFile = $this->projectRoot . '/config/routes.php';
+        // 3. Try global config/routes.php with stripped path (in project root - outside web root)
+        $globalRoutesFile = Mini::$mini->root . '/config/routes.php';
         if (file_exists($globalRoutesFile)) {
             $globalRoutes = require $globalRoutesFile;
             $this->routes = $globalRoutes;
@@ -110,28 +100,7 @@ class SimpleRouter
         }
 
         // 4. Handle 404
-        http_response_code(404);
-
-        // Get project root from global state
-        $projectRoot = $GLOBALS['app']['root'] ?? dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 3);
-
-        if (file_exists($projectRoot . '/404.php')) {
-            require $projectRoot . '/404.php';
-        } else {
-            // Basic fallback 404 page
-            echo '<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>404 - Page Not Found</title>
-</head>
-<body>
-    <h1>404 - Page Not Found</h1>
-    <p>The requested page could not be found.</p>
-</body>
-</html>';
-        }
+        $this->handle404();
 
         return true;
     }
@@ -216,8 +185,6 @@ class SimpleRouter
             $this->executeCallableTarget($target);
         } elseif (is_array($target)) {
             $this->executeArrayTarget($target);
-        } elseif ($target instanceof RequestHandlerInterface) {
-            $this->executeRequestHandler($target);
         } else {
             throw new \InvalidArgumentException('Invalid route target type: ' . gettype($target));
         }
@@ -239,44 +206,23 @@ class SimpleRouter
             $file = $this->scope . '/' . $file;
         }
 
-        // Get project root for file resolution
-        $projectRoot = $GLOBALS['app']['root'] ?? dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 3);
+        // Find route file in _routes/ directory via PathsRegistry
+        $routeFile = ltrim($file, '/');
+        $fullPath = Mini::$mini->paths->routes->findFirst($routeFile);
 
-        // Include the target file with proper error handling
-        $fullPath = $projectRoot . '/' . ltrim($file, '/');
-        if (!file_exists($fullPath)) {
+        if (!$fullPath) {
             http_response_code(500);
-            echo "Internal Server Error: Target file not found: $fullPath";
+            echo "Internal Server Error: Route target not found: $routeFile";
             return;
         }
 
-        // Execute controller with exception handling and buffer management
+        // Execute controller with exception handling
         try {
-            // Include the target file and capture return value
-            $result = require $fullPath;
-
-            // Handle PSR-7 response from included file
-            if ($result instanceof ResponseInterface) {
-                // Check if headers have already been sent
-                if (headers_sent($file, $line)) {
-                    throw new \RuntimeException(
-                        "Cannot send PSR-7 response: headers already sent in $file on line $line. " .
-                        "Controllers returning ResponseInterface must not produce any output before returning."
-                    );
-                }
-
-                // Check for unwanted output in buffer before cleaning
-                $this->validateCleanPsr7Response($fullPath);
-
-                // Clean any output the controller may have produced
-                \mini\cleanGlobalControllerOutput();
-                $this->outputPsr7Response($result);
-            }
-            // For traditional approach (no return value), output has already been sent directly
-
+            // Include the target file (it will echo its output)
+            require $fullPath;
         } catch (\Throwable $e) {
-            // Attempt exception recovery using output buffer management
-            $this->handleControllerException($e, $fullPath);
+            // Re-throw for global exception handler
+            throw $e;
         }
     }
 
@@ -286,28 +232,15 @@ class SimpleRouter
             // Call the target function/closure
             $result = call_user_func($target);
 
-            // Handle different return types
+            // If callable returns a string, treat it as a redirect target
             if (is_string($result)) {
                 $this->executeStringTarget($result);
-            } elseif ($result instanceof ResponseInterface) {
-                // Check headers and validate clean response
-                if (headers_sent($file, $line)) {
-                    throw new \RuntimeException(
-                        "Cannot send PSR-7 response: headers already sent in $file on line $line"
-                    );
-                }
-
-                // Check for unwanted output before cleaning
-                $this->validateCleanPsr7Response('callable target');
-                \mini\cleanGlobalControllerOutput();
-                $this->outputPsr7Response($result);
-            } elseif ($result instanceof RequestHandlerInterface) {
-                $this->executeRequestHandler($result);
             }
+            // Otherwise, assume callable echoed its output directly
 
         } catch (\Throwable $e) {
-            // Handle callable target exceptions
-            $this->handleControllerException($e, 'callable target');
+            // Re-throw for global exception handler
+            throw $e;
         }
     }
 
@@ -317,28 +250,6 @@ class SimpleRouter
         throw new \RuntimeException('Array route targets not yet implemented');
     }
 
-    private function executeRequestHandler(RequestHandlerInterface $handler): void
-    {
-        $request = \mini\request();
-        $response = $handler->handle($request);
-        $this->outputPsr7Response($response);
-    }
-
-    private function outputPsr7Response(ResponseInterface $response): void
-    {
-        // Set HTTP status code
-        http_response_code($response->getStatusCode());
-
-        // Set headers
-        foreach ($response->getHeaders() as $name => $values) {
-            foreach ($values as $value) {
-                header($name . ': ' . $value, false);
-            }
-        }
-
-        // Output body
-        echo $response->getBody();
-    }
 
     private function redirectTo(string $path): void
     {
@@ -347,7 +258,9 @@ class SimpleRouter
             $redirectUrl .= '?' . $_SERVER['QUERY_STRING'];
         }
 
-        header('Location: ' . $redirectUrl, true, 301);
+        http_response_code(301);
+        header('Location: ' . $redirectUrl);
+        exit;
     }
 
     // === Helper methods moved from functions.php ===
@@ -365,25 +278,28 @@ class SimpleRouter
         // Remove leading slash
         $remaining = ltrim($path, '/');
 
-        // Handle root path
-        if (empty($remaining)) {
-            if (file_exists($this->projectRoot . '/index.php')) {
-                return '/index.php';
+        // Try to find route handler in _routes/ via PathsRegistry
+        // / → _routes/index.php
+        // /users → _routes/users.php
+        // /api/posts → _routes/api/posts.php
+
+        $routeFile = empty($remaining) ? 'index.php' : $remaining . '.php';
+        $foundPath = Mini::$mini->paths->routes->findFirst($routeFile);
+
+        if ($foundPath) {
+            // Return path relative to routes directory for executeTarget()
+            return $routeFile;
+        }
+
+        // Try directory index: /users → _routes/users/index.php
+        if (!empty($remaining)) {
+            $indexFile = $remaining . '/index.php';
+            $foundPath = Mini::$mini->paths->routes->findFirst($indexFile);
+
+            if ($foundPath) {
+                // Redirect to /path/ to ensure consistent URLs
+                return '/' . $remaining . '/';
             }
-            return null;
-        }
-
-        // Try /path.php for /path requests
-        $phpFile = $remaining . '.php';
-        if (file_exists($this->projectRoot . '/' . $phpFile)) {
-            return '/' . $phpFile;
-        }
-
-        // Try /path/index.php for /path requests
-        $indexFile = $remaining . '/index.php';
-        if (file_exists($this->projectRoot . '/' . $indexFile)) {
-            // Redirect to /path/ to ensure consistent URLs
-            return '/' . $remaining . '/';
         }
 
         return null;
@@ -410,14 +326,17 @@ class SimpleRouter
         $pathParts = explode('/', trim($requestPath, '/'));
         $pathParts = array_filter($pathParts, fn($part) => $part !== '');
 
-        // Check from most specific to least specific directory
+        // Check from most specific to least specific directory in _routes/
         while (!empty($pathParts)) {
             $dirPath = implode('/', $pathParts);
-            $routeFile = $this->projectRoot . '/' . $dirPath . '/_routes.php';
+            $routeFile = $dirPath . '/_routes.php';
 
-            if (file_exists($routeFile)) {
+            // Try to find in _routes/ via PathsRegistry
+            $foundPath = Mini::$mini->paths->routes->findFirst($routeFile);
+
+            if ($foundPath) {
                 return [
-                    'file' => $routeFile,
+                    'file' => $foundPath,
                     'scope' => $dirPath,
                     'basePath' => '/' . $dirPath
                 ];
@@ -426,8 +345,8 @@ class SimpleRouter
             array_pop($pathParts);
         }
 
-        // No scoped routes found, fall back to global config
-        $globalFile = $this->projectRoot . '/config/routes.php';
+        // No scoped routes found, fall back to global routes file
+        $globalFile = Mini::$mini->root . '/_config/routes.php';
         if (file_exists($globalFile)) {
             return [
                 'file' => $globalFile,
@@ -467,129 +386,36 @@ class SimpleRouter
         return $processedRoutes;
     }
 
+    private function resolveTargetFile(string $target): string
+    {
+        // Parse target URL and extract file path
+        $parts = parse_url($target);
+        $file = $parts['path'] ?? $target;
+
+        // Resolve relative paths within scope
+        if (!empty($this->scope) && !str_starts_with($file, '/')) {
+            $file = $this->scope . '/' . $file;
+        }
+
+        // Remove leading slash for PathsRegistry lookup
+        $file = ltrim($file, '/');
+
+        // Try to find in _routes/ via PathsRegistry
+        $foundPath = Mini::$mini->paths->routes->findFirst($file);
+
+        if ($foundPath) {
+            return $foundPath;
+        }
+
+        // Fallback: return as-is (for backwards compatibility or error handling)
+        return Mini::$mini->root . '/_routes/' . $file;
+    }
+
     private function handle404(): void
     {
-        http_response_code(404);
-
-        if (file_exists($this->projectRoot . '/404.php')) {
-            require $this->projectRoot . '/404.php';
-        } else {
-            // Basic fallback 404 page (this is the same as the existing one)
-            echo '<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>404 - Page Not Found</title>
-</head>
-<body>
-    <h1>404 - Page Not Found</h1>
-    <p>The requested page could not be found.</p>
-</body>
-</html>';
-        }
-    }
-
-    /**
-     * Static method to handle clean URL redirects (called from bootstrap)
-     */
-    public static function handleCleanUrlRedirects(): void
-    {
-        $projectRoot = $GLOBALS['app']['root'] ?? dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 3);
-        $config = $GLOBALS['app']['config'] ?? [];
-
-        $requestUri = $_SERVER['REQUEST_URI'] ?? '';
-        $path = parse_url($requestUri, PHP_URL_PATH) ?? '';
-        $query = $_SERVER['QUERY_STRING'] ?? '';
-        $baseUrl = $config['base_url'] ?? '';
-
-        $redirectTo = null;
-
-        // Parse base path from base_url for accurate redirection
-        $basePath = '';
-        if (!empty($baseUrl)) {
-            $basePath = parse_url($baseUrl, PHP_URL_PATH) ?? '';
-        }
-
-        // Strip base path for processing, then add back for redirects
-        $strippedPath = $path;
-        if (!empty($basePath) && str_starts_with($path, $basePath)) {
-            $strippedPath = substr($path, strlen($basePath)) ?: '/';
-        }
-
-        // Handle PHP extension removal: /login.php → /login (if not index.php)
-        if (preg_match('/^(.+)\.php$/', $strippedPath, $matches) && !str_ends_with($strippedPath, '/index.php')) {
-            $redirectTo = $basePath . $matches[1];
-        }
-        // Handle unnecessary trailing slash: /test-routing/ → /test-routing (if test-routing.php exists but test-routing/index.php doesn't)
-        elseif (str_ends_with($strippedPath, '/') && $strippedPath !== '/') {
-            $pathWithoutSlash = rtrim($strippedPath, '/');
-            $phpFile = ltrim($pathWithoutSlash, '/') . '.php';
-            $indexFile = ltrim($strippedPath, '/') . 'index.php';
-
-            // If there's a .php file but no index.php, redirect to remove trailing slash
-            if (file_exists($projectRoot . '/' . $phpFile) && !file_exists($projectRoot . '/' . $indexFile)) {
-                $redirectTo = $basePath . $pathWithoutSlash;
-            }
-        }
-
-        // Perform redirect if needed
-        if ($redirectTo !== null) {
-            $redirectUrl = $redirectTo;
-            if ($query) {
-                $redirectUrl .= '?' . $query;
-            }
-
-            // Send 301 permanent redirect
-            header('Location: ' . $redirectUrl, true, 301);
-            exit;
-        }
-    }
-
-    /**
-     * Validate that controller hasn't produced unwanted output before PSR-7 response
-     *
-     * @param string $controllerPath Path to the controller for error context
-     * @throws \RuntimeException When controller produced output before returning PSR-7 response
-     */
-    private function validateCleanPsr7Response(string $controllerPath): void
-    {
-        // Check for output in any active buffers
-        $totalOutput = 0;
-        $outputDetails = [];
-
-        // Check all buffer levels for content
-        for ($level = 1; $level <= ob_get_level(); $level++) {
-            $content = ob_get_contents();
-            if ($content !== false && strlen($content) > 0) {
-                $totalOutput += strlen($content);
-                $outputDetails[] = "Level $level: " . strlen($content) . " bytes";
-            }
-        }
-
-        // If any output was detected, throw strict validation error
-        if ($totalOutput > 0) {
-            $errorMessage = "Controller returned PSR-7 response but produced output ($totalOutput bytes total). " .
-                "Controllers returning ResponseInterface must not produce any output. " .
-                "Remove all echo, print, var_dump, or other output statements.\n" .
-                "Controller: $controllerPath\n" .
-                "Output detected: " . implode(', ', $outputDetails);
-
-            throw new \RuntimeException($errorMessage);
-        }
-    }
-
-    /**
-     * Handle controller exceptions with buffer-aware recovery
-     *
-     * @param \Throwable $exception The exception thrown by the controller
-     * @param string $controllerPath Path to the controller that threw the exception
-     */
-    private function handleControllerException(\Throwable $exception, string $controllerPath): void
-    {
-        // Headers sent check and logging will be handled by global exception handler
-        // Just re-throw and let global handler deal with everything
-        throw $exception;
+        // Use centralized error page handling
+        $exception = new \mini\Http\HttpException('Page not found', 404);
+        \mini\showErrorPage(404, $exception);
     }
 
 }

@@ -9,6 +9,8 @@ class PathsRegistry
 {
     /** @var list<string> */
     private array $paths = [];
+    private array $cacheFirst = [];
+    private array $cacheAll = [];
 
     public function __construct(string $primaryPath)
     {
@@ -17,6 +19,8 @@ class PathsRegistry
 
     public function addPath(string $path): void
     {
+        $this->cacheFirst = [];
+        $this->cacheAll = [];
         $path = rtrim($path, '/');
         if (!in_array($path, $this->paths)) {
             $this->paths[] = $path;
@@ -25,12 +29,17 @@ class PathsRegistry
 
     public function findFirst(string $filename): ?string
     {
+        if (isset($this->cacheFirst[$filename]) || \array_key_exists($filename, $this->cacheFirst)) {
+            return $this->cacheFirst[$filename];
+        }
         foreach ($this->paths as $path) {
             $fullPath = $path . '/' . ltrim($filename, '/');
             if (file_exists($fullPath)) {
+                $this->cacheFirst[$filename] = $fullPath;
                 return $fullPath;
             }
         }
+        $this->cacheFirst[$filename] = null;
         return null;
     }
 
@@ -39,6 +48,9 @@ class PathsRegistry
      */
     public function findAll(string $filename): array
     {
+        if (isset($this->cacheAll[$filename])) {
+            return $this->cacheAll[$filename];
+        }
         $found = [];
         foreach ($this->paths as $path) {
             $fullPath = $path . '/' . ltrim($filename, '/');
@@ -46,6 +58,7 @@ class PathsRegistry
                 $found[] = $fullPath;
             }
         }
+        $this->cacheAll[$filename] = $found;
         return $found;
     }
 

@@ -11,6 +11,9 @@ use mini\Services\PDO as PDOService;
 echo "Testing PDO Service Class\n";
 echo str_repeat('=', 70) . "\n\n";
 
+// Bootstrap framework (required for Scoped services)
+\mini\bootstrap();
+
 // Test 1: Framework fallback creates configured SQLite
 echo "Test 1: Framework fallback (no app config)\n";
 try {
