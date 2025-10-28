@@ -193,7 +193,8 @@ if ($nonce->verify($_POST['__nonce__'])) {
 ```
 
 **Security Features:**
-- Tokens signed with HMAC-SHA256
+- Tokens signed with HMAC-SHA256 using `Mini::$mini->salt`
+- Salt auto-generated from machine fingerprint + persistent random (zero-config)
 - Includes session ID and user agent for additional security
 - Time-based expiration (default 24 hours, customizable)
 - IP address validation
@@ -233,7 +234,7 @@ class Mini implements ContainerInterface {
     public readonly string $locale;            # Default locale
     public readonly string $timezone;          # Default timezone
     public readonly string $defaultLanguage;   # Default language
-    public readonly string $salt;              # Cryptographic salt (MINI_SALT)
+    public readonly string $salt;              # Cryptographic salt (auto-generated or MINI_SALT)
 
     public function addService(string $id, Lifetime $lifetime, Closure $factory): void
     public function has(string $id): bool
@@ -308,7 +309,7 @@ MINI_VIEWS_ROOT=/path/views      # Views directory
 MINI_LOCALE=nb_NO                # Default locale
 MINI_TIMEZONE=Europe/Oslo        # Default timezone
 MINI_LANG=nb                     # Default language
-MINI_SALT=your-random-salt-here  # Cryptographic salt (for CSRF, etc.)
+MINI_SALT=your-random-salt-here  # Cryptographic salt (optional, auto-generated if not set)
 DEBUG=1                          # Debug mode
 ```
 

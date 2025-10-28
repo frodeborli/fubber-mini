@@ -393,8 +393,8 @@ final class Mini implements ContainerInterface {
         $this->defaultLanguage = $_ENV['MINI_LANG'] ?? 'en';
 
         // Application salt for cryptographic operations (CSRF tokens, etc.)
-        // Should be set in .env as MINI_SALT for production
-        $this->salt = $_ENV['MINI_SALT'] ?? hash('sha256', $this->root . PHP_VERSION . php_uname());
+        // Uses machine-specific fingerprint + persistent random salt if MINI_SALT not set
+        $this->salt = $_ENV['MINI_SALT'] ?? Util\MachineSalt::get();
 
         // Register core services
         $this->registerCoreServices();
