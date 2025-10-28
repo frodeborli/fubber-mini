@@ -704,11 +704,10 @@ try {
 
 Templates are stored in `_views/` directory and resolved using the path registry.
 
-### Rendering Templates
+### Simple Templates
 
 ```php
 // _routes/users.php
-
 $users = db()->query('SELECT * FROM users ORDER BY name')->fetchAll();
 
 echo render('users.php', [
@@ -717,14 +716,8 @@ echo render('users.php', [
 ]);
 ```
 
-### Template File
-
 ```php
-<?php
-// _views/users.php
-$content = ob_start();
-?>
-
+<?php // _views/users.php ?>
 <h1><?= h($title) ?></h1>
 
 <ul>
@@ -736,17 +729,72 @@ $content = ob_start();
         </li>
     <?php endforeach; ?>
 </ul>
-
-<?php
-$content = ob_get_clean();
-echo render('layout.php', compact('title', 'content'));
-?>
 ```
+
+### Template Inheritance
+
+Mini supports Twig-like template inheritance using pure PHP. Child templates extend parent layouts and define named blocks.
+
+**Parent Layout (_views/layout.php):**
+```php
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title><?php $block('title', 'My Site'); ?></title>
+</head>
+<body>
+  <header>
+    <h1><?php $block('header', 'Welcome'); ?></h1>
+  </header>
+
+  <main>
+    <?php $block('content'); ?>
+  </main>
+
+  <footer>
+    <?php $block('footer', '© ' . date('Y')); ?>
+  </footer>
+</body>
+</html>
+```
+
+**Child Template (_views/users.php):**
+```php
+<?php
+// Extend parent layout
+$extend('layout.php');
+
+// Define title block
+$start('title'); ?>User List<?php $end();
+
+// Define content block
+$start('content'); ?>
+  <h2>All Users</h2>
+  <ul>
+    <?php foreach ($users as $user): ?>
+      <li><?= h($user['name']) ?></li>
+    <?php endforeach; ?>
+  </ul>
+<?php $end();
+```
+
+**Template Helpers:**
+- `$extend('file.php')` - Extend parent layout
+- `$start('name')` - Start capturing named block
+- `$end()` - End block capture
+- `$block('name', 'default')` - Output block with optional default
+
+**Benefits:**
+- Pure PHP, opcache-friendly
+- No compilation step needed
+- Blocks with defaults
+- Clean separation of layout and content
 
 ### Layout File
 
 ```php
-<?php // _views/layout.php ?>
+<?php // Example: More complex layout ?>
 <!DOCTYPE html>
 <html>
 <head>

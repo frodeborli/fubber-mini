@@ -19,8 +19,21 @@ use ReflectionClass;
 /**
  * Render a template with provided variables
  *
+ * Supports template inheritance via extend(), start(), end(), block() helpers.
  * Uses path registry to find templates in _views/ directory.
- * Example: render('settings.php', ['user' => $user])
+ *
+ * Simple templates:
+ *   render('settings.php', ['user' => $user])
+ *
+ * With layout inheritance:
+ *   // child.php
+ *   <?php $extend('layout.php'); ?>
+ *   <?php $start('title'); ?>My Page<?php $end(); ?>
+ *   <?php $start('content'); ?><p>Content here</p><?php $end(); ?>
+ *
+ *   // layout.php
+ *   <html><head><title><?php $block('title', 'Untitled'); ?></title></head>
+ *   <body><?php $block('content'); ?></body></html>
  *
  * @param string $template Template filename (e.g., 'settings.php', 'admin/dashboard.php')
  * @param array $vars Variables to extract for template
@@ -35,24 +48,49 @@ function render($template, $vars = []) {
         throw new Exception("Template not found: $template (searched in: $searchedPaths)");
     }
 
-    // Extract variables for template use
-    extract($vars);
+    // Reuse context if rendering parent layout, otherwise create new
+    $ctx = $vars['__ctx'] ?? new TplCtx();
 
-    // Start output buffering
+    // Restore blocks from child if this is a parent layout render
+    if (isset($vars['__blocks'])) {
+        $ctx->blocks = $vars['__blocks'];
+    }
+
+    // Make helper closures available in template scope
+    $extend = fn(string $file) => $ctx->extend($file);
+    $start  = fn(string $name) => $ctx->start($name);
+    $end    = fn() => $ctx->end();
+    $block  = fn(string $name, string $default = '') => $ctx->block($name, $default);
+
+    // Isolated scope render function
+    $renderOnce = function(string $__file, array $__vars) use ($extend, $start, $end, $block) {
+        extract($__vars, EXTR_SKIP);
+        require $__file;
+    };
+
+    // Render template
     ob_start();
-
     try {
-        // Include the template
-        include $templatePath;
+        $renderOnce($templatePath, $vars);
     } catch (Throwable $e) {
         ob_end_clean();
         return (string) $e;
     }
+    $output = ob_get_clean();
 
-    // Get the content and clean buffer
-    $content = ob_get_clean();
+    // If no explicit "content" block was defined, expose child output as "content"
+    if (!isset($ctx->blocks['content']) && $output !== '') {
+        $ctx->blocks['content'] = $output;
+    }
 
-    return $content;
+    // If child called $extend(), render parent layout with same context
+    if ($ctx->layout !== null) {
+        $layoutToRender = $ctx->layout;
+        $ctx->layout = null; // Prevent infinite loop
+        return render($layoutToRender, $vars + ['__blocks' => $ctx->blocks, '__ctx' => $ctx]);
+    }
+
+    return $output;
 }
 
 /**

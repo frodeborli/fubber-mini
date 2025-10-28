@@ -25,6 +25,29 @@ h(string $str): string                            # HTML escape
 render(string $template, array $vars = []): string  # Render template from _views/
 ```
 
+### Template Inheritance
+
+Inside templates, these helpers are available for layout inheritance:
+
+```php
+$extend(string $layout)              # Extend parent layout
+$start(string $blockName)            # Start capturing block
+$end()                               # End block capture
+$block(string $name, string $default = '')  # Output block with default
+```
+
+**Example:**
+```php
+// Child template
+<?php $extend('layout.php'); ?>
+<?php $start('title'); ?>My Page<?php $end(); ?>
+<?php $start('content'); ?><p>Content</p><?php $end(); ?>
+
+// Parent layout
+<html><head><title><?php $block('title', 'Untitled'); ?></title></head>
+<body><?php $block('content'); ?></body></html>
+```
+
 ### URL Generation
 
 ```php
