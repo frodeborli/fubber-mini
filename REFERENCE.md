@@ -30,27 +30,39 @@ render(string $template, array $vars = []): string  # Render template from _view
 Inside templates, these helpers are available for layout inheritance:
 
 ```php
-$extend(string $layout)              # Extend parent layout
-$start(string $blockName)            # Start capturing block
-$end()                               # End block capture
-$set(string $name, string $value)    # Set block to simple value
-$block(string $name, string $default = '')  # Output block with default
-$partial(string $file, array $vars = [])    # Include partial template
+$extend(string $layout)                          # Extend parent layout
+$block(string $name, ?string $value = null)      # Define block (dual-use)
+$end()                                           # End buffered block
+$show(string $name, string $default = '')        # Output block with default
+```
+
+**Dual-Use `$block()` Syntax:**
+```php
+// Inline: set block to value directly
+$block('title', 'My Page');
+
+// Buffered: capture block content
+$block('content'); ?>
+  <p>Content here</p>
+<?php $end();
 ```
 
 **Example:**
 ```php
-// Child template
+// Child template (child.php)
 <?php $extend('layout.php'); ?>
-<?php $set('title', 'My Page'); ?>
-<?php $start('content'); ?><p>Content</p><?php $end(); ?>
+<?php $block('title', 'My Page'); ?>
+<?php $block('content'); ?><p>Page content</p><?php $end(); ?>
 
-// Parent layout
-<html><head><title><?php $block('title', 'Untitled'); ?></title></head>
-<body><?php $block('content'); ?></body></html>
+// Parent layout (layout.php)
+<html><head><title><?php $show('title', 'Untitled'); ?></title></head>
+<body><?php $show('content'); ?></body></html>
 
-// With partial
-<?= $partial('_user-card.php', ['user' => $currentUser]) ?>
+// Including sub-templates (partials)
+<?= mini\render('_user-card.php', ['user' => $currentUser]) ?>
+
+// Multi-level inheritance (3+ levels)
+// base.php → layout.php → page.php
 ```
 
 ### URL Generation

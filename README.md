@@ -741,19 +741,19 @@ Mini supports Twig-like template inheritance using pure PHP. Child templates ext
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title><?php $block('title', 'My Site'); ?></title>
+  <title><?php $show('title', 'My Site'); ?></title>
 </head>
 <body>
   <header>
-    <h1><?php $block('header', 'Welcome'); ?></h1>
+    <h1><?php $show('header', 'Welcome'); ?></h1>
   </header>
 
   <main>
-    <?php $block('content'); ?>
+    <?php $show('content'); ?>
   </main>
 
   <footer>
-    <?php $block('footer', '© ' . date('Y')); ?>
+    <?php $show('footer', '© ' . date('Y')); ?>
   </footer>
 </body>
 </html>
@@ -765,11 +765,11 @@ Mini supports Twig-like template inheritance using pure PHP. Child templates ext
 // Extend parent layout
 $extend('layout.php');
 
-// Define title block
-$start('title'); ?>User List<?php $end();
+// Define title block (inline syntax)
+$block('title', 'User List');
 
-// Define content block
-$start('content'); ?>
+// Define content block (buffered syntax)
+$block('content'); ?>
   <h2>All Users</h2>
   <ul>
     <?php foreach ($users as $user): ?>
@@ -781,24 +781,22 @@ $start('content'); ?>
 
 **Template Helpers:**
 - `$extend('file.php')` - Extend parent layout
-- `$start('name')` - Start capturing named block
-- `$end()` - End block capture
-- `$set('name', 'value')` - Set block to simple value (shorthand for start/echo/end)
-- `$block('name', 'default')` - Output block with optional default
-- `$partial('file.php', ['vars'])` - Include partial template with optional variables
+- `$block('name', ?string $value = null)` - Define block (dual-use: inline or buffered)
+- `$end()` - End buffered block capture
+- `$show('name', 'default')` - Output block with optional default
 
-**Examples:**
+**Dual-Use `$block()` Syntax:**
 ```php
-// Simple block value
-<?php $set('title', 'Welcome'); ?>
+// Inline: set block to value directly
+<?php $block('title', 'My Page'); ?>
 
-// Complex block content
-<?php $start('content'); ?>
+// Buffered: capture complex content
+<?php $block('content'); ?>
   <p>Complex HTML here</p>
 <?php $end(); ?>
 
-// Include partial
-<?= $partial('_user-card.php', ['user' => $currentUser]) ?>
+// Including sub-templates (partials)
+<?= mini\render('_user-card.php', ['user' => $currentUser]) ?>
 ```
 
 **Benefits:**
