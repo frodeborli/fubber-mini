@@ -235,7 +235,9 @@ $result = db()->transaction(function($db) use ($userId, $amount) {
 });
 ```
 
-### Tables (Query Builder)
+### Tables (Query Builder & Repository Pattern)
+
+Mini provides a fluent query builder with repository pattern support in `src/Tables/`:
 
 ```php
 // Using the table() query builder
@@ -255,6 +257,15 @@ $count = table('posts')->eq('published', true)->count();
 // Pagination
 $page = table('users')->page(2, 20);  // Page 2, 20 per page
 ```
+
+**Repository Pattern:**
+- `DatabaseRepository` - Full CRUD with automatic SQL generation
+- `ReadonlyRepositoryInterface` - Read-only data access
+- `CsvRepository` - CSV file data sources
+- `ScalarRepository` - Single-value repositories
+- Type-safe hydration via `ObjectHydrationTrait`
+
+See `src/Tables/README.md` for advanced usage.
 
 ## Migrations
 
@@ -666,18 +677,15 @@ $postCache->get('user:123');  // Returns null (different namespace)
 ### Basic Logging
 
 ```php
-// Get logger instance (PSR-3 compatible)
-$logger = log();
-
-// Log levels
-$logger->debug('Debug message');
-$logger->info('Info message');
-$logger->notice('Notice message');
-$logger->warning('Warning message');
-$logger->error('Error message');
-$logger->critical('Critical message');
-$logger->alert('Alert message');
-$logger->emergency('Emergency message');
+// Get logger instance (PSR-3 compatible) and log directly
+log()->debug('Debug message');
+log()->info('Info message');
+log()->notice('Notice message');
+log()->warning('Warning message');
+log()->error('Error message');
+log()->critical('Critical message');
+log()->alert('Alert message');
+log()->emergency('Emergency message');
 ```
 
 ### Context & Interpolation
