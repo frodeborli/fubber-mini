@@ -89,4 +89,35 @@ test("Variables are available in both child and parent", function() {
     assertContains('dave@example.com', $output, "Should have user email");
 });
 
+// Test 6: $set() helper works
+test('$set() helper for simple block values', function() {
+    $output = render('with-set.php', [
+        'user' => ['name' => 'Eve', 'email' => 'eve@example.com']
+    ]);
+
+    assertContains('<title>Page with $set()</title>', $output, 'Should have title set via $set()');
+    assertContains('<h1>Using $set() Helper</h1>', $output, 'Should have header set via $set()');
+    assertContains('User: Eve', $output, 'Should have content from $start()/$end()');
+    assertContains('© 2025 Example Corp', $output, 'Should have footer set via $set()');
+});
+
+// Test 7: $partial() helper works
+test('$partial() helper for including sub-templates', function() {
+    $output = render('with-partial.php', [
+        'users' => [
+            ['name' => 'Alice', 'email' => 'alice@example.com'],
+            ['name' => 'Bob', 'email' => 'bob@example.com'],
+            ['name' => 'Charlie', 'email' => 'charlie@example.com']
+        ]
+    ]);
+
+    assertContains('<h1>Users List</h1>', $output, "Should have main heading");
+    assertContains('<div class="user-card">', $output, "Should have user card partial");
+    assertContains('Alice', $output, "Should have first user");
+    assertContains('alice@example.com', $output, "Should have first user email");
+    assertContains('Bob', $output, "Should have second user");
+    assertContains('Charlie', $output, "Should have third user");
+    assertContains('Total users: 3', $output, "Should have user count");
+});
+
 echo "\n✅ All template tests passed!\n";

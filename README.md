@@ -783,12 +783,29 @@ $start('content'); ?>
 - `$extend('file.php')` - Extend parent layout
 - `$start('name')` - Start capturing named block
 - `$end()` - End block capture
+- `$set('name', 'value')` - Set block to simple value (shorthand for start/echo/end)
 - `$block('name', 'default')` - Output block with optional default
+- `$partial('file.php', ['vars'])` - Include partial template with optional variables
+
+**Examples:**
+```php
+// Simple block value
+<?php $set('title', 'Welcome'); ?>
+
+// Complex block content
+<?php $start('content'); ?>
+  <p>Complex HTML here</p>
+<?php $end(); ?>
+
+// Include partial
+<?= $partial('_user-card.php', ['user' => $currentUser]) ?>
+```
 
 **Benefits:**
 - Pure PHP, opcache-friendly
 - No compilation step needed
 - Blocks with defaults
+- Reusable partials
 - Clean separation of layout and content
 
 ### Layout File

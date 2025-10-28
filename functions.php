@@ -28,12 +28,15 @@ use ReflectionClass;
  * With layout inheritance:
  *   // child.php
  *   <?php $extend('layout.php'); ?>
- *   <?php $start('title'); ?>My Page<?php $end(); ?>
+ *   <?php $set('title', 'My Page'); ?>
  *   <?php $start('content'); ?><p>Content here</p><?php $end(); ?>
  *
  *   // layout.php
  *   <html><head><title><?php $block('title', 'Untitled'); ?></title></head>
  *   <body><?php $block('content'); ?></body></html>
+ *
+ * With partials:
+ *   <?= $partial('user-card.php', ['user' => $currentUser]) ?>
  *
  * @param string $template Template filename (e.g., 'settings.php', 'admin/dashboard.php')
  * @param array $vars Variables to extract for template
@@ -60,10 +63,12 @@ function render($template, $vars = []) {
     $extend = fn(string $file) => $ctx->extend($file);
     $start  = fn(string $name) => $ctx->start($name);
     $end    = fn() => $ctx->end();
+    $set    = fn(string $name, string $value) => $ctx->set($name, $value);
     $block  = fn(string $name, string $default = '') => $ctx->block($name, $default);
+    $partial = fn(string $file, array $partialVars = []) => render($file, array_merge($vars, $partialVars));
 
     // Isolated scope render function
-    $renderOnce = function(string $__file, array $__vars) use ($extend, $start, $end, $block) {
+    $renderOnce = function(string $__file, array $__vars) use ($extend, $start, $end, $set, $block, $partial) {
         extract($__vars, EXTR_SKIP);
         require $__file;
     };

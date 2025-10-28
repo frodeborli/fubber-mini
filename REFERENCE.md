@@ -33,19 +33,24 @@ Inside templates, these helpers are available for layout inheritance:
 $extend(string $layout)              # Extend parent layout
 $start(string $blockName)            # Start capturing block
 $end()                               # End block capture
+$set(string $name, string $value)    # Set block to simple value
 $block(string $name, string $default = '')  # Output block with default
+$partial(string $file, array $vars = [])    # Include partial template
 ```
 
 **Example:**
 ```php
 // Child template
 <?php $extend('layout.php'); ?>
-<?php $start('title'); ?>My Page<?php $end(); ?>
+<?php $set('title', 'My Page'); ?>
 <?php $start('content'); ?><p>Content</p><?php $end(); ?>
 
 // Parent layout
 <html><head><title><?php $block('title', 'Untitled'); ?></title></head>
 <body><?php $block('content'); ?></body></html>
+
+// With partial
+<?= $partial('_user-card.php', ['user' => $currentUser]) ?>
 ```
 
 ### URL Generation

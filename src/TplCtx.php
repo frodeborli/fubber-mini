@@ -54,6 +54,17 @@ final class TplCtx
     }
 
     /**
+     * Set a block to a simple value (shorthand for start/echo/end)
+     *
+     * @param string $name Block name
+     * @param string $value Block content
+     */
+    public function set(string $name, string $value): void
+    {
+        $this->blocks[$name] = $value;
+    }
+
+    /**
      * Output a named block with optional default
      *
      * @param string $name Block name
