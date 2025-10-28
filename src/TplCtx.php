@@ -3,74 +3,58 @@
 namespace mini;
 
 /**
- * Template rendering context for layout inheritance and blocks
+ * Minimal PHP-native template engine with:
+ * - Multi-level inheritance ($extend)
+ * - Block overrides ($block / $end)
+ * - Dual-use $block(): inline or buffered
  *
- * Provides simple Twig-like template inheritance using pure PHP:
- * - extend() - Inherit from parent layout
- * - start() / end() - Define named blocks
- * - block() - Output blocks with optional defaults
- *
- * Fast, opcache-friendly, no compilation needed.
+ * Example:
+ *   <?php $extend('layout.php'); ?>
+ *   <?php $block('title', 'Home'); ?>
+ *   <?php $block('content'); ?><p>Hello!</p><?php $end(); ?>
  */
 final class TplCtx
 {
-    /** @var string|null Parent layout file to render */
     public ?string $layout = null;
-
-    /** @var array<string, string> Named content blocks */
     public array $blocks = [];
-
-    /** @var array<string> Stack of currently-open blocks */
     private array $stack = [];
 
-    /**
-     * Extend a parent layout
-     *
-     * @param string $file Template filename (resolved via path registry)
-     */
     public function extend(string $file): void
     {
         $this->layout = $file;
     }
 
     /**
-     * Start capturing a named block
-     *
-     * @param string $name Block name
+     * Dual-use block:
+     * - $block('name', 'inline content')
+     * - $block('name'); ... $end();
      */
-    public function start(string $name): void
+    public function block(string $name, ?string $value = null): void
     {
+        if ($value !== null) {
+            $this->blocks[$name] = $value;
+            return;
+        }
         $this->stack[] = $name;
         ob_start();
     }
 
-    /**
-     * End current block capture
-     */
     public function end(): void
     {
+        if (!$this->stack) {
+            throw new \LogicException('No block started');
+        }
         $name = array_pop($this->stack);
         $this->blocks[$name] = ob_get_clean();
     }
 
     /**
-     * Set a block to a simple value (shorthand for start/echo/end)
-     *
-     * @param string $name Block name
-     * @param string $value Block content
-     */
-    public function set(string $name, string $value): void
-    {
-        $this->blocks[$name] = $value;
-    }
-
-    /**
-     * Output a named block with optional default
+     * Output a block in parent templates
      *
      * @param string $name Block name
      * @param string $default Default content if block not defined
      */
-    public function block(string $name, string $default = ''): void
+    public function show(string $name, string $default = ''): void
     {
         echo $this->blocks[$name] ?? $default;
     }

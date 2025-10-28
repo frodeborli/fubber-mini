@@ -2,19 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title><?php $block('title', 'Untitled'); ?></title>
+  <title><?php $show('title', 'Untitled'); ?></title>
 </head>
 <body>
   <header>
-    <h1><?php $block('header', 'My Site'); ?></h1>
+    <h1><?php $show('header', 'My Site'); ?></h1>
   </header>
 
   <main>
-    <?php $block('content'); ?>
+    <?php $show('content'); ?>
   </main>
 
   <footer>
-    <?php $block('footer', '© ' . date('Y')); ?>
+    <?php $show('footer', '© ' . date('Y')); ?>
   </footer>
 </body>
 </html>

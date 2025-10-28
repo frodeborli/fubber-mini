@@ -2,7 +2,7 @@
 
 <div class="users">
   <?php foreach ($users as $user): ?>
-    <?= $partial('_user-card.php', ['user' => $user]) ?>
+    <?= mini\render('_user-card.php', ['user' => $user]) ?>
   <?php endforeach; ?>
 </div>
 

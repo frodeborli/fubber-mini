@@ -89,20 +89,20 @@ test("Variables are available in both child and parent", function() {
     assertContains('dave@example.com', $output, "Should have user email");
 });
 
-// Test 6: $set() helper works
-test('$set() helper for simple block values', function() {
+// Test 6: Dual-use $block() works
+test('Dual-use $block() for inline and buffered blocks', function() {
     $output = render('with-set.php', [
         'user' => ['name' => 'Eve', 'email' => 'eve@example.com']
     ]);
 
-    assertContains('<title>Page with $set()</title>', $output, 'Should have title set via $set()');
-    assertContains('<h1>Using $set() Helper</h1>', $output, 'Should have header set via $set()');
-    assertContains('User: Eve', $output, 'Should have content from $start()/$end()');
-    assertContains('© 2025 Example Corp', $output, 'Should have footer set via $set()');
+    assertContains('<title>Page with dual-use $block()</title>', $output, 'Should have title set inline');
+    assertContains('<h1>Using Dual-Use $block() Helper</h1>', $output, 'Should have header set inline');
+    assertContains('User: Eve', $output, 'Should have content from buffered $block()');
+    assertContains('© 2025 Example Corp', $output, 'Should have footer set inline');
 });
 
-// Test 7: $partial() helper works
-test('$partial() helper for including sub-templates', function() {
+// Test 7: Including sub-templates works
+test('Including sub-templates with render()', function() {
     $output = render('with-partial.php', [
         'users' => [
             ['name' => 'Alice', 'email' => 'alice@example.com'],
@@ -118,6 +118,26 @@ test('$partial() helper for including sub-templates', function() {
     assertContains('Bob', $output, "Should have second user");
     assertContains('Charlie', $output, "Should have third user");
     assertContains('Total users: 3', $output, "Should have user count");
+});
+
+// Test 8: Multi-level inheritance works
+test('Multi-level template inheritance (3 levels)', function() {
+    $output = render('special-page.php', ['user' => 'TestUser']);
+
+    // From base.php
+    assertContains('<!DOCTYPE html>', $output, "Should have doctype from base");
+    assertContains('<html lang="en">', $output, "Should have lang from special-page");
+    assertContains('<title>Special Page</title>', $output, "Should have title from special-page");
+    assertContains('Special Page © 2025', $output, "Should have footer from special-page");
+
+    // From layout-with-sidebar.php
+    assertContains('<div class="sidebar">', $output, "Should have sidebar from layout");
+    assertContains('class="with-sidebar"', $output, "Should have body class from layout");
+
+    // From special-page.php
+    assertContains('<h1>Welcome to Special Page</h1>', $output, "Should have heading from special-page");
+    assertContains('User: TestUser', $output, "Should have user variable");
+    assertContains('<li><a href="#section1">Section 1</a></li>', $output, "Should have sidebar content from special-page");
 });
 
 echo "\n✅ All template tests passed!\n";

@@ -19,7 +19,7 @@ use ReflectionClass;
 /**
  * Render a template with provided variables
  *
- * Supports template inheritance via extend(), start(), end(), block() helpers.
+ * Supports multi-level template inheritance via extend() and block() helpers.
  * Uses path registry to find templates in _views/ directory.
  *
  * Simple templates:
@@ -28,15 +28,15 @@ use ReflectionClass;
  * With layout inheritance:
  *   // child.php
  *   <?php $extend('layout.php'); ?>
- *   <?php $set('title', 'My Page'); ?>
- *   <?php $start('content'); ?><p>Content here</p><?php $end(); ?>
+ *   <?php $block('title', 'My Page'); ?>
+ *   <?php $block('content'); ?><p>Content here</p><?php $end(); ?>
  *
  *   // layout.php
- *   <html><head><title><?php $block('title', 'Untitled'); ?></title></head>
- *   <body><?php $block('content'); ?></body></html>
+ *   <html><head><title><?php $show('title', 'Untitled'); ?></title></head>
+ *   <body><?php $show('content'); ?></body></html>
  *
- * With partials:
- *   <?= $partial('user-card.php', ['user' => $currentUser]) ?>
+ * Including sub-templates (partials):
+ *   <?php mini\render('user-card.php', ['user' => $currentUser]); ?>
  *
  * @param string $template Template filename (e.g., 'settings.php', 'admin/dashboard.php')
  * @param array $vars Variables to extract for template
@@ -51,24 +51,22 @@ function render($template, $vars = []) {
         throw new Exception("Template not found: $template (searched in: $searchedPaths)");
     }
 
-    // Reuse context if rendering parent layout, otherwise create new
-    $ctx = $vars['__ctx'] ?? new TplCtx();
-
-    // Restore blocks from child if this is a parent layout render
-    if (isset($vars['__blocks'])) {
-        $ctx->blocks = $vars['__blocks'];
-    }
+    $ctx = new TplCtx();
 
     // Make helper closures available in template scope
     $extend = fn(string $file) => $ctx->extend($file);
-    $start  = fn(string $name) => $ctx->start($name);
+    $block  = fn(string $name, ?string $value = null) => $ctx->block($name, $value);
     $end    = fn() => $ctx->end();
-    $set    = fn(string $name, string $value) => $ctx->set($name, $value);
-    $block  = fn(string $name, string $default = '') => $ctx->block($name, $default);
-    $partial = fn(string $file, array $partialVars = []) => render($file, array_merge($vars, $partialVars));
+    $show   = fn(string $name, string $default = '') => $ctx->show($name, $default);
+
+    // Merge blocks from lower-level (child) into current context BEFORE rendering
+    // This ensures $show() calls in parent templates can access child blocks
+    if (isset($vars['__blocks'])) {
+        $ctx->blocks = $vars['__blocks'] + $ctx->blocks;
+    }
 
     // Isolated scope render function
-    $renderOnce = function(string $__file, array $__vars) use ($extend, $start, $end, $set, $block, $partial) {
+    $renderOnce = function(string $__file, array $__vars) use ($extend, $block, $end, $show) {
         extract($__vars, EXTR_SKIP);
         require $__file;
     };
@@ -83,19 +81,22 @@ function render($template, $vars = []) {
     }
     $output = ob_get_clean();
 
-    // If no explicit "content" block was defined, expose child output as "content"
-    if (!isset($ctx->blocks['content']) && $output !== '') {
+    // Capture any raw output as "content" ONLY if no child provided content
+    // and we didn't receive blocks from a child (meaning we're not a parent template)
+    if (!isset($ctx->blocks['content']) && $output !== '' && !isset($vars['__blocks'])) {
         $ctx->blocks['content'] = $output;
     }
 
-    // If child called $extend(), render parent layout with same context
-    if ($ctx->layout !== null) {
-        $layoutToRender = $ctx->layout;
-        $ctx->layout = null; // Prevent infinite loop
-        return render($layoutToRender, $vars + ['__blocks' => $ctx->blocks, '__ctx' => $ctx]);
+    // If this template extends another, recurse upward
+    if ($ctx->layout) {
+        $newVars = $vars;
+        $newVars['__blocks'] = $ctx->blocks;
+        return render($ctx->layout, $newVars);
     }
 
-    return $output;
+    // Otherwise, this is the topmost template — render final output
+    // If we have output (from a layout), return it; otherwise return content block
+    return $output !== '' ? $output : ($ctx->blocks['content'] ?? '');
 }
 
 /**
