@@ -46,6 +46,11 @@ your-app/
 │   ├── 404.php
 │   ├── 401.php
 │   └── 500.php
+├── _views/                     # Template files (outside web root)
+│   ├── layout.php             # Main layout
+│   ├── users.php              # User list template
+│   └── admin/
+│       └── dashboard.php      # Admin dashboard template
 ├── _translations/              # Translation files (outside web root)
 ├── _migrations/                # Database migrations (outside web root)
 ├── _database.sqlite3          # Database (outside web root)
@@ -158,7 +163,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // Show form
-echo render('templates/users/create.php', [
+echo render('users/create.php', [
     'title' => t('Create User')
 ]);
 ```
@@ -379,7 +384,7 @@ composer exec mini translations remove-orphans     # Clean up unused translation
 
 $products = db()->query('SELECT * FROM products')->fetchAll();
 
-echo render('templates/products/list.php', [
+echo render('products/list.php', [
     'title' => t('Product Catalog'),
     'products' => $products,
     'empty_message' => t('No products found.')
@@ -509,7 +514,7 @@ translator()->trySetLanguageCode($language);
 $currentLocale = $_COOKIE['LOK'] ?? 'en_US';
 $currentTimezone = $_COOKIE['TZ'] ?? 'UTC';
 
-echo render('templates/settings.php', [
+echo render('settings.php', [
     'title' => t('Settings'),
     'locale' => $currentLocale,
     'timezone' => $currentTimezone,
@@ -533,7 +538,7 @@ echo render('templates/settings.php', [
 ```
 
 ```php
-// templates/settings.php
+// _views/settings.php
 <?php $content = ob_start(); ?>
 
 <h1><?= h($title) ?></h1>
@@ -566,7 +571,7 @@ echo render('templates/settings.php', [
 
 <?php
 $content = ob_get_clean();
-echo render('templates/layout.php', compact('title', 'content'));
+echo render('layout.php', compact('title', 'content'));
 ?>
 ```
 
@@ -674,6 +679,8 @@ try {
 
 ## Templates
 
+Templates are stored in `_views/` directory and resolved using the path registry.
+
 ### Rendering Templates
 
 ```php
@@ -681,7 +688,7 @@ try {
 
 $users = db()->query('SELECT * FROM users ORDER BY name')->fetchAll();
 
-echo render('templates/users.php', [
+echo render('users.php', [
     'title' => t('User List'),
     'users' => $users
 ]);
@@ -691,7 +698,7 @@ echo render('templates/users.php', [
 
 ```php
 <?php
-// templates/users.php
+// _views/users.php
 $content = ob_start();
 ?>
 
@@ -709,13 +716,14 @@ $content = ob_start();
 
 <?php
 $content = ob_get_clean();
-echo render('templates/layout.php', compact('title', 'content'));
+echo render('layout.php', compact('title', 'content'));
 ?>
 ```
 
 ### Layout File
 
 ```php
+<?php // _views/layout.php ?>
 <!DOCTYPE html>
 <html>
 <head>
@@ -727,6 +735,8 @@ echo render('templates/layout.php', compact('title', 'content'));
 </body>
 </html>
 ```
+
+**Subdirectories:** You can organize templates: `render('admin/dashboard.php')`
 
 ## Testing
 
@@ -820,7 +830,7 @@ setupAuth(fn() => new MyAuth());
 require_login();                  // Throws 401 if not logged in
 require_role('admin');            // Throws 403 if not admin
 
-echo render('templates/admin/dashboard.php', [
+echo render('admin/dashboard.php', [
     'title' => t('Admin Dashboard')
 ]);
 ```

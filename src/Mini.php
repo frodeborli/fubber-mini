@@ -346,6 +346,10 @@ final class Mini implements ContainerInterface {
         $primaryRoutesPath = $_ENV['MINI_ROUTES_ROOT'] ?? ($this->root . '/_routes');
         $this->paths->routes = new Util\PathsRegistry($primaryRoutesPath);
 
+        // Views registry for templates
+        $primaryViewsPath = $_ENV['MINI_VIEWS_ROOT'] ?? ($this->root . '/_views');
+        $this->paths->views = new Util\PathsRegistry($primaryViewsPath);
+
         $this->debug = !empty($_ENV['DEBUG']);
 
         $docRoot = $_ENV['MINI_DOC_ROOT'] ?? null;

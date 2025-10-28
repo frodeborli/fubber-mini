@@ -22,7 +22,7 @@ translator(): Translator                          # Get translator instance
 
 ```php
 h(string $str): string                            # HTML escape
-render(string $template, array $vars = []): string  # Render template
+render(string $template, array $vars = []): string  # Render template from _views/
 ```
 
 ### URL Generation
@@ -418,7 +418,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     redirect(url('users'));
 }
 
-echo render('templates/form.php', ['title' => t('Create User')]);
+echo render('form.php', ['title' => t('Create User')]);
 ```
 
 ### API Endpoints

@@ -19,16 +19,20 @@ use ReflectionClass;
 /**
  * Render a template with provided variables
  *
- * @param string $template Path to template file (relative to project root)
+ * Uses path registry to find templates in _views/ directory.
+ * Example: render('settings.php', ['user' => $user])
+ *
+ * @param string $template Template filename (e.g., 'settings.php', 'admin/dashboard.php')
  * @param array $vars Variables to extract for template
  * @return string Rendered content
  */
 function render($template, $vars = []) {
-    // Get project root from global state
-    $templatePath = Mini::$mini->root . '/' . ltrim($template, '/');
+    // Use path registry to find template
+    $templatePath = Mini::$mini->paths->views->findFirst($template);
 
-    if (!file_exists($templatePath)) {
-        throw new Exception("Template not found: $templatePath");
+    if (!$templatePath) {
+        $searchedPaths = implode(', ', Mini::$mini->paths->views->getPaths());
+        throw new Exception("Template not found: $template (searched in: $searchedPaths)");
     }
 
     // Extract variables for template use
