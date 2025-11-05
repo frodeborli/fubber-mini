@@ -22,8 +22,33 @@ class SimpleRouter
         $path = parse_url($requestUri, PHP_URL_PATH) ?? '';
         $baseUrl = Mini::$mini->baseUrl ?? '';
 
-        // 1. Try file-based routing in _routes/ directory
+        // Try to resolve the route for the current path
         $target = $this->tryFileBasedRouting($path, $baseUrl);
+
+        // If path doesn't end with '/', check if path with trailing slash has a route
+        // If both exist, prefer the directory-based route (with trailing slash)
+        if (!str_ends_with($path, '/')) {
+            $alternateTarget = $this->tryFileBasedRouting($path . '/', $baseUrl);
+            if ($alternateTarget) {
+                // If current path has no route, OR alternate is a directory index, redirect
+                if (!$target || str_ends_with($alternateTarget, '/index.php')) {
+                    $this->redirectTo($path . '/');
+                    return;
+                }
+            }
+        }
+
+        // If no route found and path ends with '/', check if path without trailing slash has a route
+        if (!$target && str_ends_with($path, '/') && $path !== '/') {
+            $alternateTarget = $this->tryFileBasedRouting(rtrim($path, '/'), $baseUrl);
+            if ($alternateTarget) {
+                // Route exists for path without trailing slash - redirect
+                $this->redirectTo(rtrim($path, '/'));
+                return;
+            }
+        }
+
+        // 1. Try file-based routing in _routes/ directory
         if ($target) {
             $this->routes = [$path => $target];
             $this->scope = '';
@@ -275,31 +300,35 @@ class SimpleRouter
             }
         }
 
-        // Remove leading slash
+        // Remove only leading slash - preserve trailing slash distinction
         $remaining = ltrim($path, '/');
 
-        // Try to find route handler in _routes/ via PathsRegistry
-        // / → _routes/index.php
-        // /users → _routes/users.php
-        // /api/posts → _routes/api/posts.php
-
-        $routeFile = empty($remaining) ? 'index.php' : $remaining . '.php';
-        $foundPath = Mini::$mini->paths->routes->findFirst($routeFile);
-
-        if ($foundPath) {
-            // Return path relative to routes directory for executeTarget()
-            return $routeFile;
+        // Root path: / → _routes/index.php
+        if ($remaining === '') {
+            $routeFile = 'index.php';
+            $foundPath = Mini::$mini->paths->routes->findFirst($routeFile);
+            if ($foundPath) {
+                return $routeFile;
+            }
+            return null;
         }
 
-        // Try directory index: /users → _routes/users/index.php
-        if (!empty($remaining)) {
-            $indexFile = $remaining . '/index.php';
+        // Path WITH trailing slash: /users/ → _routes/users/index.php
+        if (str_ends_with($remaining, '/')) {
+            $dirPath = rtrim($remaining, '/');
+            $indexFile = $dirPath . '/index.php';
             $foundPath = Mini::$mini->paths->routes->findFirst($indexFile);
-
             if ($foundPath) {
-                // Redirect to /path/ to ensure consistent URLs
-                return '/' . $remaining . '/';
+                return $indexFile;
             }
+            return null;
+        }
+
+        // Path WITHOUT trailing slash: /users → _routes/users.php
+        $routeFile = $remaining . '.php';
+        $foundPath = Mini::$mini->paths->routes->findFirst($routeFile);
+        if ($foundPath) {
+            return $routeFile;
         }
 
         return null;
@@ -414,7 +443,7 @@ class SimpleRouter
     private function handle404(): void
     {
         // Use centralized error page handling
-        $exception = new \mini\Http\HttpException('Page not found', 404);
+        $exception = new \mini\Http\NotFoundException('Page not found');
         \mini\showErrorPage(404, $exception);
     }
 
