@@ -53,32 +53,29 @@ if (!$docRoot || !is_dir($docRoot)) {
     exit(1);
 }
 
-// Parse command line options
-$host = '127.0.0.1';
-$port = 8080;
+// Parse command line options using ArgManager
+$args = \mini\args()->nextCommand(); // Skip 'mini' to get 'serve'
+$args = $args->withSupportedArgs('h', ['host:', 'port:', 'help']);
 
-foreach ($argv as $i => $arg) {
-    if ($arg === '--host' && isset($argv[$i + 1])) {
-        $host = $argv[$i + 1];
-    } elseif ($arg === '--port' && isset($argv[$i + 1])) {
-        $port = (int)$argv[$i + 1];
-    } elseif ($arg === '--help' || $arg === '-h') {
-        echo "Mini Development Server\n";
-        echo "\n";
-        echo "Usage:\n";
-        echo "  composer exec mini serve [options]\n";
-        echo "\n";
-        echo "Options:\n";
-        echo "  --host <host>    Server host (default: 127.0.0.1)\n";
-        echo "  --port <port>    Server port (default: 8080)\n";
-        echo "  --help, -h       Show this help\n";
-        echo "\n";
-        echo "Example:\n";
-        echo "  composer exec mini serve --host 0.0.0.0 --port 3000\n";
-        echo "\n";
-        exit(0);
-    }
+if (isset($args->opts['help']) || isset($args->opts['h'])) {
+    echo "Mini Development Server\n";
+    echo "\n";
+    echo "Usage:\n";
+    echo "  composer exec mini serve [options]\n";
+    echo "\n";
+    echo "Options:\n";
+    echo "  --host <host>    Server host (default: 127.0.0.1)\n";
+    echo "  --port <port>    Server port (default: 8080)\n";
+    echo "  --help, -h       Show this help\n";
+    echo "\n";
+    echo "Example:\n";
+    echo "  composer exec mini serve --host 0.0.0.0 --port 3000\n";
+    echo "\n";
+    exit(0);
 }
+
+$host = $args->opts['host'] ?? '127.0.0.1';
+$port = (int)($args->opts['port'] ?? 8080);
 
 $address = "$host:$port";
 
@@ -91,7 +88,25 @@ echo "\n";
 echo "Press Ctrl+C to stop\n";
 echo "\n";
 
-// Start PHP built-in server
+// Prefer pcntl_exec to replace process (cleaner, no hanging processes)
+if (function_exists('pcntl_exec')) {
+    $phpBinary = PHP_BINARY;
+    $args = [
+        '-S',
+        $address,
+        '-t',
+        $docRoot
+    ];
+
+    // Replace current process with PHP server
+    // Note: pcntl_exec sets argv[0] automatically, don't include it in $args
+    pcntl_exec($phpBinary, $args);
+
+    // If we reach here, exec failed - fall through to passthru
+    echo "Warning: pcntl_exec failed, falling back to passthru\n";
+}
+
+// Fallback: use passthru (works without pcntl extension)
 $command = sprintf(
     'php -S %s -t %s',
     escapeshellarg($address),
