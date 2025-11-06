@@ -3,6 +3,20 @@
 namespace mini;
 
 use mini\CLI\ArgManager;
+use mini\CLI\ArgManagerService;
+use mini\Mini;
+
+/**
+ * CLI Feature - Global Helper Functions
+ *
+ * These functions provide the public API for the mini\CLI feature.
+ */
+
+// Register ArgManager service when this file is loaded (after bootstrap.php)
+// Only register if not already registered (allows app to override)
+if (!Mini::$mini->has(ArgManager::class)) {
+    Mini::$mini->addService(ArgManager::class, Lifetime::Singleton, fn() => ArgManagerService::factory());
+}
 
 /**
  * Returns the root ArgManager instance for parsing CLI arguments
@@ -29,37 +43,12 @@ use mini\CLI\ArgManager;
  *   $cmd = $root->nextCommand();
  *   // ... handle subcommand
  *
+ * Alternative (direct container access):
+ *   $root = Mini::$mini->get(mini\CLI\ArgManager::class);
+ *
  * @return ArgManager Root argument manager starting at index 0
  */
 function args(): ArgManager
 {
-    $container = Mini::$mini;
-
-    // If already registered, return cached instance
-    if ($container->has(ArgManager::class)) {
-        return $container->get(ArgManager::class);
-    }
-
-    // Register service with factory that loads from config
-    // Config file path: mini/CLI/ArgManager.php
-    // Searches: _config/mini/CLI/ArgManager.php, then vendor/fubber/mini/config/mini/CLI/ArgManager.php
-    $container->addService(ArgManager::class, Lifetime::Singleton, function() use ($container) {
-        $configPath = str_replace('\\', '/', ltrim(ArgManager::class, '\\')) . '.php';
-        $configPaths = $container->paths->config ?? null;
-
-        if ($configPaths) {
-            $path = $configPaths->findFirst($configPath);
-            if ($path) {
-                $instance = require $path;
-                if ($instance instanceof ArgManager) {
-                    return $instance;
-                }
-            }
-        }
-
-        // Fallback: return unconfigured instance
-        return new ArgManager(0);
-    });
-
-    return $container->get(ArgManager::class);
+    return Mini::$mini->get(ArgManager::class);
 }
