@@ -3,6 +3,7 @@
 namespace mini\Auth;
 
 use mini\Http\AccessDeniedException;
+use mini\Mini;
 
 /**
  * Authentication facade providing convenience methods
@@ -12,44 +13,27 @@ use mini\Http\AccessDeniedException;
  */
 final class Auth
 {
-    private static ?AuthInterface $implementation = null;
-
     /**
-     * Register the application's AuthInterface implementation
-     */
-    public static function setImplementation(AuthInterface $auth): void
-    {
-        self::$implementation = $auth;
-    }
-
-    /**
-     * Check if an auth implementation has been registered
-     */
-    public static function hasImplementation(): bool
-    {
-        return self::$implementation !== null;
-    }
-
-    /**
-     * Get the registered AuthInterface implementation
+     * Get the registered AuthInterface implementation from container
      *
      * @throws \RuntimeException If no auth implementation is registered
      */
-    private static function getImplementation(): AuthInterface
+    public function getImplementation(): AuthInterface
     {
-        if (self::$implementation === null) {
-            throw new \RuntimeException('No AuthInterface implementation registered. Call setupAuth() in your bootstrap.');
+        try {
+            return Mini::$mini->get(AuthInterface::class);
+        } catch (\Psr\Container\NotFoundExceptionInterface $e) {
+            throw new \RuntimeException('No AuthInterface implementation registered. Create _config/mini/Auth/AuthInterface.php', 0, $e);
         }
-        return self::$implementation;
     }
 
     /**
      * Check if a user is currently authenticated
      */
-    public static function isAuthenticated(): bool
+    public function isAuthenticated(): bool
     {
         try {
-            return self::getImplementation()->isAuthenticated();
+            return $this->getImplementation()->isAuthenticated();
         } catch (\RuntimeException) {
             return false; // No auth system registered = not authenticated
         }
@@ -60,10 +44,10 @@ final class Auth
      *
      * @return mixed User ID or null if not authenticated
      */
-    public static function getUserId(): mixed
+    public function getUserId(): mixed
     {
         try {
-            return self::getImplementation()->getUserId();
+            return $this->getImplementation()->getUserId();
         } catch (\RuntimeException) {
             return null;
         }
@@ -74,10 +58,10 @@ final class Auth
      *
      * @return mixed Claim value or null if claim doesn't exist or user not authenticated
      */
-    public static function getClaim(string $name): mixed
+    public function getClaim(string $name): mixed
     {
         try {
-            return self::getImplementation()->getClaim($name);
+            return $this->getImplementation()->getClaim($name);
         } catch (\RuntimeException) {
             return null;
         }
@@ -86,10 +70,10 @@ final class Auth
     /**
      * Check if current user has a specific role
      */
-    public static function hasRole(string $role): bool
+    public function hasRole(string $role): bool
     {
         try {
-            return self::getImplementation()->hasRole($role);
+            return $this->getImplementation()->hasRole($role);
         } catch (\RuntimeException) {
             return false;
         }
@@ -98,10 +82,10 @@ final class Auth
     /**
      * Check if current user has a specific permission
      */
-    public static function hasPermission(string $permission): bool
+    public function hasPermission(string $permission): bool
     {
         try {
-            return self::getImplementation()->hasPermission($permission);
+            return $this->getImplementation()->hasPermission($permission);
         } catch (\RuntimeException) {
             return false;
         }
@@ -112,11 +96,12 @@ final class Auth
      *
      * @throws AccessDeniedException If not authenticated
      */
-    public static function requireLogin(): void
+    public function requireLogin(): self
     {
-        if (!self::isAuthenticated()) {
+        if (!$this->isAuthenticated()) {
             throw new AccessDeniedException('Authentication required');
         }
+        return $this;
     }
 
     /**
@@ -124,15 +109,15 @@ final class Auth
      *
      * @throws AccessDeniedException If user doesn't have the required role
      */
-    public static function requireRole(string $role): Auth
+    public function requireRole(string $role): self
     {
-        self::requireLogin(); // First ensure user is logged in
+        $this->requireLogin(); // First ensure user is logged in
 
-        if (!self::hasRole($role)) {
+        if (!$this->hasRole($role)) {
             throw new AccessDeniedException("Access denied: requires role '$role'");
         }
 
-        return new self(); // Allow fluent chaining
+        return $this; // Allow fluent chaining
     }
 
     /**
@@ -140,14 +125,14 @@ final class Auth
      *
      * @throws AccessDeniedException If user doesn't have the required permission
      */
-    public static function requirePermission(string $permission): Auth
+    public function requirePermission(string $permission): self
     {
-        self::requireLogin(); // First ensure user is logged in
+        $this->requireLogin(); // First ensure user is logged in
 
-        if (!self::hasPermission($permission)) {
+        if (!$this->hasPermission($permission)) {
             throw new AccessDeniedException("Access denied: requires permission '$permission'");
         }
 
-        return new self(); // Allow fluent chaining
+        return $this; // Allow fluent chaining
     }
 }
