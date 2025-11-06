@@ -27,7 +27,7 @@ final class Mini implements ContainerInterface {
      * 
      * @var Mini
      */
-    public static Mini $mini;
+    public static ?Mini $mini = null;
 
     /** The application root path */
     public readonly string $root;
@@ -94,6 +94,9 @@ final class Mini implements ContainerInterface {
     private array $services = [];
 
     public function __construct() {
+        if (self::$mini !== null) {
+            throw new RuntimeException("Can't have two Mini instances");
+        }
         self::$mini = $this;
         $this->instanceCache = new WeakMap();
 
