@@ -3,7 +3,6 @@
 namespace mini;
 
 use mini\CLI\ArgManager;
-use mini\CLI\ArgManagerService;
 use mini\Mini;
 
 /**
@@ -15,7 +14,7 @@ use mini\Mini;
 // Register ArgManager service when this file is loaded (after bootstrap.php)
 // Only register if not already registered (allows app to override)
 if (!Mini::$mini->has(ArgManager::class)) {
-    Mini::$mini->addService(ArgManager::class, Lifetime::Singleton, fn() => ArgManagerService::factory());
+    Mini::$mini->addService(ArgManager::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(ArgManager::class));
 }
 
 /**

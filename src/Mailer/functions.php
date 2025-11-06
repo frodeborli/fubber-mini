@@ -14,7 +14,7 @@ use mini\Mailer\MailerInterface;
 // Register Mailer service when this file is loaded (after bootstrap.php)
 // Only register if not already registered (allows app to override)
 if (!Mini::$mini->has(MailerInterface::class)) {
-    Mini::$mini->addService(MailerInterface::class, Lifetime::Singleton, fn() => new Mailer());
+    Mini::$mini->addService(MailerInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(MailerInterface::class));
 }
 
 /**

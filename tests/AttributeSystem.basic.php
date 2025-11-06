@@ -16,16 +16,16 @@ if (!$autoloader) {
 
 require_once $autoloader;
 
-use mini\Attributes\Entity;
-use mini\Attributes\Key;
-use mini\Attributes\VarcharColumn;
-use mini\Attributes\IntegerColumn;
-use mini\Attributes\BooleanColumn;
-use mini\Attributes\DateTimeColumn;
-use mini\Attributes\JsonColumn;
+use mini\Tables\Attributes\Entity;
+use mini\Tables\Attributes\Key;
+use mini\Tables\Attributes\VarcharColumn;
+use mini\Tables\Attributes\IntegerColumn;
+use mini\Tables\Attributes\BooleanColumn;
+use mini\Tables\Attributes\DateTimeColumn;
+use mini\Tables\Attributes\JsonColumn;
 use mini\Tables\AttributeDatabaseRepository;
 use mini\Tables\CodecStrategies\SQLiteCodecStrategy;
-use mini\Database\PdoDatabase;
+use mini\Database\PDODatabase;
 
 function test(string $description, callable $test): void
 {
@@ -81,7 +81,7 @@ mini\bootstrap();
 
 // Create in-memory SQLite database for testing
 $pdo = new PDO('sqlite::memory:');
-$db = new PdoDatabase($pdo);
+$db = new PDODatabase($pdo);
 
 // Create test table
 $db->exec("

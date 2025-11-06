@@ -4,7 +4,7 @@ namespace mini\Tables\CodecStrategies;
 
 use mini\Tables\Codecs\CodecStrategyInterface;
 use mini\Tables\Codecs\FieldCodecInterface;
-use mini\Attributes\Column;
+use mini\Tables\Attributes\Column;
 
 /**
  * Codec strategy for PostgreSQL database backend

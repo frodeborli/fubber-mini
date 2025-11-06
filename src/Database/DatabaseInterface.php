@@ -1,6 +1,6 @@
 <?php
 
-namespace mini\Contracts;
+namespace mini\Database;
 
 /**
  * Database interface for the Mini framework

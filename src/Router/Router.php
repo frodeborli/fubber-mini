@@ -1,6 +1,8 @@
 <?php
 
-namespace mini;
+namespace mini\Router;
+
+use mini\Mini;
 
 /**
  * Simple file-based router for Mini framework
@@ -14,13 +16,13 @@ namespace mini;
  * - _routes/mini/_function.php → NOT accessible via /mini/_function
  *
  * Use underscore-prefixed files for:
- * - Internal route handlers (accessed via __ROUTES__.php dynamic routing)
+ * - Internal route handlers (accessed via __DEFAULT__.php dynamic routing)
  * - Shared helper functions (included by other routes)
  *
  * Use double-underscore for framework-reserved files:
- * - __ROUTES__.php → Custom route handler (framework convention)
+ * - __DEFAULT__.php → Custom route handler (framework convention)
  */
-class SimpleRouter
+class Router
 {
     private array $routes;
     private string $scope;
@@ -73,7 +75,7 @@ class SimpleRouter
             return;
         }
 
-        // 2. Try hierarchical __ROUTES__.php files
+        // 2. Try hierarchical __DEFAULT__.php files
         $strippedPath = $this->stripBasePath($path, $baseUrl);
         $routeInfo = $this->findScopedRouteFile($strippedPath);
 
@@ -321,7 +323,7 @@ class SimpleRouter
         $remaining = ltrim($path, '/');
 
         // Security: Block access to files starting with underscore
-        // Files like __ROUTES__.php, _function.php are internal handlers, not public routes
+        // Files like __DEFAULT__.php, _function.php are internal handlers, not public routes
         $pathSegments = explode('/', $remaining);
         foreach ($pathSegments as $segment) {
             if (str_starts_with($segment, '_')) {
@@ -384,7 +386,7 @@ class SimpleRouter
         // Check from most specific to least specific directory in _routes/
         while (!empty($pathParts)) {
             $dirPath = implode('/', $pathParts);
-            $routeFile = $dirPath . '/__ROUTES__.php';
+            $routeFile = $dirPath . '/__DEFAULT__.php';
 
             // Try to find in _routes/ via PathsRegistry
             $foundPath = Mini::$mini->paths->routes->findFirst($routeFile);
@@ -432,7 +434,7 @@ class SimpleRouter
                 $fullPattern = $pattern;
             }
 
-            // Note: Target transformation is now handled by SimpleRouter internally
+            // Note: Target transformation is now handled by Router internally
             // No need to transform targets here since router has scope awareness
 
             $processedRoutes[$fullPattern] = $target;

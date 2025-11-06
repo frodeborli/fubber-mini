@@ -3,7 +3,6 @@
 namespace mini;
 
 use mini\Mini;
-use mini\Logger\LoggerService;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -15,7 +14,7 @@ use Psr\Log\LoggerInterface;
 // Register Logger service when this file is loaded (after bootstrap.php)
 // Only register if not already registered (allows app to override)
 if (!Mini::$mini->has(LoggerInterface::class)) {
-    Mini::$mini->addService(LoggerInterface::class, Lifetime::Singleton, fn() => LoggerService::factory());
+    Mini::$mini->addService(LoggerInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(LoggerInterface::class));
 }
 
 /**

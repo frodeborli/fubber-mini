@@ -8,8 +8,8 @@ use mini\Tables\Codecs\StringCodecInterface;
 use mini\Tables\Codecs\IntegerCodecInterface;
 use mini\Tables\Codecs\StringCodecWrapper;
 use mini\Tables\Codecs\IntegerCodecWrapper;
-use mini\Attributes\Column;
-use mini\Attributes\EnumColumn;
+use mini\Tables\Attributes\Column;
+use mini\Tables\Attributes\EnumColumn;
 use mini\Tables\CodecRegistry;
 
 /**

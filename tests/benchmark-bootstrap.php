@@ -26,7 +26,7 @@ $bootstrapTime = (hrtime(true) - $start) / 1_000_000;
 
 // Measure router creation
 $start = hrtime(true);
-$router = new mini\SimpleRouter();
+$router = new mini\Router\Router();
 $routerTime = (hrtime(true) - $start) / 1_000_000;
 
 $total = $autoloadTime + $miniTime + $bootstrapTime + $routerTime;
@@ -34,7 +34,7 @@ $total = $autoloadTime + $miniTime + $bootstrapTime + $routerTime;
 printf("Autoload (vendor/autoload.php):  %.3fms  (%.1f%%)\n", $autoloadTime, ($autoloadTime / $total) * 100);
 printf("Mini::__construct():              %.3fms  (%.1f%%)\n", $miniTime, ($miniTime / $total) * 100);
 printf("mini\\bootstrap():                 %.3fms  (%.1f%%)\n", $bootstrapTime, ($bootstrapTime / $total) * 100);
-printf("new SimpleRouter():               %.3fms  (%.1f%%)\n", $routerTime, ($routerTime / $total) * 100);
+printf("new Router\\Router():              %.3fms  (%.1f%%)\n", $routerTime, ($routerTime / $total) * 100);
 echo str_repeat('-', 70) . "\n";
 printf("TOTAL:                            %.3fms\n", $total);
 

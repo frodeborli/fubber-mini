@@ -2,19 +2,21 @@
 
 namespace mini\Cache;
 
+use Psr\SimpleCache\CacheInterface;
+
 /**
  * Namespaced cache proxy
  *
  * Wraps another cache implementation and prefixes all keys with a namespace.
  * This allows logical separation of cache entries without separate cache instances.
  */
-class NamespacedCache implements \Psr\SimpleCache\CacheInterface
+class NamespacedCache implements CacheInterface
 {
     private \Psr\SimpleCache\CacheInterface $cache;
     private string $namespace;
     private string $separator;
 
-    public function __construct(\Psr\SimpleCache\CacheInterface $cache, string $namespace, string $separator = ':')
+    public function __construct(CacheInterface $cache, string $namespace, string $separator = ':')
     {
         $this->cache = $cache;
         $this->namespace = $namespace;

@@ -328,7 +328,7 @@ return [
 
 ### Directory Routes
 
-In `_routes/api/__ROUTES__.php`:
+In `_routes/api/__DEFAULT__.php`:
 
 ```php
 return [

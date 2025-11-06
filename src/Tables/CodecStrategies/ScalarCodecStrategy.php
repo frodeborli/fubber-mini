@@ -6,7 +6,7 @@ use mini\Tables\Codecs\CodecStrategyInterface;
 use mini\Tables\Codecs\FieldCodecInterface;
 use mini\Tables\Codecs\StringCodecInterface;
 use mini\Tables\Codecs\IntegerCodecInterface;
-use mini\Attributes\Column;
+use mini\Tables\Attributes\Column;
 use mini\Tables\Codecs\StringCodecWrapper;
 use mini\Tables\Codecs\IntegerCodecWrapper;
 use mini\Tables\CodecRegistry;

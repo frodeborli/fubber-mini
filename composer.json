@@ -33,6 +33,9 @@
         "files": [
             "bootstrap.php",
             "functions.php",
+            "src/Cache/functions.php",
+            "src/Database/functions.php",
+            "src/Router/functions.php",
             "src/Http/functions.php",
             "src/I18n/functions.php",
             "src/Tables/functions.php",

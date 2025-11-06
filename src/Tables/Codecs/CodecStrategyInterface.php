@@ -2,7 +2,7 @@
 
 namespace mini\Tables\Codecs;
 
-use mini\Attributes\Column;
+use mini\Tables\Attributes\Column;
 
 /**
  * Strategy interface for creating database-specific field codecs

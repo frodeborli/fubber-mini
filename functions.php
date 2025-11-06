@@ -184,34 +184,7 @@ function session(): bool {
     return session_status() === PHP_SESSION_ACTIVE;
 }
 
-/**
- * Get the database singleton (lazy-initialized)
- *
- * @return Contracts\DatabaseInterface Database instance
- */
-function db(): Contracts\DatabaseInterface {
-    return Mini::$mini->get(Contracts\DatabaseInterface::class);
-}
-
-/**
- * Get cache instance
- *
- * Returns PSR-16 SimpleCache instance from container.
- * With smart fallback: APCu > SQLite in /tmp > Filesystem in /tmp
- *
- * @param string|null $namespace Optional namespace for cache isolation
- * @return \Psr\SimpleCache\CacheInterface Cache instance
- */
-function cache(?string $namespace = null): \Psr\SimpleCache\CacheInterface {
-    $cache = Mini::$mini->get(\Psr\SimpleCache\CacheInterface::class);
-
-    // Return namespaced cache if namespace provided
-    if ($namespace !== null) {
-        return new Cache\NamespacedCache($cache, $namespace);
-    }
-
-    return $cache;
-}
+// Note: db() and cache() helpers are now in src/Database/functions.php and src/Cache/functions.php
 
 
 /**
@@ -340,7 +313,7 @@ function bootstrap(): void
  *
  * Call this from DOC_ROOT/index.php to enable routing:
  * - Sets up error handling and output buffering
- * - Delegates URL routing to SimpleRouter
+ * - Delegates URL routing to Router
  * - Routes loaded from _routes/ directory
  *
  * Route handlers in _routes/ don't need to call bootstrap().
@@ -353,9 +326,9 @@ function router(): void
     // Bootstrap sets up error handlers, output buffering, etc.
     bootstrap();
 
-    // Delegate routing to SimpleRouter
+    // Delegate routing to Router
     $requestUri = $_SERVER['REQUEST_URI'] ?? '';
-    $router = new \mini\SimpleRouter();
+    $router = Mini::$mini->get(\mini\Router\Router::class);
     $router->handleRequest($requestUri);
 
     // Explicitly flush output buffer on successful completion

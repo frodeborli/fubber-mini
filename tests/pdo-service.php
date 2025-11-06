@@ -6,7 +6,7 @@
 require __DIR__ . '/../vendor/autoload.php';
 
 use mini\Mini;
-use mini\Services\PDO as PDOService;
+use mini\Database\PDOService as PDOService;
 
 echo "Testing PDO Service Class\n";
 echo str_repeat('=', 70) . "\n\n";

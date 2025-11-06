@@ -96,14 +96,14 @@ try {
         echo "✗ Container does NOT have PDO service\n";
     }
 
-    if ($container->has(\mini\Contracts\DatabaseInterface::class)) {
+    if ($container->has(\mini\Database\DatabaseInterface::class)) {
         echo "✓ Container has DatabaseInterface service\n";
     } else {
         echo "✗ Container does NOT have DatabaseInterface service\n";
     }
 
     $pdoFromContainer = $container->get(\PDO::class);
-    $dbFromContainer = $container->get(\mini\Contracts\DatabaseInterface::class);
+    $dbFromContainer = $container->get(\mini\Database\DatabaseInterface::class);
     $dbFromFunction = \mini\db();
 
     if ($dbFromContainer === $dbFromFunction) {

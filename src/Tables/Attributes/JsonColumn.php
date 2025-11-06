@@ -1,6 +1,6 @@
 <?php
 
-namespace mini\Attributes;
+namespace mini\Tables\Attributes;
 
 use Attribute;
 

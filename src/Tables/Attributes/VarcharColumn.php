@@ -1,33 +1,37 @@
 <?php
 
-namespace mini\Attributes;
+namespace mini\Tables\Attributes;
 
 use Attribute;
 
 /**
- * TEXT column attribute for large string storage
+ * VARCHAR column attribute for string storage with length constraint
  */
 #[Attribute(Attribute::TARGET_PROPERTY)]
-final class TextColumn extends Column
+final class VarcharColumn extends Column
 {
     public function __construct(
         ?string $name = null,
+        ?int $length = 255,
         bool $nullable = false,
         mixed $default = null,
         ?int $minLength = null,
         ?int $maxLength = null,
         ?string $pattern = null,
-        ?string $format = null
+        ?string $format = null,
+        ?array $enum = null
     ) {
         parent::__construct(
             name: $name,
             type: 'string',
             nullable: $nullable,
             default: $default,
+            length: $length,
             minLength: $minLength,
             maxLength: $maxLength,
             pattern: $pattern,
-            format: $format
+            format: $format,
+            enum: $enum
         );
     }
 }

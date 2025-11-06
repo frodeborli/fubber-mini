@@ -2,13 +2,15 @@
 
 namespace mini\Cache;
 
+use Psr\SimpleCache\CacheInterface;
+
 /**
  * SQLite-backed PSR-16 SimpleCache implementation for /tmp
  *
  * Stores cache data in SQLite database in temporary directory.
  * Lightweight alternative to DatabaseCache that doesn't require DatabaseInterface.
  */
-class TmpSqliteCache implements \Psr\SimpleCache\CacheInterface
+class TmpSqliteCache implements CacheInterface
 {
     private \PDO $pdo;
     private string $tableName = 'cache';

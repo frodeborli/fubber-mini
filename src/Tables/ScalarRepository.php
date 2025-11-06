@@ -3,10 +3,10 @@
 namespace mini\Tables;
 
 use mini\Table;
-use mini\Attributes\Entity;
-use mini\Attributes\Key;
-use mini\Attributes\Navigation;
-use mini\Attributes\Column;
+use mini\Tables\Attributes\Entity;
+use mini\Tables\Attributes\Key;
+use mini\Tables\Attributes\Navigation;
+use mini\Tables\Attributes\Column;
 use mini\Tables\CodecStrategies\FieldCodecInterface;
 use mini\Tables\CodecStrategies\ScalarCodecStrategy;
 
@@ -324,9 +324,9 @@ abstract class ScalarRepository implements ReadonlyRepositoryInterface
     {
         // Check if property has any column attribute
         $columnAttributes = array_merge(
-            $property->getAttributes(\mini\Attributes\IntegerColumn::class),
-            $property->getAttributes(\mini\Attributes\VarcharColumn::class),
-            $property->getAttributes(\mini\Attributes\DateTimeImmutableColumn::class)
+            $property->getAttributes(\mini\Tables\Attributes\IntegerColumn::class),
+            $property->getAttributes(\mini\Tables\Attributes\VarcharColumn::class),
+            $property->getAttributes(\mini\Tables\Attributes\DateTimeImmutableColumn::class)
             // Add other column types as needed
         );
 

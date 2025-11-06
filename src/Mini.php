@@ -9,6 +9,7 @@ use mini\Util\PathsRegistry;
 use Psr\Container\ContainerInterface;
 use Psr\Container\NotFoundExceptionInterface;
 use ReflectionClass;
+use RuntimeException;
 use Symfony\Component\Dotenv\Dotenv;
 use WeakMap;
 
@@ -161,28 +162,17 @@ final class Mini implements ContainerInterface {
     }
 
     /**
-     * Load a config file from 'config' path registry with per-request caching
+     * Load a config file from 'config' path registry
      *
      * Uses path registry to search multiple locations (application first, then plugins/bundles).
-     * Config files are cached per request scope, ensuring:
-     * - Traditional SAPI: Cached for entire request
-     * - Long-running apps: Fresh config per request/fiber
-     * - Automatic cleanup: WeakMap releases when request ends
+     * Note: No caching is done here - container handles caching based on service Lifetime.
      *
      * @param string $filename Relative to config paths (e.g., 'pdo.php', 'routes.php')
      * @param mixed $default Return this if file not found (omit to throw exception)
-     * @return mixed The loaded config value (cached for this request)
+     * @return mixed The loaded config value
      * @throws \Exception If file not found and no default provided
      */
     public function loadConfig(string $filename, mixed $default = null): mixed {
-        $cache = $this->getRequestScopeCache();
-        $cacheKey = 'config:' . $filename;
-
-        // Return cached value if already loaded in this request
-        if (property_exists($cache, $cacheKey)) {
-            return $cache->{$cacheKey};
-        }
-
         // Get config path registry (throws if not initialized via __get)
         $configPaths = $this->paths->config;
 
@@ -194,17 +184,13 @@ final class Mini implements ContainerInterface {
                 $searchedPaths = implode(', ', $configPaths->getPaths());
                 throw new \Exception("Config file not found: $filename (searched in: $searchedPaths)");
             }
-            // Cache the default value to avoid repeated searches
-            $cache->{$cacheKey} = $default;
             return $default;
         }
 
-        // Load, cache, and return
-        $value = Closure::fromCallable(static function() use ($path) {
+        // Load and return
+        return Closure::fromCallable(static function() use ($path) {
             return require $path;
         })->bindTo(null, null)();
-        $cache->{$cacheKey} = $value;
-        return $value;
     }
 
     /**
@@ -398,35 +384,6 @@ final class Mini implements ContainerInterface {
         // Application salt for cryptographic operations (CSRF tokens, etc.)
         // Uses machine-specific fingerprint + persistent random salt if MINI_SALT not set
         $this->salt = $_ENV['MINI_SALT'] ?? Util\MachineSalt::get();
-
-        // Register core services
-        $this->registerCoreServices();
     }
 
-    /**
-     * Register core framework services in the container
-     *
-     * Only registers services that haven't already been registered.
-     * This allows applications to override framework defaults by registering
-     * their own services in app/bootstrap.php (via composer autoload files).
-     */
-    private function registerCoreServices(): void
-    {
-        // Register PDO service if not already registered
-        if (!$this->has(\PDO::class)) {
-            $this->addService(\PDO::class, Lifetime::Scoped, fn() => Services\PDO::factory());
-        }
-
-        // Register DatabaseInterface if not already registered
-        if (!$this->has(Contracts\DatabaseInterface::class)) {
-            $this->addService(Contracts\DatabaseInterface::class, Lifetime::Scoped, fn() => Services\DatabaseInterface::factory());
-        }
-
-        // Register SimpleCache service if not already registered
-        if (!$this->has(\Psr\SimpleCache\CacheInterface::class)) {
-            $this->addService(\Psr\SimpleCache\CacheInterface::class, Lifetime::Singleton, fn() => Services\SimpleCache::factory());
-        }
-
-        // Note: Logger, I18n, Auth, and Tables services are registered in their respective functions.php files
-    }
 }

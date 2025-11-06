@@ -35,7 +35,7 @@ File-based routing with zero configuration.
 // _routes/api/posts.php handles /api/posts
 ```
 
-[Documentation](docs/Routing/index.md) | [API Reference](src/SimpleRouter.php)
+[Documentation](docs/Routing/index.md) | [API Reference](src/Router/Router.php)
 
 ---
 

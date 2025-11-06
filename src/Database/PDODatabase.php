@@ -2,7 +2,7 @@
 
 namespace mini\Database;
 
-use mini\Contracts\DatabaseInterface;
+use mini\Database\DatabaseInterface;
 use mini\Mini;
 use PDO;
 use PDOException;
@@ -15,7 +15,7 @@ use Exception;
  * operations pleasant while supporting any PDO-compatible database.
  * Fetches PDO from container lazily to ensure proper scoping.
  */
-class PdoDatabase implements DatabaseInterface
+class PDODatabase implements DatabaseInterface
 {
     private ?PDO $pdo = null;
     private int $transactionDepth = 0;

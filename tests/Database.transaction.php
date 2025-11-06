@@ -32,14 +32,14 @@ function assertEqual($expected, $actual, string $message = ''): void
     }
 }
 
-use mini\Database\PdoDatabase;
+use mini\Database\PDODatabase;
 
 // Bootstrap framework (required for Scoped services)
 mini\bootstrap();
 
 // Create test database
 $pdo = new PDO('sqlite::memory:');
-$db = new PdoDatabase($pdo);
+$db = new PDODatabase($pdo);
 
 $db->exec("CREATE TABLE test_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

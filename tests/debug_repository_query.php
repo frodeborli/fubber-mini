@@ -5,8 +5,8 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 use mini\Tables\DatabaseRepository;
 use mini\Util\InstanceStore;
 use mini\Tables\RepositoryInterface;
-use mini\Contracts\DatabaseInterface;
-use mini\Database\PdoDatabase;
+use mini\Database\DatabaseInterface;
+use mini\Database\PDODatabase;
 
 class TestUser {
     public ?int $id = null;
@@ -14,7 +14,7 @@ class TestUser {
     public ?int $age = null;
 }
 
-$db = new PdoDatabase(new PDO('sqlite::memory:'));
+$db = new PDODatabase(new PDO('sqlite::memory:'));
 $db->exec("CREATE TABLE debug_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name VARCHAR(100),

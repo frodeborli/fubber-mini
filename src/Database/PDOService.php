@@ -1,6 +1,6 @@
 <?php
 
-namespace mini\Services;
+namespace mini\Database;
 
 use mini\Mini;
 use mini\Exceptions\ConfigurationRequiredException;
@@ -14,7 +14,7 @@ use mini\Exceptions\ConfigurationRequiredException;
  * - Exception error mode
  * - Associative array fetch mode
  */
-class PDO
+class PDOService
 {
     /**
      * Create and configure PDO instance

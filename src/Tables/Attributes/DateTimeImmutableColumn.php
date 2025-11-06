@@ -1,6 +1,6 @@
 <?php
 
-namespace mini\Attributes;
+namespace mini\Tables\Attributes;
 
 use Attribute;
 use mini\Tables\Codecs\CodecStrategyInterface;
@@ -9,10 +9,10 @@ use mini\Tables\CodecStrategies\ScalarCodecStrategy;
 use mini\Tables\CodecStrategies\SQLiteCodecStrategy;
 
 /**
- * DATETIME column attribute for date and time storage
+ * DATETIME column attribute for DateTimeImmutable objects
  */
 #[Attribute(Attribute::TARGET_PROPERTY)]
-final class DateTimeColumn extends Column
+final class DateTimeImmutableColumn extends Column
 {
     public function __construct(
         ?string $name = null,
@@ -32,7 +32,7 @@ final class DateTimeColumn extends Column
     }
 
     /**
-     * Override to return appropriate DateTime codec based on strategy
+     * Override to return appropriate DateTimeImmutable codec based on strategy
      */
     public function createCodec(CodecStrategyInterface $strategy, \ReflectionProperty $property): ?FieldCodecInterface
     {
@@ -40,5 +40,19 @@ final class DateTimeColumn extends Column
 
         // Use parent implementation - strategy now has access to property type
         return parent::createCodec($strategy, $property);
+    }
+
+    /**
+     * Override JSON schema to allow datetime objects in validation
+     */
+    public function getJsonSchema(): array
+    {
+        $schema = parent::getJsonSchema();
+
+        // For datetime immutable columns, we allow both string and object types
+        // This accommodates both the storage string format and the PHP object format
+        $schema['type'] = ['string', 'object'];
+
+        return $schema;
     }
 }

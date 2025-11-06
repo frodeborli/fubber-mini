@@ -2,7 +2,8 @@
 
 namespace mini\Cache;
 
-use mini\Contracts\DatabaseInterface;
+use mini\Database\DatabaseInterface;
+use Psr\SimpleCache\CacheInterface;
 
 /**
  * Database-backed PSR-16 SimpleCache implementation
@@ -10,7 +11,7 @@ use mini\Contracts\DatabaseInterface;
  * Stores cache data in SQLite database with automatic garbage collection.
  * Uses the 'mini_cache' table for storage.
  */
-class DatabaseCache implements \Psr\SimpleCache\CacheInterface
+class DatabaseCache implements CacheInterface
 {
     private DatabaseInterface $db;
     private string $tableName = 'mini_cache';

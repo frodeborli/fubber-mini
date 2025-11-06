@@ -2,13 +2,15 @@
 
 namespace mini\Cache;
 
+use Psr\SimpleCache\CacheInterface;
+
 /**
  * Filesystem-backed PSR-16 SimpleCache implementation
  *
  * Stores cache data in serialized files with hashed filenames.
  * Uses sys_get_temp_dir() for storage location.
  */
-class FilesystemCache implements \Psr\SimpleCache\CacheInterface
+class FilesystemCache implements CacheInterface
 {
     private string $cacheDir;
     private string $prefix;
