@@ -3,24 +3,34 @@
 namespace mini\Cache;
 
 use mini\Database\DatabaseInterface;
+use mini\Mini;
 use Psr\SimpleCache\CacheInterface;
 
 /**
  * Database-backed PSR-16 SimpleCache implementation
  *
- * Stores cache data in SQLite database with automatic garbage collection.
+ * Stores cache data in database with automatic garbage collection.
  * Uses the 'mini_cache' table for storage.
+ *
+ * IMPORTANT: Fetches DatabaseInterface from container on each access to ensure
+ * proper scoping in long-running applications (cache is Singleton, db is Scoped).
  */
 class DatabaseCache implements CacheInterface
 {
-    private DatabaseInterface $db;
     private string $tableName = 'mini_cache';
 
-    public function __construct(DatabaseInterface $db)
+    public function __construct()
     {
-        $this->db = $db;
         $this->ensureTableExists();
         $this->maybeGarbageCollect();
+    }
+
+    /**
+     * Get DatabaseInterface from container (fresh per request)
+     */
+    private function db(): DatabaseInterface
+    {
+        return Mini::$mini->get(DatabaseInterface::class);
     }
 
     /**
@@ -28,7 +38,7 @@ class DatabaseCache implements CacheInterface
      */
     private function ensureTableExists(): void
     {
-        $this->db->exec("
+        $this->db()->exec("
             CREATE TABLE IF NOT EXISTS {$this->tableName} (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
@@ -38,7 +48,7 @@ class DatabaseCache implements CacheInterface
         ");
 
         // Create index for efficient garbage collection
-        $this->db->exec("
+        $this->db()->exec("
             CREATE INDEX IF NOT EXISTS idx_mini_cache_expires_at
             ON {$this->tableName} (expires_at)
         ");
@@ -60,7 +70,7 @@ class DatabaseCache implements CacheInterface
     private function garbageCollect(): void
     {
         $now = time();
-        $this->db->exec(
+        $this->db()->exec(
             "DELETE FROM {$this->tableName} WHERE expires_at IS NOT NULL AND expires_at < ?",
             [$now]
         );
@@ -108,7 +118,7 @@ class DatabaseCache implements CacheInterface
     {
         $this->validateKey($key);
 
-        $row = $this->db->queryOne(
+        $row = $this->db()->queryOne(
             "SELECT value, expires_at FROM {$this->tableName} WHERE key = ?",
             [$key]
         );
@@ -134,7 +144,7 @@ class DatabaseCache implements CacheInterface
         $expiresAt = $this->calculateExpiration($ttl);
 
         try {
-            $this->db->exec(
+            $this->db()->exec(
                 "INSERT OR REPLACE INTO {$this->tableName} (key, value, expires_at, created_at)
                  VALUES (?, ?, ?, ?)",
                 [$key, $serializedValue, $expiresAt, time()]
@@ -150,7 +160,7 @@ class DatabaseCache implements CacheInterface
         $this->validateKey($key);
 
         try {
-            $this->db->exec("DELETE FROM {$this->tableName} WHERE key = ?", [$key]);
+            $this->db()->exec("DELETE FROM {$this->tableName} WHERE key = ?", [$key]);
             return true;
         } catch (\Exception $e) {
             return false;
@@ -160,7 +170,7 @@ class DatabaseCache implements CacheInterface
     public function clear(): bool
     {
         try {
-            $this->db->exec("DELETE FROM {$this->tableName}");
+            $this->db()->exec("DELETE FROM {$this->tableName}");
             return true;
         } catch (\Exception $e) {
             return false;
@@ -208,7 +218,7 @@ class DatabaseCache implements CacheInterface
     {
         $this->validateKey($key);
 
-        $row = $this->db->queryOne(
+        $row = $this->db()->queryOne(
             "SELECT expires_at FROM {$this->tableName} WHERE key = ?",
             [$key]
         );
@@ -231,8 +241,8 @@ class DatabaseCache implements CacheInterface
      */
     public function getStats(): array
     {
-        $total = $this->db->queryField("SELECT COUNT(*) FROM {$this->tableName}");
-        $expired = $this->db->queryField(
+        $total = $this->db()->queryField("SELECT COUNT(*) FROM {$this->tableName}");
+        $expired = $this->db()->queryField(
             "SELECT COUNT(*) FROM {$this->tableName} WHERE expires_at IS NOT NULL AND expires_at < ?",
             [time()]
         );
@@ -249,9 +259,9 @@ class DatabaseCache implements CacheInterface
      */
     public function cleanup(): int
     {
-        $before = $this->db->queryField("SELECT COUNT(*) FROM {$this->tableName}");
+        $before = $this->db()->queryField("SELECT COUNT(*) FROM {$this->tableName}");
         $this->garbageCollect();
-        $after = $this->db->queryField("SELECT COUNT(*) FROM {$this->tableName}");
+        $after = $this->db()->queryField("SELECT COUNT(*) FROM {$this->tableName}");
 
         return $before - $after;
     }
