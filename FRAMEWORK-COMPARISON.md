@@ -194,7 +194,7 @@ $app->post('/users', function ($request, $response) { });
 **Mini - File-Based**
 ```php
 // _routes/users.php → /users
-// _routes/users/{id}.php → /users/123 (via _routes.php)
+// _routes/users/{id}.php → /users/123 (via __ROUTES__.php)
 <?php
 header('Content-Type: application/json');
 echo json_encode(['users' => [...]]);

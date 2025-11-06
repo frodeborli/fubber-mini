@@ -108,7 +108,7 @@ class Column
     /**
      * Create appropriate codec for this column using strategy pattern
      */
-    public function createCodec(\mini\Contracts\CodecStrategyInterface $strategy, \ReflectionProperty $property): ?\mini\Contracts\FieldCodecInterface
+    public function createCodec(\mini\Tables\Codecs\CodecStrategyInterface $strategy, \ReflectionProperty $property): ?\mini\Tables\Codecs\FieldCodecInterface
     {
         return $strategy->getCodecFor($this, $property);
     }

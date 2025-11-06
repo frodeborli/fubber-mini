@@ -111,6 +111,15 @@ URLs map directly to files in `_routes/`:
 
 **Performance:** Route lookup is O(1) constant time - only limited by filesystem scalability. Works efficiently with tens of thousands of routes.
 
+**Security:** Files starting with underscore (e.g., `_helper.php`, `_function.php`) are **not** publicly routable. Use this convention for internal handlers that should only be accessed via `__ROUTES__.php` or included by other route files. For example:
+- `_routes/mini/_function.php` - Internal handler, NOT accessible via `/mini/_function`
+- `_routes/mini/__ROUTES__.php` - Custom route handler (framework convention)
+- `_routes/api/_helpers.php` - Shared helper functions for API routes
+
+**Naming Convention:**
+- Single underscore `_*.php` - Developer's internal files (helpers, includes, handlers)
+- Double underscore `__ROUTES__.php` - Framework-reserved custom route handler file
+
 **Example:** `_routes/api/posts.php`
 
 ```php

@@ -2,6 +2,24 @@
 
 namespace mini;
 
+/**
+ * Simple file-based router for Mini framework
+ *
+ * Maps URLs to route handler files in _routes/ directory:
+ * - /users → _routes/users.php
+ * - /api/posts → _routes/api/posts.php
+ *
+ * Security: Files starting with underscore are NOT publicly routable
+ * - _routes/api/_helpers.php → NOT accessible via /api/_helpers
+ * - _routes/mini/_function.php → NOT accessible via /mini/_function
+ *
+ * Use underscore-prefixed files for:
+ * - Internal route handlers (accessed via __ROUTES__.php dynamic routing)
+ * - Shared helper functions (included by other routes)
+ *
+ * Use double-underscore for framework-reserved files:
+ * - __ROUTES__.php → Custom route handler (framework convention)
+ */
 class SimpleRouter
 {
     private array $routes;
@@ -25,26 +43,25 @@ class SimpleRouter
         // Try to resolve the route for the current path
         $target = $this->tryFileBasedRouting($path, $baseUrl);
 
-        // If path doesn't end with '/', check if path with trailing slash has a route
-        // If both exist, prefer the directory-based route (with trailing slash)
-        if (!str_ends_with($path, '/')) {
-            $alternateTarget = $this->tryFileBasedRouting($path . '/', $baseUrl);
-            if ($alternateTarget) {
-                // If current path has no route, OR alternate is a directory index, redirect
-                if (!$target || str_ends_with($alternateTarget, '/index.php')) {
+        // Only check for alternate path redirect if NO route exists for current path
+        if (!$target) {
+            // Path doesn't end with '/' - check if path with trailing slash has a route
+            if (!str_ends_with($path, '/')) {
+                $alternateTarget = $this->tryFileBasedRouting($path . '/', $baseUrl);
+                if ($alternateTarget) {
+                    // No route for /path but route exists for /path/ - redirect
                     $this->redirectTo($path . '/');
                     return;
                 }
             }
-        }
-
-        // If no route found and path ends with '/', check if path without trailing slash has a route
-        if (!$target && str_ends_with($path, '/') && $path !== '/') {
-            $alternateTarget = $this->tryFileBasedRouting(rtrim($path, '/'), $baseUrl);
-            if ($alternateTarget) {
-                // Route exists for path without trailing slash - redirect
-                $this->redirectTo(rtrim($path, '/'));
-                return;
+            // Path ends with '/' - check if path without trailing slash has a route
+            elseif ($path !== '/') {
+                $alternateTarget = $this->tryFileBasedRouting(rtrim($path, '/'), $baseUrl);
+                if ($alternateTarget) {
+                    // No route for /path/ but route exists for /path - redirect
+                    $this->redirectTo(rtrim($path, '/'));
+                    return;
+                }
             }
         }
 
@@ -56,7 +73,7 @@ class SimpleRouter
             return;
         }
 
-        // 2. Try hierarchical _routes.php files
+        // 2. Try hierarchical __ROUTES__.php files
         $strippedPath = $this->stripBasePath($path, $baseUrl);
         $routeInfo = $this->findScopedRouteFile($strippedPath);
 
@@ -303,6 +320,15 @@ class SimpleRouter
         // Remove only leading slash - preserve trailing slash distinction
         $remaining = ltrim($path, '/');
 
+        // Security: Block access to files starting with underscore
+        // Files like __ROUTES__.php, _function.php are internal handlers, not public routes
+        $pathSegments = explode('/', $remaining);
+        foreach ($pathSegments as $segment) {
+            if (str_starts_with($segment, '_')) {
+                return null;  // 404 - underscore-prefixed paths are not routable
+            }
+        }
+
         // Root path: / → _routes/index.php
         if ($remaining === '') {
             $routeFile = 'index.php';
@@ -358,7 +384,7 @@ class SimpleRouter
         // Check from most specific to least specific directory in _routes/
         while (!empty($pathParts)) {
             $dirPath = implode('/', $pathParts);
-            $routeFile = $dirPath . '/_routes.php';
+            $routeFile = $dirPath . '/__ROUTES__.php';
 
             // Try to find in _routes/ via PathsRegistry
             $foundPath = Mini::$mini->paths->routes->findFirst($routeFile);

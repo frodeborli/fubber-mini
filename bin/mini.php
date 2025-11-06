@@ -7,8 +7,9 @@
  * Unified command-line interface for Mini framework tools
  */
 
+// We need to load autoloader first before we can use ArgManager
+// So we'll keep this simple - just get the command name
 $command = $argv[1] ?? null;
-$args = array_slice($argv, 2);
 
 $availableCommands = [
     'serve' => [
@@ -41,6 +42,16 @@ $availableCommands = [
         'script' => 'mini-migrations.php',
         'examples' => [
             'migrations' => 'Run all pending migrations'
+        ]
+    ],
+    'docs' => [
+        'description' => 'Browse PHP documentation',
+        'script' => 'mini-docs.php',
+        'examples' => [
+            'docs mini' => 'Show mini namespace overview',
+            'docs "mini\\Mini"' => 'Show Mini class documentation',
+            'docs search Router' => 'Search entity names for "Router"',
+            'docs "mini\\db"' => 'Show db() function documentation'
         ]
     ]
 ];
@@ -84,9 +95,9 @@ if (!file_exists($scriptPath)) {
     exit(1);
 }
 
-// Build the command with arguments
+// Build the command with all remaining arguments (preserve original $argv)
 $cmd = ['php', $scriptPath];
-$cmd = array_merge($cmd, $args);
+$cmd = array_merge($cmd, array_slice($argv, 2));
 
 // Execute the command
 $descriptorspec = [

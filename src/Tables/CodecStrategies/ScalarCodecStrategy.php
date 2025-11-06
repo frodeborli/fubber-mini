@@ -19,6 +19,11 @@ use mini\Tables\CodecRegistry;
  */
 final class ScalarCodecStrategy implements CodecStrategyInterface
 {
+    public function getBackendName(): string
+    {
+        return 'scalar';
+    }
+
     public function getCodecFor(Column $column, \ReflectionProperty $property): ?FieldCodecInterface
     {
         $fieldName = $column->getColumnName('unknown');
