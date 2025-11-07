@@ -217,7 +217,7 @@ $token->__toString(): string                # Output hidden input field
 ```php
 // Generate token
 $nonce = csrf('delete-post');
-render('form.php', ['nonce' => $nonce]);
+echo render('form.php', ['nonce' => $nonce]);
 
 // In template
 <form method="post">

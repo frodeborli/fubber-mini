@@ -23,7 +23,7 @@ use ReflectionClass;
  * Uses path registry to find templates in _views/ directory.
  *
  * Simple templates:
- *   render('settings.php', ['user' => $user])
+ *   echo render('settings.php', ['user' => $user])
  *
  * With layout inheritance:
  *   // child.php
@@ -36,13 +36,13 @@ use ReflectionClass;
  *   <body><?php $show('content'); ?></body></html>
  *
  * Including sub-templates (partials):
- *   <?php mini\render('user-card.php', ['user' => $currentUser]); ?>
+ *   <?= mini\render('user-card.php', ['user' => $currentUser]) ?>
  *
  * @param string $template Template filename (e.g., 'settings.php', 'admin/dashboard.php')
  * @param array $vars Variables to extract for template
  * @return string Rendered content
  */
-function render($template, $vars = []) {
+function render(string $template, array $vars = []): string {
     // Use path registry to find template
     $templatePath = Mini::$mini->paths->views->findFirst($template);
 
