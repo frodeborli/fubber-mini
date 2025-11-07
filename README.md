@@ -81,7 +81,7 @@ echo Fmt::currency(19.99, 'USD');  // "$19.99"
 echo Fmt::dateShort(new DateTime());
 ```
 
-[Documentation](docs/I18n/index.md) | [API Reference](src/I18n/Fmt.php)
+[Quick Reference](src/I18n/README.md) | [Complete Guide](docs/i18n-guide.md) | [API Reference](src/I18n/Fmt.php)
 
 ---
 
