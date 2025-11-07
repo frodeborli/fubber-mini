@@ -26,11 +26,13 @@ class Router
 {
     private array $routes;
     private string $scope;
+    public readonly \mini\Hooks\Handler $defaultHandlers;
 
     public function __construct(array $routes = [], string $scope = '')
     {
         $this->routes = $routes;
         $this->scope = $scope;
+        $this->defaultHandlers = new \mini\Hooks\Handler();
     }
 
     /**
