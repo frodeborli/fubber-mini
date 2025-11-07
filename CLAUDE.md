@@ -63,9 +63,10 @@ File-based routing:
 
 Pattern-based routing:
 ```php
-// _routes/__ROUTES__.php
+// _routes/blog/__DEFAULT__.php
 return [
-    "/blog/{slug}" => fn($slug) => "blog/post.php?slug=$slug",
+    '/' => 'index.php',
+    '/{slug}' => fn($slug) => "post.php?slug=$slug",
 ];
 ```
 
