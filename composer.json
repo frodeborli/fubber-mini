@@ -42,7 +42,8 @@
             "src/Logger/functions.php",
             "src/Auth/functions.php",
             "src/Mailer/functions.php",
-            "src/CLI/functions.php"
+            "src/CLI/functions.php",
+            "src/UUID/functions.php"
         ]
     },
     "bin": [

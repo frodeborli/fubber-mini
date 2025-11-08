@@ -14,59 +14,108 @@ use Symfony\Component\Dotenv\Dotenv;
 use WeakMap;
 
 /**
- * Provides application wide information for the application. This is information
- * that does not change between application requests, and is effectively global state.
+ * Core framework singleton that manages application configuration and service container.
  *
- * Also implements PSR-11 ContainerInterface for service dependency injection.
+ * This class is instantiated once when Composer's autoloader loads vendor/fubber/mini/bootstrap.php.
+ * It provides:
+ * - Application configuration (root, locale, timezone, debug mode)
+ * - PSR-11 service container with Singleton, Scoped, and Transient lifetimes
+ * - Path registries for multi-location file resolution (config, routes, views)
+ * - Lifecycle phase management (Initializing → Bootstrap → Ready → Shutdown)
+ *
+ * Configuration is read from environment variables (MINI_* prefixed) or .env file in project root.
+ * All configuration happens during instantiation - the Mini instance is immutable after construction.
  *
  * @package mini
  */
 final class Mini implements ContainerInterface {
     /**
-     * Singleton pattern. The Mini instance is immutable and global and always contains the
-     * environment configuration.
-     * 
+     * Global singleton instance of Mini framework.
+     *
+     * Instantiated automatically when Composer loads vendor/fubber/mini/bootstrap.php.
+     * Access via Mini::$mini throughout your application.
+     *
      * @var Mini
      */
     public static ?Mini $mini = null;
 
-    /** The application root path */
+    /**
+     * Application root directory path.
+     *
+     * Detected automatically from Composer's vendor directory or set via MINI_ROOT environment variable.
+     * Typically the directory containing composer.json and vendor/.
+     */
     public readonly string $root;
 
     /**
-     * Collection of path registries (config, views, migrations, etc.)
-     * Allows applications and bundles to register searchable path hierarchies
+     * Path registries for multi-location file resolution.
+     *
+     * Stores PathsRegistry instances for different resource types (config, routes, views).
+     * Each registry supports multiple search paths with priority ordering, allowing applications
+     * to override framework defaults and supporting plugin/bundle architectures.
+     *
+     * Example: $paths->config searches _config/ first, then vendor/fubber/mini/config/ as fallback.
      *
      * @var Util\InstanceStore<string, Util\PathsRegistry>
      */
     public readonly Util\InstanceStore $paths;
 
-    /** The web accessible document root (can be null if it's not configured via MINI_DOC_ROOT env) */
+    /**
+     * Web-accessible document root directory path.
+     *
+     * Configured via MINI_DOC_ROOT environment variable or auto-detected from $_SERVER['DOCUMENT_ROOT'].
+     * Falls back to checking for html/ or public/ directories in project root. Can be null if not detected.
+     */
     public readonly ?string $docRoot;
 
-    /** The URL corresponding to $docRoot (can be null if it's not configured via MINI_BASE_URL env) */
+    /**
+     * Base URL for the application.
+     *
+     * Configured via MINI_BASE_URL environment variable or auto-detected from HTTP headers.
+     * Used for generating absolute URLs. Can be null if not configured or detected.
+     */
     public readonly ?string $baseUrl;
 
-    /** Application default locale (MINI_LOCALE env or php.ini or 'en_GB.UTF-8') */
+    /**
+     * Default locale for internationalization.
+     *
+     * Configured via MINI_LOCALE environment variable, falls back to php.ini intl.default_locale,
+     * or defaults to 'en_GB.UTF-8'. Used by I18n features and automatically sets PHP's \Locale::setDefault().
+     */
     public readonly string $locale;
 
-    /** Application default timezone (MINI_TIMEZONE env or PHP default) */
+    /**
+     * Default timezone for date/time operations.
+     *
+     * Configured via MINI_TIMEZONE environment variable or uses PHP's default timezone.
+     * Automatically sets PHP's date_default_timezone_set() during bootstrap.
+     */
     public readonly string $timezone;
 
-    /** Application default language for translations (MINI_LANG env or 'en') */
+    /**
+     * Default language code for translations.
+     *
+     * Configured via MINI_LANG environment variable or defaults to 'en'.
+     * Used by the translation system to determine which language files to load.
+     */
     public readonly string $defaultLanguage;
 
-    /** Debug mode */
+    /**
+     * Debug mode flag.
+     *
+     * Enabled when DEBUG environment variable is set to any non-empty value.
+     * When true, displays detailed error pages and stack traces. When false, shows generic error pages.
+     */
     public readonly bool $debug;
 
-    /** Application salt for CSRF tokens and other cryptographic operations */
+    /**
+     * Application-wide cryptographic salt.
+     *
+     * Configured via MINI_SALT environment variable or generated from machine-specific fingerprint.
+     * Used for CSRF tokens and other cryptographic operations requiring a consistent salt.
+     */
     public readonly string $salt;
 
-    /**
-     * Lifecycle hooks
-     */
-    public readonly Hooks\Event $onRequestReceived; // Fires at start of bootstrap() (each request)
-    public readonly Hooks\Event $onAfterBootstrap;  // Fires at end of bootstrap() (each request)
 
     /**
      * Caches instances using a scope object; each request will
@@ -78,14 +127,15 @@ final class Mini implements ContainerInterface {
     private readonly WeakMap $instanceCache;
 
     /**
-     * Current application lifecycle phase
+     * Application lifecycle state machine
      *
-     * Bootstrap: Services can be registered, Scoped services cannot be accessed
-     * Request: Services cannot be registered, Scoped services can be accessed
+     * Tracks transitions between Initializing → Bootstrap → Ready → Shutdown phases with validation.
+     * Use $mini->phase->trigger(Phase::Ready) to transition between phases.
+     * The Ready phase handles all request processing (one or many concurrent requests).
      *
-     * @var Phase
+     * @var Hooks\StateMachine
      */
-    private Phase $phase = Phase::Bootstrap;
+    public readonly Hooks\StateMachine $phase;
 
     /**
      * Service definitions (factory closures + lifetime)
@@ -101,33 +151,20 @@ final class Mini implements ContainerInterface {
         self::$mini = $this;
         $this->instanceCache = new WeakMap();
 
-        // Initialize lifecycle hooks
-        $this->onRequestReceived = new Hooks\Event('on-request-received');
-        $this->onAfterBootstrap = new Hooks\Event('on-after-bootstrap');
+        // Initialize lifecycle state machine
+        // The phase tracks application state, not individual request state
+        // Ready phase can handle many concurrent requests
+        $this->phase = new Hooks\StateMachine([
+            [Phase::Initializing, Phase::Bootstrap, Phase::Failed],  // Must bootstrap (or fail trying)
+            [Phase::Bootstrap, Phase::Ready, Phase::Failed],         // Bootstrap completes or fails
+            [Phase::Ready, Phase::Shutdown],                         // Ready handles requests, eventually shuts down
+            [Phase::Failed, Phase::Shutdown],                        // Failed must shutdown
+            [Phase::Shutdown],                                       // Terminal state
+        ], 'application-lifecycle');
 
+        // Transition to Bootstrap phase and run initialization
+        $this->phase->trigger(Phase::Bootstrap);
         $this->bootstrap();
-    }
-
-    /**
-     * Transition to Request phase
-     *
-     * Called by mini\bootstrap() to transition from Bootstrap → Request phase.
-     * After this:
-     * - Services can no longer be registered (container is locked)
-     * - Scoped services can be accessed (request context available)
-     */
-    public function enterRequestContext(): void {
-        $this->phase = Phase::Request;
-    }
-
-    /**
-     * Transition back to Bootstrap phase
-     *
-     * Called after request completes in long-running servers.
-     * Use this to reset for the next request.
-     */
-    public function exitRequestContext(): void {
-        $this->phase = Phase::Bootstrap;
     }
 
     /**
@@ -149,12 +186,12 @@ final class Mini implements ContainerInterface {
             return $fiber;
         }
 
-        // Not in fiber - check if we're in Request phase
-        if ($this->phase !== Phase::Request) {
+        // Not in fiber - check if we're in Ready phase (request handling enabled)
+        if ($this->phase->getCurrentState() !== Phase::Ready) {
             throw new \LogicException(
-                'Cannot access Scoped services in Bootstrap phase. ' .
+                'Cannot access Scoped services outside of Ready phase. ' .
                 'Scoped services (db(), auth(), etc.) can only be accessed after calling mini\bootstrap(). ' .
-                'Current phase: ' . $this->phase->name
+                'Current phase: ' . $this->phase
             );
         }
 
@@ -162,14 +199,18 @@ final class Mini implements ContainerInterface {
     }
 
     /**
-     * Load a config file from 'config' path registry
+     * Load a configuration file using the path registry system.
      *
-     * Uses path registry to search multiple locations (application first, then plugins/bundles).
-     * Note: No caching is done here - container handles caching based on service Lifetime.
+     * Searches for the config file in registered paths with priority ordering:
+     * 1. Application config (_config/ or MINI_CONFIG_ROOT)
+     * 2. Framework config (vendor/fubber/mini/config/)
      *
-     * @param string $filename Relative to config paths (e.g., 'pdo.php', 'routes.php')
+     * This allows applications to override framework defaults and supports plugin/bundle architectures
+     * where multiple packages can contribute config files.
+     *
+     * @param string $filename Relative path to config file (e.g., 'routes.php', 'PDO.php')
      * @param mixed $default Return this if file not found (omit to throw exception)
-     * @return mixed The loaded config value
+     * @return mixed The value returned by the config file (usually an object or array)
      * @throws \Exception If file not found and no default provided
      */
     public function loadConfig(string $filename, mixed $default = null): mixed {
@@ -194,15 +235,19 @@ final class Mini implements ContainerInterface {
     }
 
     /**
-     * Load a config file for a service class
+     * Load service configuration by class name using path registry.
      *
-     * Converts class name to config file path by replacing backslashes with slashes.
-     * Example: \PDO::class → 'PDO.php'
-     * Example: \Psr\SimpleCache\CacheInterface::class → 'Psr/SimpleCache/CacheInterface.php'
+     * Converts class name to config file path by replacing namespace separators with directory separators:
+     * - PDO → '_config/PDO.php'
+     * - Psr\SimpleCache\CacheInterface → '_config/Psr/SimpleCache/CacheInterface.php'
+     * - mini\UUID\FactoryInterface → '_config/mini/UUID/FactoryInterface.php'
      *
-     * @param string $className Fully qualified class name
+     * Uses the path registry system, so application configs (_config/) take precedence over
+     * framework defaults (vendor/fubber/mini/config/).
+     *
+     * @param string $className Fully qualified class name (with or without leading backslash)
      * @param mixed $default Return this if file not found (omit to throw exception)
-     * @return mixed The loaded config value (cached for this request)
+     * @return mixed The value returned by the config file (typically a service instance)
      * @throws \Exception If file not found and no default provided
      */
     public function loadServiceConfig(string $className, mixed $default = null): mixed {
@@ -236,7 +281,7 @@ final class Mini implements ContainerInterface {
      * @throws \LogicException If called in Request phase or if service already registered
      */
     public function addService(string $id, Lifetime $lifetime, Closure $factory): void {
-        if ($this->phase !== Phase::Bootstrap) {
+        if ($this->phase->getCurrentState() !== Phase::Bootstrap) {
             throw new \LogicException(
                 "Cannot register services in Request phase. " .
                 "Services must be registered during application bootstrap (before calling mini\bootstrap()). " .

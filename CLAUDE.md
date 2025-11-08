@@ -1,5 +1,16 @@
 # Mini Framework - Overview for Claude Code
 
+## Development Status
+
+**Mini is in active internal development.** We prioritize clean, simple code over backward compatibility:
+
+- When we find a better approach, we **remove the old implementation** entirely
+- We don't maintain redundant code or deprecated patterns
+- Breaking changes are documented in **CHANGE-LOG.md** for reference
+- No semantic versioning or release process - it's internal iteration
+
+**See CHANGE-LOG.md** when reviewing old code or conversation history.
+
 ## Philosophy: Back to PHP Basics
 
 Mini is a deliberate departure from modern PHP frameworks:
@@ -181,15 +192,19 @@ $_SESSION['user_id'] = 123;
 echo render('template-name', ['var' => 'value']);
 ```
 
-### Hooks/Events
+### Phase Lifecycle Hooks
 ```php
-// Request lifecycle
-Mini::$mini->onAfterBootstrap->listen(function() {
-    // Runs after framework bootstrapped
+// Subscribe to phase transitions
+Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
+    // Fires when entering Ready phase (before transition completes)
+});
+
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
+    // Fires after Ready phase entered (after transition completes)
 });
 ```
 
-**For detailed hooks documentation, see `src/Hooks/` classes and docblocks.**
+**For detailed hooks documentation, see `src/Phase.php` and `src/Hooks/` classes.**
 
 ## Learning More
 

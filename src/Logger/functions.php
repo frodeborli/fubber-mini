@@ -11,11 +11,8 @@ use Psr\Log\LoggerInterface;
  * These functions provide the public API for the mini\Logger feature.
  */
 
-// Register Logger service when this file is loaded (after bootstrap.php)
-// Only register if not already registered (allows app to override)
-if (!Mini::$mini->has(LoggerInterface::class)) {
-    Mini::$mini->addService(LoggerInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(LoggerInterface::class));
-}
+// Register Logger service
+Mini::$mini->addService(LoggerInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(LoggerInterface::class));
 
 /**
  * Get the application logger instance

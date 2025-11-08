@@ -5,10 +5,8 @@ namespace mini;
 use mini\Cache\NamespacedCache;
 use Psr\SimpleCache\CacheInterface;
 
-// Register SimpleCache service when this file is loaded
-if (!Mini::$mini->has(CacheInterface::class)) {
-    Mini::$mini->addService(CacheInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(CacheInterface::class));
-}
+// Register SimpleCache service
+Mini::$mini->addService(CacheInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(CacheInterface::class));
 
 /**
  * Get cache instance

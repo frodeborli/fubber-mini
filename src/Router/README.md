@@ -304,6 +304,102 @@ header('Content-Type: application/json');
 echo json_encode(['error' => 'Not Found', 'path' => $_SERVER['REQUEST_URI']]);
 ```
 
+## Mounting PSR-15 Applications
+
+Mini's router supports mounting PSR-15 compatible applications (like Slim, Mezzio, etc.) under specific paths:
+
+### Mounting a Slim Application
+
+```php
+<?php
+// _routes/api/__DEFAULT__.php
+
+use Slim\Factory\AppFactory;
+
+$app = AppFactory::create();
+
+$app->get('/users', function($request, $response) {
+    $response->getBody()->write(json_encode(['users' => [...]]));
+    return $response->withHeader('Content-Type', 'application/json');
+});
+
+$app->post('/users', function($request, $response) {
+    // Handle user creation
+    return $response->withStatus(201);
+});
+
+// Return the Slim app - it implements RequestHandlerInterface
+return $app;
+```
+
+Now all requests to `/api/*` are handled by the Slim application.
+
+### Custom Request Handler
+
+```php
+<?php
+// _routes/custom/__DEFAULT__.php
+
+use Psr\Http\Message\ServerRequestInterface;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Server\RequestHandlerInterface;
+
+return new class implements RequestHandlerInterface {
+    public function handle(ServerRequestInterface $request): ResponseInterface {
+        $response = \mini\Http\create_response(200, 'Custom handler response');
+        return $response->withHeader('X-Custom', 'true');
+    }
+};
+```
+
+### Registering Custom Handlers
+
+You can register your own handlers for __DEFAULT__.php return values:
+
+```php
+<?php
+// config/mini/Router/Router.php
+
+$router = new mini\Router\Router();
+
+// Register handler for custom types
+$router->defaultHandlers->listen(function($result, $routeInfo) {
+    if ($result instanceof MyCustomApp) {
+        $result->run();
+        return true; // Handled
+    }
+    return null; // Not handled
+});
+
+return $router;
+```
+
+### __DEFAULT__.php Return Value Handling
+
+The router processes __DEFAULT__.php return values in this order:
+
+1. **null** - Assumes response was sent directly (like regular route files)
+2. **Registered handlers** - Checks `$router->defaultHandlers` listeners
+3. **PSR-15 RequestHandler** - Built-in support via `RequestHandlerInterface`
+4. **Array** - Treats as route patterns (default Mini behavior)
+
+```php
+<?php
+// _routes/example/__DEFAULT__.php
+
+// Option 1: Send response directly, return null
+echo json_encode(['direct' => 'response']);
+return null;
+
+// Option 2: Return PSR-15 handler
+return new SlimApp();
+
+// Option 3: Return routes array
+return [
+    '/{id}' => fn($id) => "item.php?id=$id"
+];
+```
+
 ## Router Scope
 
 Router is **Singleton** - one instance shared across the application lifecycle. Routes are resolved per-request but router configuration persists.

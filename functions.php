@@ -193,7 +193,7 @@ function session(): bool {
  * Call this at the top of any directly-accessible PHP file in the document root.
  * Sets up error handling, output buffering, and clean URL redirects.
  *
- * Marks entry into request context, enabling access to Scoped services.
+ * Transitions application from Bootstrap to Ready phase, enabling access to Scoped services.
  *
  * Safe to call multiple times (idempotent after first call).
  */
@@ -205,12 +205,8 @@ function bootstrap(): void
     }
     $initialized = true;
 
-    // Fire onRequestReceived at the very beginning
-    Mini::$mini->onRequestReceived->trigger();
-
-    // Mark that we're now in request handling context
-    // This enables access to Scoped services (db(), auth(), etc.)
-    Mini::$mini->enterRequestContext();
+    // Transition to Ready phase - enables request handling and access to Scoped services
+    Mini::$mini->phase->trigger(Phase::Ready);
 
     // Clean up pre-existing output handlers
     $previousLevel = -1;
@@ -303,9 +299,6 @@ function bootstrap(): void
             exit;
         }
     }
-
-    // Fire onAfterBootstrap at the very end
-    Mini::$mini->onAfterBootstrap->trigger();
 }
 
 /**

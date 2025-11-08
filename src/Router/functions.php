@@ -11,7 +11,5 @@ use mini\Lifetime;
  * This file is autoloaded by Composer and registers the Router service.
  */
 
-// Register Router service when this file is loaded
-if (!Mini::$mini->has(Router::class)) {
-    Mini::$mini->addService(Router::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(Router::class));
-}
+// Register Router service
+Mini::$mini->addService(Router::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(Router::class));

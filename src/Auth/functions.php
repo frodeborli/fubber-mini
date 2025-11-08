@@ -11,15 +11,11 @@ use mini\Auth\AuthInterface;
  * These functions provide the public API for the mini\Auth feature.
  */
 
-// Register Auth facade service when this file is loaded
-if (!Mini::$mini->has(Auth::class)) {
-    Mini::$mini->addService(Auth::class, Lifetime::Singleton, fn() => new Auth());
-}
+// Register Auth facade service
+Mini::$mini->addService(Auth::class, Lifetime::Singleton, fn() => new Auth());
 
 // Register AuthInterface - apps must provide implementation via config
-if (!Mini::$mini->has(AuthInterface::class)) {
-    Mini::$mini->addService(AuthInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(AuthInterface::class));
-}
+Mini::$mini->addService(AuthInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(AuthInterface::class));
 
 /**
  * Get the Auth facade instance

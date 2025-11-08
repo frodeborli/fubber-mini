@@ -12,100 +12,99 @@ This document contains common patterns for extending and customizing Mini framew
 
 ## Overriding Framework Services
 
-Mini allows applications to override framework default services by registering custom implementations BEFORE the framework's service registration runs.
+Mini allows applications to override framework default services using config files.
 
 ### How It Works
 
-The framework registers its default services in:
-- `src/Mini.php` - registerCoreServices() (PDO, DatabaseInterface, SimpleCache)
-- `src/Logger/functions.php` - LoggerInterface
-- `src/I18n/functions.php` - Translator, Fmt
+The framework registers services using `Mini::$mini->loadServiceConfig()`, which:
+1. First checks for application config at `_config/[namespace]/[ClassName].php`
+2. Falls back to framework default at `vendor/fubber/mini/config/[namespace]/[ClassName].php`
 
-Each service registration checks `if (!Mini::$mini->has(...))` before registering, allowing your application to provide its own implementation.
+This means **you override services by creating config files**, not by registering them before the framework loads.
 
-### Pattern: Register Services in app/bootstrap.php
+### Pattern: Override Services via Config Files
 
-**1. Create app/bootstrap.php**
+**Example: Custom Logger (Monolog)**
 
 ```php
 <?php
-// app/bootstrap.php
+// _config/Psr/Log/LoggerInterface.php
 
-use mini\Mini;
-use mini\Lifetime;
-use Psr\Log\LoggerInterface;
-use Psr\SimpleCache\CacheInterface;
-
-// Override Logger with custom implementation (e.g., Sentry, Monolog)
-Mini::$mini->addService(LoggerInterface::class, Lifetime::Singleton, function() {
-    return new \Monolog\Logger('app', [
-        new \Monolog\Handler\StreamHandler('php://stderr', \Monolog\Logger::DEBUG),
-        new \Monolog\Handler\SentryHandler(/* ... */),
-    ]);
-});
-
-// Override Cache with Redis
-Mini::$mini->addService(CacheInterface::class, Lifetime::Singleton, function() {
-    return new \Symfony\Component\Cache\Psr16Cache(
-        new \Symfony\Component\Cache\Adapter\RedisAdapter(
-            \Symfony\Component\Cache\Adapter\RedisAdapter::createConnection('redis://localhost')
-        )
-    );
-});
-
-// Override PDO with custom database configuration
-Mini::$mini->addService(\PDO::class, Lifetime::Scoped, function() {
-    $pdo = new PDO('mysql:host=db.example.com;dbname=myapp', 'user', 'pass');
-    // Custom PDO configuration
-    $pdo->setAttribute(PDO::ATTR_TIMEOUT, 5);
-    $pdo->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, true);
-    return $pdo;
-});
+return new \Monolog\Logger('app', [
+    new \Monolog\Handler\StreamHandler('php://stderr', \Monolog\Logger::DEBUG),
+    new \Monolog\Handler\SentryHandler(/* ... */),
+]);
 ```
 
-**2. Register in composer.json**
+**Example: Custom Cache (Redis)**
 
-```json
-{
-    "autoload": {
-        "files": [
-            "app/bootstrap.php"
-        ]
-    }
-}
+```php
+<?php
+// _config/Psr/SimpleCache/CacheInterface.php
+
+return new \Symfony\Component\Cache\Psr16Cache(
+    new \Symfony\Component\Cache\Adapter\RedisAdapter(
+        \Symfony\Component\Cache\Adapter\RedisAdapter::createConnection('redis://localhost')
+    )
+);
 ```
 
-**3. Run composer dump-autoload**
+**Example: Custom Database (PostgreSQL)**
 
-```bash
-composer dump-autoload
+```php
+<?php
+// _config/PDO.php
+
+return new PDO(
+    'pgsql:host=db.example.com;dbname=myapp',
+    'user',
+    'pass',
+    [
+        PDO::ATTR_TIMEOUT => 5,
+        PDO::ATTR_PERSISTENT => true,
+    ]
+);
 ```
 
-### Autoload Order Guarantees
+**Example: Custom UUID Factory**
 
-Composer's autoload order ensures:
-1. `vendor/fubber/mini/bootstrap.php` - Creates `Mini::$mini` singleton
-2. **Your `app/bootstrap.php`** - Registers custom services
-3. `vendor/fubber/mini/functions.php` - Framework functions
-4. `vendor/fubber/mini/src/Logger/functions.php` - Checks `has()`, skips if already registered
-5. Other framework feature files...
+```php
+<?php
+// _config/mini/UUID/FactoryInterface.php
 
-Your services are registered FIRST, so framework defaults are skipped.
+return new \mini\UUID\UUID4Factory();  // Use v4 instead of v7
+```
+
+### Config File Lookup
+
+Framework services use this pattern:
+```php
+Mini::$mini->addService(
+    LoggerInterface::class,
+    Lifetime::Singleton,
+    fn() => Mini::$mini->loadServiceConfig(LoggerInterface::class)
+);
+```
+
+When you call `log()`, Mini looks for config in this order:
+1. `_config/Psr/Log/LoggerInterface.php` (your override)
+2. `vendor/fubber/mini/config/Psr/Log/LoggerInterface.php` (framework default)
+
+**Note:** You cannot override framework services by registering them in `app/bootstrap.php` before the framework loads. The framework unconditionally registers its services, and `loadServiceConfig()` handles the override logic via config files.
 
 ---
 
 ## Request Processing (Middleware Pattern)
 
-Mini doesn't have PSR-15 middleware, but the `onRequestReceived` hook provides the same capabilities using standard PHP patterns.
+Mini doesn't have PSR-15 middleware, but phase lifecycle hooks provide the same capabilities using standard PHP patterns.
 
-### Pattern: Use onRequestReceived Hook
+### Pattern: Use Phase Transition Hooks
 
-The `onRequestReceived` hook fires at the very beginning of `mini\bootstrap()`, before:
-- Error handlers are set up
-- Output buffering starts
-- Request context is entered
+Phase hooks fire when the application transitions to Ready phase (when `mini\bootstrap()` is called). Use `onEnteringState()` for "before request" logic and `onEnteredState()` for "after bootstrap" logic.
 
-This is the perfect place for "before request" middleware logic.
+**When hooks fire:**
+- `onEnteringState(Phase::Ready)` - Before Ready phase transition (before error handlers, output buffering)
+- `onEnteredState(Phase::Ready)` - After Ready phase entered (after bootstrap completes)
 
 **Example: Authentication Middleware**
 
@@ -114,9 +113,11 @@ This is the perfect place for "before request" middleware logic.
 // app/bootstrap.php
 
 use mini\Mini;
+use mini\Phase;
 
 // Register authentication check for protected routes
-Mini::$mini->onRequestReceived->listen(function() {
+// Fires when entering Ready phase (before error handlers set up)
+Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
     $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
 
     // Define protected paths
@@ -146,7 +147,10 @@ Mini::$mini->onRequestReceived->listen(function() {
 <?php
 // app/bootstrap.php
 
-Mini::$mini->onRequestReceived->listen(function() {
+use mini\Mini;
+use mini\Phase;
+
+Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
     $start = microtime(true);
 
     // Log request start
@@ -171,7 +175,10 @@ Mini::$mini->onRequestReceived->listen(function() {
 <?php
 // app/bootstrap.php
 
-Mini::$mini->onRequestReceived->listen(function() {
+use mini\Mini;
+use mini\Phase;
+
+Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
     // Add CORS headers for API routes
     $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
 
@@ -195,7 +202,10 @@ Mini::$mini->onRequestReceived->listen(function() {
 <?php
 // app/bootstrap.php
 
-Mini::$mini->onRequestReceived->listen(function() {
+use mini\Mini;
+use mini\Phase;
+
+Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
     $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
 
     // Parse XML request bodies
@@ -234,8 +244,11 @@ You can register multiple listeners to chain middleware-like logic:
 <?php
 // app/bootstrap.php
 
+use mini\Mini;
+use mini\Phase;
+
 // Middleware 1: Rate limiting
-Mini::$mini->onRequestReceived->listen(function() {
+Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
     $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
     $cache = \mini\cache('rate-limit');
 
@@ -252,14 +265,14 @@ Mini::$mini->onRequestReceived->listen(function() {
 });
 
 // Middleware 2: Request ID
-Mini::$mini->onRequestReceived->listen(function() {
+Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
     $requestId = bin2hex(random_bytes(8));
     $_SERVER['HTTP_X_REQUEST_ID'] = $requestId;
     header("X-Request-ID: {$requestId}");
 });
 
 // Middleware 3: Security headers
-Mini::$mini->onRequestReceived->listen(function() {
+Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
     header('X-Content-Type-Options: nosniff');
     header('X-Frame-Options: DENY');
     header('X-XSS-Protection: 1; mode=block');
@@ -270,17 +283,17 @@ Mini::$mini->onRequestReceived->listen(function() {
 
 ## Response Processing (Output Buffering)
 
-The `onAfterBootstrap` hook fires at the end of `mini\bootstrap()`, after:
+The `onEnteredState(Phase::Ready)` hook fires after the Ready phase is entered, which means:
 - Error handlers are configured
 - Output buffering has started
-- Request context is entered
+- Application is ready to handle requests
 - All framework features are available
 
-This is the perfect place for "after request" processing using PHP's output buffering.
+This is the perfect place for "after bootstrap" processing using PHP's output buffering.
 
 ### Pattern: Custom Output Handler
 
-Register a custom output buffer handler in `onAfterBootstrap`:
+Register a custom output buffer handler after entering Ready phase:
 
 **Example: HTML Minification**
 
@@ -288,7 +301,10 @@ Register a custom output buffer handler in `onAfterBootstrap`:
 <?php
 // app/bootstrap.php
 
-Mini::$mini->onAfterBootstrap->listen(function() {
+use mini\Mini;
+use mini\Phase;
+
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     // Start a new output buffer with custom handler
     ob_start(function($buffer) {
         // Only minify HTML responses
@@ -317,7 +333,10 @@ Mini::$mini->onAfterBootstrap->listen(function() {
 <?php
 // app/bootstrap.php
 
-Mini::$mini->onAfterBootstrap->listen(function() {
+use mini\Mini;
+use mini\Phase;
+
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     // Use PHP's built-in compression handler
     if (extension_loaded('zlib')) {
         ob_start('ob_gzhandler');
@@ -331,7 +350,10 @@ Mini::$mini->onAfterBootstrap->listen(function() {
 <?php
 // app/bootstrap.php
 
-Mini::$mini->onAfterBootstrap->listen(function() {
+use mini\Mini;
+use mini\Phase;
+
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     $start = microtime(true);
 
     ob_start(function($buffer) use ($start) {
@@ -348,7 +370,10 @@ Mini::$mini->onAfterBootstrap->listen(function() {
 <?php
 // app/bootstrap.php
 
-Mini::$mini->onAfterBootstrap->listen(function() {
+use mini\Mini;
+use mini\Phase;
+
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     ob_start(function($buffer) {
         // Only inject into HTML responses
         $contentType = '';
@@ -375,7 +400,10 @@ Mini::$mini->onAfterBootstrap->listen(function() {
 <?php
 // app/bootstrap.php
 
-Mini::$mini->onAfterBootstrap->listen(function() {
+use mini\Mini;
+use mini\Phase;
+
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     ob_start(function($buffer) {
         // Inject Content-Security-Policy for HTML pages
         $contentType = '';
@@ -403,7 +431,10 @@ Output buffer handlers can manipulate headers before they're sent:
 <?php
 // app/bootstrap.php
 
-Mini::$mini->onAfterBootstrap->listen(function() {
+use mini\Mini;
+use mini\Phase;
+
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     ob_start(function($buffer) {
         // Add cache headers based on content
         if (strlen($buffer) > 1024 && !str_contains($buffer, 'user-specific')) {
@@ -429,7 +460,10 @@ Multiple output handlers create a processing chain:
 <?php
 // app/bootstrap.php
 
-Mini::$mini->onAfterBootstrap->listen(function() {
+use mini\Mini;
+use mini\Phase;
+
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     // Handler 1: Minify HTML
     ob_start(function($buffer) {
         if (str_contains(headers_list()[0] ?? '', 'text/html')) {
@@ -463,23 +497,22 @@ Here's a complete example combining all patterns:
 // app/bootstrap.php
 
 use mini\Mini;
+use mini\Phase;
 use mini\Lifetime;
 
-// Override services
-Mini::$mini->addService(\Psr\Log\LoggerInterface::class, Lifetime::Singleton, function() {
-    return new \Monolog\Logger('app');
-});
+// Override services via config files (see _config/Psr/Log/LoggerInterface.php)
+// NOT done here - use config files instead
 
-// Request processing
-Mini::$mini->onRequestReceived->listen(function() {
+// Request processing - fires when entering Ready phase
+Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
     // Rate limiting
     // CORS headers
     // Authentication
     // Request logging
 });
 
-// Response processing
-Mini::$mini->onAfterBootstrap->listen(function() {
+// Response processing - fires after Ready phase entered
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     $start = microtime(true);
 
     ob_start(function($buffer) use ($start) {
@@ -508,19 +541,19 @@ Mini::$mini->onAfterBootstrap->listen(function() {
 ## Best Practices
 
 ### Service Overrides
-- ✅ Register in `app/bootstrap.php` autoloaded via composer
-- ✅ Use appropriate lifetime (Singleton, Scoped, Transient)
-- ✅ Implement required PSR interfaces (PSR-3, PSR-16, etc.)
-- ❌ Don't register services after `mini\bootstrap()` is called
+- ✅ Create config files in `_config/[namespace]/[ClassName].php`
+- ✅ Return properly configured service instances from config files
+- ✅ Implement required PSR interfaces when replacing framework services (PSR-3, PSR-16, etc.)
+- ❌ Don't try to override by registering services in `app/bootstrap.php` (won't work)
 
-### Request Hooks
-- ✅ Use `onRequestReceived` for authentication, logging, headers
+### Phase Hooks for Request Processing
+- ✅ Use `onEnteringState(Phase::Ready)` for authentication, logging, headers
 - ✅ Call `exit` to short-circuit request processing
 - ✅ Set headers and status codes directly with `header()` and `http_response_code()`
-- ❌ Don't try to access Scoped services (db(), auth()) - not available yet
+- ❌ Don't try to access Scoped services (db(), auth()) - not available until Ready phase entered
 
-### Response Hooks
-- ✅ Use `onAfterBootstrap` with `ob_start()` for response processing
+### Phase Hooks for Response Processing
+- ✅ Use `onEnteredState(Phase::Ready)` with `ob_start()` for response processing
 - ✅ Check `headers_list()` to determine content type
 - ✅ Use `header()` to add/modify response headers
 - ✅ Return the (possibly modified) buffer from handler

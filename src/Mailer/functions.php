@@ -11,11 +11,8 @@ use mini\Mailer\MailerInterface;
  * These functions provide the public API for the mini\Mailer feature.
  */
 
-// Register Mailer service when this file is loaded (after bootstrap.php)
-// Only register if not already registered (allows app to override)
-if (!Mini::$mini->has(MailerInterface::class)) {
-    Mini::$mini->addService(MailerInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(MailerInterface::class));
-}
+// Register Mailer service
+Mini::$mini->addService(MailerInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(MailerInterface::class));
 
 /**
  * Create a new email message

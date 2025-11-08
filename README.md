@@ -1,6 +1,53 @@
 # Mini - PHP Micro-Framework
 
-Minimalist PHP framework for building web applications without abstractions. Use native PHP (`$_GET`, `$_POST`, `$_SESSION`, `header()`) with optional convenience helpers.
+Minimalist PHP framework that embraces native PHP instead of hiding it. Use `$_GET`, `$_POST`, `$_SESSION`, `header()` directly. Mini provides optional helpers when they genuinely simplify common tasks.
+
+## Philosophy
+
+**We don't hide PHP - we use it properly.** Modern frameworks abstract away PHP's built-in functionality. Mini takes the opposite approach: use PHP's native features the way they were designed.
+
+**Native PHP patterns we embrace:**
+
+- `$_GET`, `$_POST`, `$_COOKIE`, `$_SESSION` - Request-scoped variables (not "superglobals")
+- `\Locale::setDefault()` - Set user locale, respected by PHP's native functions
+- `date_default_timezone_set()` - Set user timezone, respected throughout PHP
+- `header()`, `http_response_code()`, `echo` - Direct output control
+- Output buffering - Transform responses without forcing abstractions
+
+**Request scope, not global scope.** Variables like `$_GET` and `$_POST` are called "superglobals," but they're really request-scoped in traditional PHP (FPM, CGI, mod_php, RoadRunner). Mini maintains this pattern:
+
+- `db()` returns a request-scoped database connection, not a shared global
+- When we add support for long-running environments (Swoole, ReactPHP, phasync), we'll context-switch these variables per request using Fibers/Coroutines
+- Static class variables are avoided unless truly intended as application-wide singletons
+- Everything is designed for concurrent request handling from day one
+
+**Thin wrappers, not abstractions.** Mini provides helpers for common tasks without hiding what's underneath:
+
+```php
+// Modern framework - abstraction
+$request->query->get('id');
+$response->json(['status' => 'ok']);
+$container->get(LocaleService::class)->setLocale('de_DE');
+
+// Mini - native PHP with optional helpers
+$id = $_GET['id'];
+header('Content-Type: application/json');
+echo json_encode(['status' => 'ok']);
+\Locale::setDefault('de_DE');
+
+// Mini helpers when they add value
+$users = db()->query("SELECT * FROM users WHERE active = ?", [1])->fetchAll();
+echo t("Hello, {name}!", ['name' => 'World']);
+echo Fmt::currency(19.99, 'EUR');  // Respects current locale
+```
+
+**PSR support without forcing it.** We support PSR-7 `ServerRequestInterface` and `ResponseInterface` for those who prefer that pattern, but we don't force abstractions on you. Use what makes sense for your application.
+
+**Configuration over code.** Override framework services via config files, not subclassing:
+
+- Create `_config/Psr/Log/LoggerInterface.php` to return your logger
+- Create `_config/PDO.php` to return your database connection
+- Framework loads these automatically - no service registration needed
 
 ## Installation
 
@@ -10,6 +57,8 @@ composer require fubber/mini
 
 ## Quick Start
 
+Create the entry point:
+
 ```php
 // html/index.php
 <?php
@@ -17,44 +66,66 @@ require '../vendor/autoload.php';
 mini\router();
 ```
 
+Create your first route:
+
 ```php
 // _routes/index.php
 <?php
 echo "<h1>Hello, World!</h1>";
 ```
 
-Visit `http://localhost:8080` and you're running!
+Start the development server:
 
-## Core Features
-
-### 🚀 **Routing** - `mini\router()`
-File-based routing with zero configuration.
-
-```php
-// _routes/users.php handles /users
-// _routes/api/posts.php handles /api/posts
+```bash
+vendor/bin/mini serve
 ```
 
-[Documentation](docs/Routing/index.md) | [API Reference](src/Router/Router.php)
+Visit `http://localhost` - you're running!
 
----
+## File-Based Routing
 
-### 🗄️ **Database** - `mini\db()`
-Direct SQL with parameter binding.
+Routes map directly to PHP files in `_routes/`:
+
+```
+_routes/index.php        → /
+_routes/users.php        → /users
+_routes/api/posts.php    → /api/posts
+```
+
+For dynamic routes, create `__DEFAULT__.php`:
 
 ```php
+// _routes/blog/__DEFAULT__.php
+return [
+    '/{slug}' => fn($slug) => "post.php?slug=$slug",
+];
+```
+
+## Database
+
+Direct SQL with helpers for common operations:
+
+```php
+// Raw queries with parameter binding
 $users = db()->query("SELECT * FROM users WHERE active = ?", [1])->fetchAll();
+
+// Helpers for CRUD
 db()->insert('users', ['name' => 'John', 'email' => 'john@example.com']);
+db()->update('users', ['active' => 0], 'id = ?', [123]);
+db()->delete('users', 'id = ?', [123]);
+
+// Or use PDO directly
+$pdo = db();  // Returns PDO instance
+$stmt = $pdo->prepare("SELECT * FROM users");
 ```
 
-[Documentation](docs/Database/index.md) | [API Reference](src/Database/Database.php)
+## Active Record (Optional)
 
----
-
-### 📦 **ORM** - `mini\table()`
-Active Record pattern with PHP attributes.
+Use PHP attributes for ORM-like patterns:
 
 ```php
+use mini\Tables\Attributes\{Entity, Key, Generated, VarcharColumn};
+
 #[Entity(table: 'users')]
 class User {
     #[Key] #[Generated]
@@ -62,165 +133,170 @@ class User {
 
     #[VarcharColumn(100)]
     public string $username;
+
+    public string $email;
 }
 
+// Find by primary key
 $user = table(User::class)->find($id);
+
+// Query with conditions
+$admins = table(User::class)->where('role = ?', ['admin'])->all();
+
+// Save
+$user = new User();
+$user->username = 'john';
+$user->email = 'john@example.com';
+table(User::class)->save($user);
 ```
 
-[Documentation](docs/Tables/index.md) | [API Reference](src/Tables/Table.php)
+## Internationalization
 
----
-
-### 🌐 **I18n** - `mini\t()` & `mini\fmt()`
-Translation and locale-specific formatting.
+Translation and locale-specific formatting using ICU MessageFormat:
 
 ```php
+// Set locale (just use PHP's native function)
+\Locale::setDefault('de_DE');
+date_default_timezone_set('Europe/Berlin');
+
+// Translation with interpolation
 echo t("Hello, {name}!", ['name' => 'World']);
-echo t("{n, plural, =0{no items} one{# item} other{# items}}", ['n' => 5]);
-echo Fmt::currency(19.99, 'USD');  // "$19.99"
-echo Fmt::dateShort(new DateTime());
+
+// Pluralization
+echo t("{count, plural, =0{no items} one{# item} other{# items}}", ['count' => 5]);
+
+// Locale-aware formatting
+echo Fmt::currency(19.99, 'EUR');  // "19,99 €" in de_DE
+echo Fmt::dateShort(new DateTime());  // "29.10.2025" in de_DE
 ```
 
-[Quick Reference](src/I18n/README.md) | [Complete Guide](docs/i18n-guide.md) | [API Reference](src/I18n/Fmt.php)
-
----
-
-### 🔐 **Auth** - `mini\auth()`
-Simple authentication with role-based access.
+Translation files in `_translations/`:
 
 ```php
-mini\require_login();  // Redirect if not authenticated
-mini\require_role('admin');  // Check specific role
+// _translations/de_DE.php
+return [
+    'Hello, {name}!' => 'Hallo, {name}!',
+];
+```
 
+## Authentication
+
+Simple authentication with pluggable user providers:
+
+```php
+// Check authentication
+if (!auth()->check()) {
+    redirect('/login');
+}
+
+// Require login (throws exception if not authenticated)
+mini\require_login();
+
+// Role-based access
+mini\require_role('admin');
+
+// Login
 if (auth()->login($username, $password)) {
     redirect('/dashboard');
 }
+
+// Logout
+auth()->logout();
 ```
 
-[Documentation](docs/Auth/index.md) | [API Reference](src/Auth/AuthService.php)
+## Templates
 
----
-
-### 💾 **Cache** - `mini\cache()`
-PSR-16 Simple Cache interface.
+Simple template rendering with inheritance:
 
 ```php
-cache()->set('user:123', $userData, ttl: 3600);
-$user = cache()->get('user:123', default: null);
+// Render a template
+echo render('user/profile.php', ['user' => $user]);
 ```
 
-[Documentation](docs/Cache/index.md) | [API Reference](src/Cache/SimpleCache.php)
-
----
-
-### 📝 **Logger** - `mini\log()`
-PSR-3 logging interface.
+Templates support inheritance:
 
 ```php
-log()->info('User logged in', ['user_id' => 123]);
-log()->error('Payment failed', ['order_id' => 456]);
+// _views/user/profile.php
+<?php $extend('layouts/main.php'); ?>
+<?php $block('title', 'User Profile'); ?>
+<?php $block('content'); ?>
+    <h1><?= h($user->name) ?></h1>
+<?php $end(); ?>
+
+// _views/layouts/main.php
+<!DOCTYPE html>
+<html>
+<head><title><?php $show('title', 'Untitled'); ?></title></head>
+<body><?php $show('content'); ?></body>
+</html>
 ```
 
-[Documentation](docs/Logger/index.md) | [API Reference](src/Logger/Logger.php)
+## Lifecycle Hooks
 
----
-
-### 📧 **Mailer** - `mini\mailer()`
-Send emails via Symfony Mailer.
+Hook into application lifecycle via phase transitions:
 
 ```php
-mailer()->send(
-    Email::create()
-        ->to('user@example.com')
-        ->subject('Welcome!')
-        ->html('<h1>Hello!</h1>')
-);
+use mini\Mini;
+use mini\Phase;
+
+// Before Ready phase (authentication, CORS, rate limiting)
+Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
+    // Check authentication
+    if (!isset($_SESSION['user_id']) && str_starts_with($_SERVER['REQUEST_URI'], '/admin')) {
+        http_response_code(401);
+        exit;
+    }
+});
+
+// After Ready phase (output buffering, response processing)
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
+    ob_start(function($buffer) {
+        // Minify HTML
+        return preg_replace('/\s+/', ' ', $buffer);
+    });
+});
 ```
-
-[Documentation](docs/Mailer/index.md) | [API Reference](src/Mailer/Mailer.php)
-
----
-
-### 🖥️ **CLI** - `mini\args()`
-Parse command-line arguments for CLI tools.
-
-```php
-$root = args();
-$cmd = $root->nextCommand();
-$cmd = $cmd->withSupportedArgs('v', ['verbose', 'help'], 1);
-```
-
-[Documentation](docs/CLI/index.md) | [API Reference](src/CLI/ArgManager.php)
-
----
-
-### 🌍 **HTTP** - Request/Response Helpers
-Native PHP with convenience functions.
-
-```php
-redirect('/login');
-$url = current_url();
-flash_set('success', 'Saved!');
-echo h($userInput);  // XSS protection
-```
-
-[Documentation](docs/Http/index.md)
-
----
-
-## Philosophy
-
-**Use native PHP.** Mini doesn't hide PHP behind abstractions:
-- ✅ `$_GET`, `$_POST`, `$_SESSION`, `$_COOKIE`
-- ✅ `header()`, `echo`, `http_response_code()`
-- ✅ `\Locale::setDefault()`, `date_default_timezone_set()`
-
-**Helpers are optional.** Use them when they help, skip them when raw PHP is clearer:
-- `db()->query()` or raw `PDO`
-- `render()` or `include`
-- `t()` or `MessageFormatter`
-
-**Configuration over code.** Customize via config files, not inheritance:
-- `_config/mini/CLI/ArgManager.php` - Configure CLI parsing
-- `_config/Psr/Log/LoggerInterface.php` - Override logger
-- `.env` - Environment variables
 
 ## Directory Structure
 
+Directories starting with `_` are not web-accessible:
+
 ```
 project/
-├── _routes/           # Route handlers (not web-accessible)
+├── _routes/           # Route handlers
 ├── _views/            # Templates
-├── _config/           # Configuration files
+├── _config/           # Service configuration
 ├── _translations/     # Translation files
-├── html/              # Document root
-│   └── index.php      # Entry point
-└── vendor/            # Dependencies
+├── html/              # Document root (web-accessible)
+│   ├── index.php      # Entry point
+│   └── assets/        # CSS, JS, images
+└── vendor/            # Composer dependencies
 ```
 
 ## Development Server
 
 ```bash
-vendor/bin/mini serve
-vendor/bin/mini serve --host 0.0.0.0 --port 3000
+vendor/bin/mini serve                    # http://localhost
+vendor/bin/mini serve --port 3000        # Custom port
+vendor/bin/mini serve --host 0.0.0.0     # Bind to all interfaces
 ```
 
 ## Documentation
 
-Browse documentation via CLI:
+Essential guides:
+
+- [PATTERNS.md](PATTERNS.md) - Service overrides, middleware patterns, output buffering
+- [REFERENCE.md](REFERENCE.md) - Complete API reference
+- [CHANGE-LOG.md](CHANGE-LOG.md) - Breaking changes (Mini is in active development)
+
+CLI documentation browser:
 
 ```bash
-vendor/bin/mini docs mini          # Namespace overview
-vendor/bin/mini docs "mini\Mini"   # Class documentation
-vendor/bin/mini docs search Router # Search
+vendor/bin/mini docs --help              # See available commands
+vendor/bin/mini docs mini                # Browse mini namespace
+vendor/bin/mini docs "mini\Mini"         # Class documentation
 ```
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file.
-
-## Links
-
-- [GitHub](https://github.com/frodeborli/fubber-mini)
-- [Documentation](https://frode.ennerd.com/mini/)
-- [Issues](https://github.com/frodeborli/fubber-mini/issues)
+MIT License - see LICENSE file.

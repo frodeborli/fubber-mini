@@ -21,6 +21,16 @@ use mini\Mini;
  *
  * Use double-underscore for framework-reserved files:
  * - __DEFAULT__.php → Custom route handler (framework convention)
+ *
+ * __DEFAULT__.php handlers:
+ * - Return null: Assume response sent directly (like regular routes)
+ * - Return array: Route patterns (default behavior)
+ * - Return PSR-15 RequestHandler: Delegates to handler->handle()
+ * - Return custom object: Processed by registered defaultHandlers
+ *
+ * Example mounting PSR-15 app:
+ *   // _routes/api/__DEFAULT__.php
+ *   <?php return new SlimApp(); // implements RequestHandlerInterface
  */
 class Router
 {
@@ -33,6 +43,17 @@ class Router
         $this->routes = $routes;
         $this->scope = $scope;
         $this->defaultHandlers = new \mini\Hooks\Handler();
+
+        // Register PSR-15 RequestHandler support
+        $this->defaultHandlers->listen(function($result, $routeInfo) {
+            if ($result instanceof \Psr\Http\Server\RequestHandlerInterface) {
+                $request = \mini\Http\create_request_from_globals();
+                $response = $result->handle($request);
+                \mini\Http\emit_response($response);
+                return true; // Handled
+            }
+            return null; // Not handled, continue to next handler
+        });
     }
 
     /**
@@ -84,7 +105,21 @@ class Router
         if ($routeInfo) {
             $result = require $routeInfo['file'];
 
-            // Handle routes array
+            // If __DEFAULT__.php returns null, assume it handled response directly
+            if ($result === null) {
+                return;
+            }
+
+            // Allow registered handlers to process the result
+            // This enables mounting PSR-15 apps, custom handlers, etc.
+            if ($this->defaultHandlers->hasListeners()) {
+                $response = $this->defaultHandlers->trigger($result, $routeInfo);
+                if ($response !== null) {
+                    return;
+                }
+            }
+
+            // Handle routes array (default behavior)
             if (is_array($result)) {
                 // Include base URL prefix in the basePath for proper pattern matching
                 $basePath = '';

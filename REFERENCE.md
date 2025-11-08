@@ -458,26 +458,23 @@ $collator = new \Collator(\Locale::getDefault());
 
 ## Service Override Pattern
 
-Override framework services in `app/bootstrap.php` (autoloaded via composer):
+Override framework services using config files:
 
 ```php
-// composer.json
-{
-    "autoload": {
-        "files": ["app/bootstrap.php"]
-    }
-}
+// _config/Psr/Log/LoggerInterface.php
+return new \Monolog\Logger('app', [
+    new \Monolog\Handler\StreamHandler('php://stderr'),
+]);
 ```
 
 ```php
-// app/bootstrap.php
-use mini\Mini;
-use mini\Lifetime;
-use Psr\Log\LoggerInterface;
+// _config/PDO.php
+return new PDO('mysql:host=localhost;dbname=myapp', 'user', 'pass');
+```
 
-Mini::$mini->addService(LoggerInterface::class, Lifetime::Singleton, function() {
-    return new \Monolog\Logger('app');
-});
+```php
+// _config/mini/UUID/FactoryInterface.php
+return new \mini\UUID\UUID4Factory();  // Use v4 instead of v7
 ```
 
 See `PATTERNS.md` for detailed examples.

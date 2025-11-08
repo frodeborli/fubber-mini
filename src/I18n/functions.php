@@ -48,12 +48,6 @@ namespace mini\I18n;
 use mini\Mini;
 use mini\Lifetime;
 
-// Register I18n services when this file is loaded (after bootstrap.php)
-// Only register if not already registered (allows app to override)
-if (!Mini::$mini->has(Translator::class)) {
-    Mini::$mini->addService(Translator::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(Translator::class));
-}
-
-if (!Mini::$mini->has(Fmt::class)) {
-    Mini::$mini->addService(Fmt::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(Fmt::class));
-}
+// Register I18n services
+Mini::$mini->addService(Translator::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(Translator::class));
+Mini::$mini->addService(Fmt::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(Fmt::class));

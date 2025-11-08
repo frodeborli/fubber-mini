@@ -11,11 +11,8 @@ use mini\Mini;
  * These functions provide the public API for the mini\CLI feature.
  */
 
-// Register ArgManager service when this file is loaded (after bootstrap.php)
-// Only register if not already registered (allows app to override)
-if (!Mini::$mini->has(ArgManager::class)) {
-    Mini::$mini->addService(ArgManager::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(ArgManager::class));
-}
+// Register ArgManager service
+Mini::$mini->addService(ArgManager::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(ArgManager::class));
 
 /**
  * Returns the root ArgManager instance for parsing CLI arguments

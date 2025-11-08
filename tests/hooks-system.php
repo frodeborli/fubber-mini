@@ -86,32 +86,25 @@ $result = $handler->trigger(3);
 assert($result === 300, "Handler should return first non-null");
 echo "  Handler returned: {$result}\n";
 
-// Test 6: Mini lifecycle hooks
-echo "✓ Test 6: Mini lifecycle hooks exist\n";
-assert(isset(Mini::$mini->onRequestReceived), "onRequestReceived hook should exist");
-assert(isset(Mini::$mini->onAfterBootstrap), "onAfterBootstrap hook should exist");
-echo "  All lifecycle hooks available\n";
+// Test 6: Phase state machine exists
+echo "✓ Test 6: Phase state machine exists\n";
+assert(isset(Mini::$mini->phase), "Phase state machine should exist");
+assert(Mini::$mini->phase instanceof \mini\Hooks\StateMachine, "Should be StateMachine");
+echo "  Phase state machine available\n";
 
-// Test 7: onRequestReceived can be subscribed to
-echo "✓ Test 7: onRequestReceived event\n";
-$requestCount = 0;
-Mini::$mini->onRequestReceived->listen(function() use (&$requestCount) {
-    $requestCount++;
+// Test 7: Phase hooks can be subscribed to
+echo "✓ Test 7: Phase transition hooks\n";
+$phaseCount = 0;
+Mini::$mini->phase->onEnteringState(\mini\Phase::Shutdown, function() use (&$phaseCount) {
+    $phaseCount++;
 });
+echo "  Phase hook listener registered successfully\n";
 
-// Simulate a request by calling bootstrap again
-// (In real usage, this would be called by router())
-// Since bootstrap is idempotent, we can't easily test triggering
-// But we can verify the hook exists and accepts listeners
-echo "  onRequestReceived listener registered successfully\n";
-
-// Test 8: onAfterBootstrap can be subscribed to
-echo "✓ Test 8: onAfterBootstrap event\n";
-$afterBootstrapCount = 0;
-Mini::$mini->onAfterBootstrap->listen(function() use (&$afterBootstrapCount) {
-    $afterBootstrapCount++;
-});
-echo "  onAfterBootstrap listener registered successfully\n";
+// Test 8: Current phase can be checked
+echo "✓ Test 8: Current phase detection\n";
+$currentPhase = Mini::$mini->phase->getCurrentState();
+assert($currentPhase === \mini\Phase::Bootstrap, "Should be in Bootstrap phase initially");
+echo "  Current phase: {$currentPhase->value}\n";
 
 // Test 9: Once listeners
 echo "✓ Test 9: Event.once() - auto-unsubscribe\n";
@@ -144,12 +137,18 @@ assert($offCount === 1, "Should not fire after off()");
 echo "  Listener unsubscribed successfully\n";
 
 echo "\n✅ All hooks system tests passed!\n";
-echo "\nLifecycle hooks available:\n";
-echo "  Mini::\$mini->onRequestReceived - Event (fires at start of bootstrap())\n";
-echo "  Mini::\$mini->onAfterBootstrap  - Event (fires at end of bootstrap())\n";
+echo "\nLifecycle management:\n";
+echo "  Mini::\$mini->phase - StateMachine tracking application lifecycle\n";
+echo "  Phases: Initializing → Bootstrap → Ready → Shutdown (+ Failed)\n";
+echo "\nPhase hooks:\n";
+echo "  phase->onEnteringState() - Before phase transition\n";
+echo "  phase->onEnteredState()  - After phase transition\n";
+echo "  phase->onExitingState()  - Before leaving phase\n";
+echo "  phase->onExitedState()   - After leaving phase\n";
 echo "\nHook types available:\n";
 echo "  Event            - Can trigger multiple times\n";
 echo "  Trigger          - Fires once, late subscribers called immediately\n";
 echo "  Filter           - Chain of transformations\n";
 echo "  Handler          - First non-null response wins\n";
+echo "  StateMachine     - Validated state transitions with hooks\n";
 echo "  PerItemTriggers  - Trigger once per source (object or string)\n";
