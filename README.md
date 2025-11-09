@@ -119,9 +119,11 @@ $pdo = db();  // Returns PDO instance
 $stmt = $pdo->prepare("SELECT * FROM users");
 ```
 
-## Active Record (Optional)
+## Tables - ORM with Repository Pattern (Optional)
 
-Use PHP attributes for ORM-like patterns:
+Define POPOs (Plain Old PHP Objects) with attributes, managed by repositories.
+
+Like Entity Framework's POCO (Plain Old CLR Object) approach, entities are plain classes without database logic:
 
 ```php
 use mini\Tables\Attributes\{Entity, Key, Generated, VarcharColumn};
