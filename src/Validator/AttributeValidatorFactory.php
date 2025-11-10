@@ -28,6 +28,21 @@ class AttributeValidatorFactory
         $properties = [];
         $required = [];
 
+        // First, process Field attributes on the class itself
+        foreach ($reflection->getAttributes(Attributes\Field::class) as $attribute) {
+            $field = $attribute->newInstance();
+            $fieldValidator = $this->buildFieldValidator($field);
+
+            if ($fieldValidator !== null) {
+                $properties[$field->name] = $fieldValidator;
+
+                if ($field->required) {
+                    $required[] = $field->name;
+                }
+            }
+        }
+
+        // Then, process actual properties
         foreach ($reflection->getProperties(ReflectionProperty::IS_PUBLIC) as $property) {
             $propertyValidator = $this->buildPropertyValidator($property);
 
@@ -47,8 +62,94 @@ class AttributeValidatorFactory
         }
 
         // Mark required properties
-        foreach ($required as $propName) {
-            // Required is handled by the property validator itself via the Required attribute
+        if (!empty($required)) {
+            $validator = $validator->required(...$required);
+        }
+
+        return $validator;
+    }
+
+    /**
+     * Build a validator from a Field attribute
+     *
+     * @param Attributes\Field $field Field attribute instance
+     * @return Validator|null Field validator
+     */
+    private function buildFieldValidator(Attributes\Field $field): ?Validator
+    {
+        $validator = new Validator();
+
+        // Apply all validation rules from the Field attribute
+        if ($field->type !== null) {
+            $validator = $validator->type($field->type, $field->message);
+        }
+
+        if ($field->minLength !== null) {
+            $validator = $validator->minLength($field->minLength, $field->message);
+        }
+
+        if ($field->maxLength !== null) {
+            $validator = $validator->maxLength($field->maxLength, $field->message);
+        }
+
+        if ($field->minimum !== null) {
+            $validator = $validator->minimum($field->minimum, $field->message);
+        }
+
+        if ($field->maximum !== null) {
+            $validator = $validator->maximum($field->maximum, $field->message);
+        }
+
+        if ($field->exclusiveMinimum !== null) {
+            $validator = $validator->exclusiveMinimum($field->exclusiveMinimum, $field->message);
+        }
+
+        if ($field->exclusiveMaximum !== null) {
+            $validator = $validator->exclusiveMaximum($field->exclusiveMaximum, $field->message);
+        }
+
+        if ($field->multipleOf !== null) {
+            $validator = $validator->multipleOf($field->multipleOf, $field->message);
+        }
+
+        if ($field->pattern !== null) {
+            $validator = $validator->pattern($field->pattern, $field->message);
+        }
+
+        if ($field->format !== null) {
+            $validator = $validator->format($field->format, $field->message);
+        }
+
+        if ($field->minItems !== null) {
+            $validator = $validator->minItems($field->minItems, $field->message);
+        }
+
+        if ($field->maxItems !== null) {
+            $validator = $validator->maxItems($field->maxItems, $field->message);
+        }
+
+        if ($field->uniqueItems === true) {
+            $validator = $validator->uniqueItems();
+        }
+
+        if ($field->minProperties !== null) {
+            $validator = $validator->minProperties($field->minProperties, $field->message);
+        }
+
+        if ($field->maxProperties !== null) {
+            $validator = $validator->maxProperties($field->maxProperties, $field->message);
+        }
+
+        if ($field->required === true) {
+            $validator = $validator->required($field->message);
+        }
+
+        if ($field->const !== null) {
+            $validator = $validator->const($field->const, $field->message);
+        }
+
+        if ($field->enum !== null) {
+            $validator = $validator->enum($field->enum, $field->message);
         }
 
         return $validator;
