@@ -127,26 +127,107 @@ function current_url() {
 }
 
 /**
- * Generate URL relative to base_url with optional query parameters
+ * Generate URL with proper relative path resolution and optional CDN support
  *
+ * Resolves paths against baseUrl (or cdnUrl if $cdn = true), handling relative paths like
+ * '..', '.', and absolute paths. Strips scheme/host from input URLs to ensure all URLs
+ * resolve against the configured base.
+ *
+ * Examples:
+ *   url('/api/users')                    → https://example.com/api/users
+ *   url('css/style.css', cdn: true)      → https://cdn.example.com/app/css/style.css
+ *   url('../images/logo.png')            → https://example.com/images/logo.png
+ *   url('/assets/app.js', ['v' => '2'])  → https://example.com/assets/app.js?v=2
+ *
+ * Returns UriInterface which is stringable, so works in templates:
+ *   <a href="<?= url('/users') ?>">Users</a>
+ *
+ * Can chain PSR-7 methods for further manipulation:
+ *   url('/posts')->withFragment('comments')->withQuery('page=2')
+ *
+ * @param string|\Psr\Http\Message\UriInterface $path Path to resolve (relative or absolute)
+ * @param array $query Query parameters to merge
+ * @param bool $cdn Use CDN base URL instead of regular base URL
+ * @return \Psr\Http\Message\UriInterface Resolved URL
  * @throws Exception If base URL cannot be determined
  */
-function url($path = '', array $query = []) {
-    $base_url = Mini::$mini->baseUrl;
+function url(string|\Psr\Http\Message\UriInterface $path = '', array $query = [], bool $cdn = false): \Psr\Http\Message\UriInterface {
+    $baseUrl = $cdn ? Mini::$mini->cdnUrl : Mini::$mini->baseUrl;
 
-    if ($base_url === null) {
+    if ($baseUrl === null) {
         throw new Exception('Base URL not configured. Set MINI_BASE_URL environment variable');
     }
 
-    $path = ltrim($path, '/');
-    $url = rtrim($base_url, '/') . '/' . $path;
+    // Parse base URL
+    $base = new \Nyholm\Psr7\Uri($baseUrl);
 
-    if (!empty($query)) {
-        $separator = strpos($url, '?') !== false ? '&' : '?';
-        $url .= $separator . http_build_query($query);
+    // Extract path from input (strip scheme/host if present)
+    if ($path instanceof \Psr\Http\Message\UriInterface) {
+        $inputPath = $path->getPath();
+        $inputQuery = $path->getQuery();
+        $inputFragment = $path->getFragment();
+    } else {
+        // Parse string to extract path, query, fragment
+        $parsed = new \Nyholm\Psr7\Uri($path);
+        $inputPath = $parsed->getPath();
+        $inputQuery = $parsed->getQuery();
+        $inputFragment = $parsed->getFragment();
     }
 
-    return $url;
+    // Resolve path relative to base path
+    $basePath = $base->getPath();
+
+    if ($inputPath === '') {
+        // Empty path - use base path
+        $resolvedPath = $basePath;
+    } elseif ($inputPath[0] === '/') {
+        // Absolute path - use as-is
+        $resolvedPath = $inputPath;
+    } else {
+        // Relative path - resolve against base path
+        // Append to base path directory
+        $baseDir = rtrim(dirname($basePath . '/dummy'), '/');
+        $resolvedPath = $baseDir . '/' . $inputPath;
+    }
+
+    // Normalize path (handle .. and .)
+    $resolvedPath = normalizePath($resolvedPath);
+
+    // Merge query parameters: input query + $query array
+    parse_str($inputQuery, $inputQueryParams);
+    $mergedQuery = http_build_query($inputQueryParams + $query);
+
+    // Build final URI
+    return $base
+        ->withPath($resolvedPath)
+        ->withQuery($mergedQuery)
+        ->withFragment($inputFragment);
+}
+
+/**
+ * Normalize path by resolving '.' and '..' segments
+ *
+ * @param string $path Path to normalize
+ * @return string Normalized path
+ */
+function normalizePath(string $path): string {
+    $parts = explode('/', $path);
+    $resolved = [];
+
+    foreach ($parts as $part) {
+        if ($part === '' || $part === '.') {
+            continue;
+        }
+        if ($part === '..') {
+            if (count($resolved) > 0 && end($resolved) !== '..') {
+                array_pop($resolved);
+            }
+        } else {
+            $resolved[] = $part;
+        }
+    }
+
+    return '/' . implode('/', $resolved);
 }
 
 /**

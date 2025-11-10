@@ -77,6 +77,14 @@ final class Mini implements ContainerInterface {
     public readonly ?string $baseUrl;
 
     /**
+     * CDN base URL for static assets.
+     *
+     * Configured via MINI_CDN_URL environment variable. Falls back to baseUrl if not set.
+     * Used by url() function when $cdn parameter is true for serving static assets from CDN.
+     */
+    public readonly ?string $cdnUrl;
+
+    /**
      * Default locale for internationalization.
      *
      * Configured via MINI_LOCALE environment variable, falls back to php.ini intl.default_locale,
@@ -413,6 +421,9 @@ final class Mini implements ContainerInterface {
             $baseUrl = $scheme . '://' . $host . $basePath;
         }
         $this->baseUrl = $baseUrl;
+
+        // CDN base URL for static assets (falls back to baseUrl if not configured)
+        $this->cdnUrl = $_ENV['MINI_CDN_URL'] ?? $baseUrl;
 
         // Application default locale (respects php.ini, can override with MINI_LOCALE)
         $locale = $_ENV['MINI_LOCALE'] ?? \ini_get('intl.default_locale') ?: 'en_GB.UTF-8';

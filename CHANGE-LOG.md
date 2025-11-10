@@ -4,6 +4,52 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## PSR-7 url() Function with CDN Support
+
+The `url()` function now returns `UriInterface` instead of string and includes proper relative path resolution and CDN support.
+
+### Changed Signature
+```php
+// Before
+function url($path = '', array $query = []): string
+
+// After
+function url(string|UriInterface $path = '', array $query = [], bool $cdn = false): UriInterface
+```
+
+### New Behavior
+- Returns `UriInterface` (PSR-7) instead of string
+- Properly resolves relative paths (`.`, `..`)
+- Strips scheme/host from input URLs - always resolves against base URL
+- Supports CDN via `$cdn` parameter
+- UriInterface is stringable - templates still work: `<?= url('/path') ?>`
+
+### New Environment Variable
+- `MINI_CDN_URL` - CDN base URL for static assets (optional, defaults to `baseUrl`)
+
+### Migration
+
+**Templates** - No changes needed (UriInterface is stringable):
+```php
+<a href="<?= url('/users') ?>">Users</a>
+```
+
+**Type hints** - Update if you type-hinted the return value:
+```php
+// Before
+$url = url('/path');  // string
+
+// After
+$url = url('/path');  // UriInterface (but still works as string)
+```
+
+**CDN usage**:
+```php
+// Static assets via CDN
+<link href="<?= url('/css/app.css', cdn: true) ?>" rel="stylesheet">
+<img src="<?= url('/images/logo.png', cdn: true) ?>" alt="Logo">
+```
+
 ## Phase System Introduction
 
 The phase system replaces individual lifecycle hooks with a comprehensive state machine.
