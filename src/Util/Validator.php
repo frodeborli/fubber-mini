@@ -218,48 +218,48 @@ class Validator implements \JsonSerializable
             // Type validation
             'type' => $this->validateType($ruleValue, $value),
 
-            // String constraints
-            'minLength' => strlen($value) < $ruleValue ? \mini\t("Must be at least {min} characters long.", ['min' => $ruleValue]) : null,
-            'maxLength' => strlen($value) > $ruleValue ? \mini\t("Must be {max} characters or less.", ['max' => $ruleValue]) : null,
-            'pattern' => !preg_match($ruleValue, $value) ? \mini\t("Invalid format.") : null,
+            // String constraints (only apply to strings)
+            'minLength' => !is_string($value) ? null : (strlen($value) < $ruleValue ? \mini\t("Must be at least {min} characters long.", ['min' => $ruleValue]) : null),
+            'maxLength' => !is_string($value) ? null : (strlen($value) > $ruleValue ? \mini\t("Must be {max} characters or less.", ['max' => $ruleValue]) : null),
+            'pattern' => !is_string($value) ? null : (!preg_match($ruleValue, $value) ? \mini\t("Invalid format.") : null),
 
-            // Numeric constraints
-            'minimum' => $value < $ruleValue ? \mini\t("Must be at least {min}.", ['min' => $ruleValue]) : null,
-            'maximum' => $value > $ruleValue ? \mini\t("Must be {max} or less.", ['max' => $ruleValue]) : null,
-            'exclusiveMinimum' => $value <= $ruleValue ? \mini\t("Must be greater than {min}.", ['min' => $ruleValue]) : null,
-            'exclusiveMaximum' => $value >= $ruleValue ? \mini\t("Must be less than {max}.", ['max' => $ruleValue]) : null,
-            'multipleOf' => fmod($value, $ruleValue) != 0 ? \mini\t("Must be a multiple of {divisor}.", ['divisor' => $ruleValue]) : null,
+            // Numeric constraints (only apply to numbers)
+            'minimum' => !is_numeric($value) ? null : ($value < $ruleValue ? \mini\t("Must be at least {min}.", ['min' => $ruleValue]) : null),
+            'maximum' => !is_numeric($value) ? null : ($value > $ruleValue ? \mini\t("Must be {max} or less.", ['max' => $ruleValue]) : null),
+            'exclusiveMinimum' => !is_numeric($value) ? null : ($value <= $ruleValue ? \mini\t("Must be greater than {min}.", ['min' => $ruleValue]) : null),
+            'exclusiveMaximum' => !is_numeric($value) ? null : ($value >= $ruleValue ? \mini\t("Must be less than {max}.", ['max' => $ruleValue]) : null),
+            'multipleOf' => !is_numeric($value) ? null : (fmod($value, $ruleValue) != 0 ? \mini\t("Must be a multiple of {divisor}.", ['divisor' => $ruleValue]) : null),
 
-            // Array constraints
-            'minItems' => count($value) < $ruleValue ? \mini\t("Must have at least {min} items.", ['min' => $ruleValue]) : null,
-            'maxItems' => count($value) > $ruleValue ? \mini\t("Must have at most {max} items.", ['max' => $ruleValue]) : null,
-            'uniqueItems' => count($value) !== count(array_unique($value, SORT_REGULAR)) ? \mini\t("Items must be unique.") : null,
-            'items' => $this->validateItems($ruleValue, $value),
+            // Array constraints (only apply to arrays)
+            'minItems' => !is_array($value) ? null : (count($value) < $ruleValue ? \mini\t("Must have at least {min} items.", ['min' => $ruleValue]) : null),
+            'maxItems' => !is_array($value) ? null : (count($value) > $ruleValue ? \mini\t("Must have at most {max} items.", ['max' => $ruleValue]) : null),
+            'uniqueItems' => !is_array($value) ? null : (count($value) !== count(array_unique($value, SORT_REGULAR)) ? \mini\t("Items must be unique.") : null),
+            'items' => !is_array($value) ? null : $this->validateItems($ruleValue, $value),
 
-            // Object constraints
-            'minProperties' => count($value) < $ruleValue ? \mini\t("Must have at least {min} properties.", ['min' => $ruleValue]) : null,
-            'maxProperties' => count($value) > $ruleValue ? \mini\t("Must have at most {max} properties.", ['max' => $ruleValue]) : null,
+            // Object constraints (only apply to objects/associative arrays)
+            'minProperties' => (!is_array($value) || array_is_list($value)) ? null : (count($value) < $ruleValue ? \mini\t("Must have at least {min} properties.", ['min' => $ruleValue]) : null),
+            'maxProperties' => (!is_array($value) || array_is_list($value)) ? null : (count($value) > $ruleValue ? \mini\t("Must have at most {max} properties.", ['max' => $ruleValue]) : null),
 
-            // Enum/const
+            // Enum/const (apply to any type)
             'const' => $value !== $ruleValue ? \mini\t("Must be exactly {value}.", ['value' => $ruleValue]) : null,
             'enum' => !in_array($value, $ruleValue, true) ? \mini\t("Please select a valid option.") : null,
 
-            // Format validators
-            'format' => $this->validateFormat($ruleValue, $value),
+            // Format validators (only apply to strings)
+            'format' => !is_string($value) ? null : $this->validateFormat($ruleValue, $value),
 
-            // Combinators
+            // Combinators (apply to any type)
             'anyOf' => $this->validateAnyOf($ruleValue, $value),
             'allOf' => $this->validateAllOf($ruleValue, $value),
             'oneOf' => $this->validateOneOf($ruleValue, $value),
             'not' => $this->validateNot($ruleValue, $value),
 
             // Complex validators
-            'additionalItems' => $this->validateAdditionalItems($ruleValue, $value),
-            'minContains' => $this->validateMinContains($ruleValue, $value),
-            'maxContains' => $this->validateMaxContains($ruleValue, $value),
-            'dependentRequired' => $this->validateDependentRequired($ruleValue, $value),
+            'additionalItems' => !is_array($value) ? null : $this->validateAdditionalItems($ruleValue, $value),
+            'minContains' => !is_array($value) ? null : $this->validateMinContains($ruleValue, $value),
+            'maxContains' => !is_array($value) ? null : $this->validateMaxContains($ruleValue, $value),
+            'dependentRequired' => !is_array($value) ? null : $this->validateDependentRequired($ruleValue, $value),
 
-            // Custom validators (closures)
+            // Custom validators (closures - apply to any type)
             default => str_starts_with($keyword, 'custom:') ? ($ruleValue($value) ? null : \mini\t("Validation failed.")) : null
         };
     }
