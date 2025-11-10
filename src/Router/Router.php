@@ -112,11 +112,10 @@ class Router
 
             // Allow registered handlers to process the result
             // This enables mounting PSR-15 apps, custom handlers, etc.
-            if ($this->defaultHandlers->hasListeners()) {
-                $response = $this->defaultHandlers->trigger($result, $routeInfo);
-                if ($response !== null) {
-                    return;
-                }
+            $response = $this->defaultHandlers->trigger($result, $routeInfo);
+
+            if ($response !== null) {
+                return;
             }
 
             // Handle routes array (default behavior)

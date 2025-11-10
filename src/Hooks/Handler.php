@@ -39,7 +39,7 @@ class Handler extends Dispatcher {
      *
      * @param mixed $data
      * @param mixed ...$args
-     * @return mixed
+     * @return mixed Returns null if no handler handled the data
      * @throws \Throwable
      */
     public function trigger(mixed $data, mixed ...$args): mixed {
@@ -49,6 +49,6 @@ class Handler extends Dispatcher {
                 return $result;
             }
         }
-        return $data;
+        return null;
     }
 }
