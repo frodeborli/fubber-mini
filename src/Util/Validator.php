@@ -1650,21 +1650,8 @@ class Validator implements \JsonSerializable
                 continue; // Skip rules without exportable values
             } elseif ($keyword === 'uniqueItems') {
                 $schema[$keyword] = true;
-            } elseif ($value instanceof Validator) {
-                // Single child validator - recursively serialize
-                $schema[$keyword] = $value->jsonSerialize();
-            } elseif (is_array($value)) {
-                // Could be array of validators or other data
-                $isValidatorArray = !empty($value) && array_filter($value, fn($v) => $v instanceof Validator) === $value;
-                if ($isValidatorArray) {
-                    // Array of validators - recursively serialize each
-                    $schema[$keyword] = array_map(fn($v) => $v->jsonSerialize(), $value);
-                } else {
-                    // Regular array value
-                    $schema[$keyword] = $value;
-                }
             } else {
-                // Scalar value
+                // json_encode() handles recursive serialization automatically
                 $schema[$keyword] = $value;
             }
         }
@@ -1674,7 +1661,7 @@ class Validator implements \JsonSerializable
             $schema['properties'] = [];
             $required = [];
             foreach ($this->propertyValidators as $prop => $validator) {
-                $schema['properties'][$prop] = $validator->jsonSerialize();
+                $schema['properties'][$prop] = $validator; // Recursive serialization automatic
                 if ($validator->isRequired) {
                     $required[] = $prop;
                 }
@@ -1688,7 +1675,7 @@ class Validator implements \JsonSerializable
         if (!empty($this->patternPropertyValidators)) {
             $schema['patternProperties'] = [];
             foreach ($this->patternPropertyValidators as $pattern => $validator) {
-                $schema['patternProperties'][$pattern] = $validator->jsonSerialize();
+                $schema['patternProperties'][$pattern] = $validator; // Recursive serialization automatic
             }
         }
 
@@ -1696,7 +1683,7 @@ class Validator implements \JsonSerializable
         if (!$this->allowAdditionalProperties) {
             $schema['additionalProperties'] = false;
         } elseif ($this->additionalPropertiesValidator !== null) {
-            $schema['additionalProperties'] = $this->additionalPropertiesValidator->jsonSerialize();
+            $schema['additionalProperties'] = $this->additionalPropertiesValidator; // Recursive serialization automatic
         }
 
         return $schema;
