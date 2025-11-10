@@ -79,6 +79,7 @@ use Stringable;
 class Validator implements \JsonSerializable
 {
     private array $rules = []; // ['keyword' => ['closure' => fn, 'value' => ..., 'message' => ...]]
+    private string|array|null $type = null; // JSON Schema type(s)
     private array $propertyValidators = [];
     private array $patternPropertyValidators = [];
     private ?Validator $additionalPropertiesValidator = null;
@@ -233,78 +234,100 @@ class Validator implements \JsonSerializable
     // ========================================================================
 
     /**
-     * Validate string type
+     * Set JSON Schema type(s)
+     *
+     * @param string|array $types Single type or array of types: 'string', 'integer', 'number', 'boolean', 'array', 'object', 'null'
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function type(string|array $types, string|Stringable|null $message = null): static
+    {
+        // Normalize to array
+        $typeArray = is_array($types) ? $types : [$types];
+
+        // Store type(s)
+        $this->type = count($typeArray) === 1 ? $typeArray[0] : $typeArray;
+
+        // Add validation rule
+        $this->addRule(
+            'type',
+            function($v) use ($typeArray, $message) {
+                foreach ($typeArray as $type) {
+                    $valid = match($type) {
+                        'string' => is_string($v),
+                        'integer' => is_int($v),
+                        'number' => is_int($v) || is_float($v),
+                        'boolean' => is_bool($v),
+                        'array' => is_array($v),
+                        'object' => is_array($v) && array_keys($v) !== range(0, count($v) - 1), // Associative array
+                        'null' => $v === null,
+                        default => false
+                    };
+
+                    if ($valid) {
+                        return null; // Valid - matches at least one type
+                    }
+                }
+
+                // None matched
+                $typeList = count($typeArray) === 1
+                    ? "a {$typeArray[0]}"
+                    : implode(' or ', array_map(fn($t) => "a $t", $typeArray));
+                return $message ?? \mini\t("Must be {types}", ['types' => $typeList]);
+            },
+            $this->type,
+            $message
+        );
+
+        return $this;
+    }
+
+    /**
+     * Validate string type (convenience method)
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
     public function isString(string|Stringable|null $message = null): static
     {
-        $this->addRule(
-            'type:string',
-            fn($v) => is_string($v) ? null : ($message ?? \mini\t("Must be a string")),
-            null,
-            $message
-        );
-        return $this;
+        return $this->type('string', $message);
     }
 
     /**
-     * Validate integer type
+     * Validate integer type (convenience method)
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
     public function isInt(string|Stringable|null $message = null): static
     {
-        $this->addRule(
-            'type:integer',
-            fn($v) => is_int($v) || (is_string($v) && ctype_digit($v)) ? null
-                : ($message ?? \mini\t("Must be an integer")),
-            null,
-            $message
-        );
-        return $this;
+        return $this->type('integer', $message);
     }
 
     /**
-     * Validate numeric type (int or float) - JSON Schema: type "number"
+     * Validate numeric type (int or float) - JSON Schema: type "number" (convenience method)
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
     public function isNumber(string|Stringable|null $message = null): static
     {
-        $this->addRule(
-            'type:number',
-            fn($v) => is_int($v) || is_float($v) ? null
-                : ($message ?? \mini\t("Must be a number")),
-            null,
-            $message
-        );
-        return $this;
+        return $this->type('number', $message);
     }
 
     /**
-     * Validate boolean type
+     * Validate boolean type (convenience method)
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
     public function isBool(string|Stringable|null $message = null): static
     {
-        $this->addRule(
-            'type:boolean',
-            fn($v) => is_bool($v) || in_array($v, [0, 1, '0', '1', 'true', 'false'], true) ? null
-                : ($message ?? \mini\t("Must be a boolean")),
-            null,
-            $message
-        );
-        return $this;
+        return $this->type('boolean', $message);
     }
 
     /**
-     * Validate object/hash map type (JSON Schema: type "object")
+     * Validate object/hash map type (JSON Schema: type "object") (convenience method)
      *
      * Accepts both PHP objects and associative arrays (hash maps).
      * For list validation, use isArray() instead.
@@ -314,18 +337,11 @@ class Validator implements \JsonSerializable
      */
     public function isObject(string|Stringable|null $message = null): static
     {
-        $this->addRule(
-            'type:object',
-            fn($v) => is_object($v) || is_array($v) ? null
-                : ($message ?? \mini\t("Must be an object")),
-            null,
-            $message
-        );
-        return $this;
+        return $this->type('object', $message);
     }
 
     /**
-     * Validate array/list type (JSON Schema: type "array")
+     * Validate array/list type (JSON Schema: type "array") (convenience method)
      *
      * Only accepts sequential arrays (lists), not associative arrays.
      * Uses array_is_list() to match JavaScript array semantics.
@@ -335,32 +351,18 @@ class Validator implements \JsonSerializable
      */
     public function isArray(string|Stringable|null $message = null): static
     {
-        $this->addRule(
-            'type:array',
-            fn($v) => is_array($v) && array_is_list($v) ? null
-                : ($message ?? \mini\t("Must be an array")),
-            null,
-            $message
-        );
-        return $this;
+        return $this->type('array', $message);
     }
 
     /**
-     * Validate null type (JSON Schema: type "null")
+     * Validate null type (JSON Schema: type "null") (convenience method)
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
     public function isNull(string|Stringable|null $message = null): static
     {
-        $this->addRule(
-            'type:null',
-            fn($v) => $v === null ? null
-                : ($message ?? \mini\t("Must be null")),
-            null,
-            $message
-        );
-        return $this;
+        return $this->type('null', $message);
     }
 
 
@@ -1621,26 +1623,15 @@ class Validator implements \JsonSerializable
     {
         $schema = [];
 
-        // Collect types
-        $types = [];
-        if (isset($this->rules['type:string'])) $types[] = 'string';
-        if (isset($this->rules['type:integer'])) $types[] = 'integer';
-        if (isset($this->rules['type:number'])) $types[] = 'number';
-        if (isset($this->rules['type:boolean'])) $types[] = 'boolean';
-        if (isset($this->rules['type:null'])) $types[] = 'null';
-        if (isset($this->rules['type:array'])) $types[] = 'array';
-        if (isset($this->rules['type:object'])) $types[] = 'object';
-
-        if (count($types) === 1) {
-            $schema['type'] = $types[0];
-        } elseif (count($types) > 1) {
-            $schema['type'] = $types;
+        // Add type if set
+        if ($this->type !== null) {
+            $schema['type'] = $this->type;
         }
 
-        // Add constraints from rules (skip custom: and type: rules)
+        // Add constraints from rules (skip custom rules and type rule)
         foreach ($this->rules as $keyword => $rule) {
-            if (str_starts_with($keyword, 'type:') || str_starts_with($keyword, 'custom:')) {
-                continue; // Skip type rules (already handled) and custom rules (not exportable)
+            if ($keyword === 'type' || str_starts_with($keyword, 'custom:')) {
+                continue; // Skip type rule (already handled) and custom rules (not exportable)
             }
 
             $value = $rule['value'];
