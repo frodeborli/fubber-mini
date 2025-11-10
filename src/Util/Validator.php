@@ -240,7 +240,10 @@ class Validator
     }
 
     /**
-     * Validate object or array type
+     * Validate object/hash map type (JSON Schema: type "object")
+     *
+     * Accepts both PHP objects and associative arrays (hash maps).
+     * For list validation, use isArray() instead.
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
@@ -253,15 +256,31 @@ class Validator
     }
 
     /**
-     * Validate array type
+     * Validate array/list type (JSON Schema: type "array")
+     *
+     * Only accepts sequential arrays (lists), not associative arrays.
+     * Uses array_is_list() to match JavaScript array semantics.
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
     public function isArray(string|Stringable|null $message = null): static
     {
-        $this->rules[] = fn($v) => is_array($v) ? null
+        $this->rules[] = fn($v) => is_array($v) && array_is_list($v) ? null
             : ($message ?? \mini\t("Must be an array"));
+        return $this;
+    }
+
+    /**
+     * Validate null type (JSON Schema: type "null")
+     *
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function isNull(string|Stringable|null $message = null): static
+    {
+        $this->rules[] = fn($v) => $v === null ? null
+            : ($message ?? \mini\t("Must be null"));
         return $this;
     }
 
@@ -279,11 +298,11 @@ class Validator
     }
 
     // ========================================================================
-    // Format Validators
+    // Format Validators (JSON Schema: format keyword)
     // ========================================================================
 
     /**
-     * Validate email format
+     * Validate email format (JSON Schema: format "email")
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
@@ -303,7 +322,7 @@ class Validator
     }
 
     /**
-     * Validate URL format
+     * Validate URL format (JSON Schema: format "uri")
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
@@ -323,7 +342,150 @@ class Validator
     }
 
     /**
+     * Validate date-time format (JSON Schema: format "date-time")
+     *
+     * Validates ISO 8601 date-time format.
+     *
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function dateTime(string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!is_string($v)) {
+                return $message ?? \mini\t("Must be a valid date-time string.");
+            }
+            // ISO 8601 validation
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}/', $v)) {
+                return $message ?? \mini\t("Must be a valid ISO 8601 date-time.");
+            }
+            // Try to parse to ensure validity
+            try {
+                new \DateTime($v);
+            } catch (\Exception $e) {
+                return $message ?? \mini\t("Must be a valid date-time.");
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate date format (JSON Schema: format "date")
+     *
+     * Validates ISO 8601 date format (YYYY-MM-DD).
+     *
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function date(string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $v)) {
+                return $message ?? \mini\t("Must be a valid date (YYYY-MM-DD).");
+            }
+            // Validate it's a real date
+            $parts = explode('-', $v);
+            if (!checkdate((int)$parts[1], (int)$parts[2], (int)$parts[0])) {
+                return $message ?? \mini\t("Must be a valid date.");
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate time format (JSON Schema: format "time")
+     *
+     * Validates ISO 8601 time format (HH:MM:SS or HH:MM:SS.sss).
+     *
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function time(string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!preg_match('/^([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(\.\d+)?$/', $v)) {
+                return $message ?? \mini\t("Must be a valid time (HH:MM:SS).");
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate IPv4 address (JSON Schema: format "ipv4")
+     *
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function ipv4(string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!filter_var($v, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                return $message ?? \mini\t("Must be a valid IPv4 address.");
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate IPv6 address (JSON Schema: format "ipv6")
+     *
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function ipv6(string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!filter_var($v, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+                return $message ?? \mini\t("Must be a valid IPv6 address.");
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate UUID format (JSON Schema: format "uuid")
+     *
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function uuid(string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $v)) {
+                return $message ?? \mini\t("Must be a valid UUID.");
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
      * Validate slug format (URL-safe string)
+     *
+     * Not a JSON Schema standard, but commonly used.
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
@@ -389,13 +551,55 @@ class Validator
     }
 
     /**
-     * Validate minimum value (inclusive)
+     * Validate exact value match (JSON Schema: const)
      *
-     * @param mixed $min Minimum value
+     * @param mixed $value Exact value required
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function minVal(mixed $min, string|Stringable|null $message = null): static
+    public function const(mixed $value, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($value, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if ($v !== $value) {
+                return $message ?? \mini\t("Must be exactly {value}.", ['value' => $value]);
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate value is in allowed list (JSON Schema: enum)
+     *
+     * @param array $allowed Allowed values
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function enum(array $allowed, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($allowed, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!in_array($v, $allowed, true)) {
+                return $message ?? \mini\t("Please select a valid option.");
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate minimum value (inclusive) - JSON Schema: minimum
+     *
+     * @param int|float $min Minimum value
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function minimum(int|float $min, string|Stringable|null $message = null): static
     {
         $this->rules[] = function($v) use ($min, $message) {
             if ($v === null) {
@@ -410,34 +614,13 @@ class Validator
     }
 
     /**
-     * Validate minimum value (exclusive)
+     * Validate maximum value (inclusive) - JSON Schema: maximum
      *
-     * @param mixed $min Minimum value (exclusive)
+     * @param int|float $max Maximum value
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function minValEx(mixed $min, string|Stringable|null $message = null): static
-    {
-        $this->rules[] = function($v) use ($min, $message) {
-            if ($v === null) {
-                return null;
-            }
-            if ($v <= $min) {
-                return $message ?? \mini\t("Must be greater than {min}.", ['min' => $min]);
-            }
-            return null;
-        };
-        return $this;
-    }
-
-    /**
-     * Validate maximum value (inclusive)
-     *
-     * @param mixed $max Maximum value
-     * @param string|Stringable|null $message Custom error message
-     * @return static
-     */
-    public function maxVal(mixed $max, string|Stringable|null $message = null): static
+    public function maximum(int|float $max, string|Stringable|null $message = null): static
     {
         $this->rules[] = function($v) use ($max, $message) {
             if ($v === null) {
@@ -452,13 +635,34 @@ class Validator
     }
 
     /**
-     * Validate maximum value (exclusive)
+     * Validate minimum value (exclusive) - JSON Schema: exclusiveMinimum
      *
-     * @param mixed $max Maximum value (exclusive)
+     * @param int|float $min Minimum value (exclusive)
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function maxValEx(mixed $max, string|Stringable|null $message = null): static
+    public function exclusiveMinimum(int|float $min, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($min, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if ($v <= $min) {
+                return $message ?? \mini\t("Must be greater than {min}.", ['min' => $min]);
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate maximum value (exclusive) - JSON Schema: exclusiveMaximum
+     *
+     * @param int|float $max Maximum value (exclusive)
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function exclusiveMaximum(int|float $max, string|Stringable|null $message = null): static
     {
         $this->rules[] = function($v) use ($max, $message) {
             if ($v === null) {
@@ -473,20 +677,122 @@ class Validator
     }
 
     /**
-     * Validate value is in allowed list
+     * Validate number is a multiple of value (JSON Schema: multipleOf)
      *
-     * @param array $allowed Allowed values
+     * @param int|float $divisor Number must be divisible by this value
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function oneOf(array $allowed, string|Stringable|null $message = null): static
+    public function multipleOf(int|float $divisor, string|Stringable|null $message = null): static
     {
-        $this->rules[] = function($v) use ($allowed, $message) {
+        $this->rules[] = function($v) use ($divisor, $message) {
             if ($v === null) {
                 return null;
             }
-            if (!in_array($v, $allowed, true)) {
-                return $message ?? \mini\t("Please select a valid option.");
+            if (!is_numeric($v)) {
+                return $message ?? \mini\t("Must be a number.");
+            }
+            $remainder = fmod((float)$v, (float)$divisor);
+            if (abs($remainder) > PHP_FLOAT_EPSILON) {
+                return $message ?? \mini\t("Must be a multiple of {divisor}.", ['divisor' => $divisor]);
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate minimum array length (JSON Schema: minItems)
+     *
+     * @param int $min Minimum number of items
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function minItems(int $min, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($min, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!is_array($v)) {
+                return $message ?? \mini\t("Must be an array.");
+            }
+            if (count($v) < $min) {
+                return $message ?? \mini\t("Must have at least {min} items.", ['min' => $min]);
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate maximum array length (JSON Schema: maxItems)
+     *
+     * @param int $max Maximum number of items
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function maxItems(int $max, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($max, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!is_array($v)) {
+                return $message ?? \mini\t("Must be an array.");
+            }
+            if (count($v) > $max) {
+                return $message ?? \mini\t("Must have at most {max} items.", ['max' => $max]);
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate minimum number of object properties (JSON Schema: minProperties)
+     *
+     * @param int $min Minimum number of properties
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function minProperties(int $min, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($min, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!is_array($v) && !is_object($v)) {
+                return $message ?? \mini\t("Must be an object or array.");
+            }
+            $count = is_array($v) ? count($v) : count(get_object_vars($v));
+            if ($count < $min) {
+                return $message ?? \mini\t("Must have at least {min} properties.", ['min' => $min]);
+            }
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate maximum number of object properties (JSON Schema: maxProperties)
+     *
+     * @param int $max Maximum number of properties
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function maxProperties(int $max, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($max, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!is_array($v) && !is_object($v)) {
+                return $message ?? \mini\t("Must be an object or array.");
+            }
+            $count = is_array($v) ? count($v) : count(get_object_vars($v));
+            if ($count > $max) {
+                return $message ?? \mini\t("Must have at most {max} properties.", ['max' => $max]);
             }
             return null;
         };
