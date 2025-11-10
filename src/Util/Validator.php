@@ -295,6 +295,24 @@ class Validator implements \JsonSerializable
     }
 
     // ========================================================================
+    // Immutability Helper
+    // ========================================================================
+
+    /**
+     * Set a rule immutably (clones before mutation)
+     *
+     * @param string $key Rule keyword
+     * @param mixed $value Rule value
+     * @return static New instance with rule set
+     */
+    private function setRule(string $key, mixed $value): static
+    {
+        $clone = clone $this;
+        $clone->rules[$key] = $value;
+        return $clone;
+    }
+
+    // ========================================================================
     // Type Validators
     // ========================================================================
 
@@ -306,10 +324,10 @@ class Validator implements \JsonSerializable
      */
     public function type(string|array $types): static
     {
-        // Normalize and store
+        // Normalize to single string or array
         $typeArray = is_array($types) ? $types : [$types];
-        $this->rules['type'] = count($typeArray) === 1 ? $typeArray[0] : $typeArray;
-        return $this;
+        $normalized = count($typeArray) === 1 ? $typeArray[0] : $typeArray;
+        return $this->setRule('type', $normalized);
     }
 
 
@@ -445,8 +463,7 @@ class Validator implements \JsonSerializable
      */
     public function minLength(int $min): static
     {
-        $this->rules['minLength'] = $min;
-        return $this;
+        return $this->setRule('minLength', $min);
     }
 
     /**
@@ -458,8 +475,7 @@ class Validator implements \JsonSerializable
      */
     public function maxLength(int $max): static
     {
-        $this->rules['maxLength'] = $max;
-        return $this;
+        return $this->setRule('maxLength', $max);
     }
 
     /**
@@ -471,8 +487,7 @@ class Validator implements \JsonSerializable
      */
     public function const(mixed $value): static
     {
-        $this->rules['const'] = $value;
-        return $this;
+        return $this->setRule('const', $value);
     }
 
     /**
@@ -484,8 +499,7 @@ class Validator implements \JsonSerializable
      */
     public function enum(array $allowed): static
     {
-        $this->rules['enum'] = $allowed;
-        return $this;
+        return $this->setRule('enum', $allowed);
     }
 
     /**
@@ -497,8 +511,7 @@ class Validator implements \JsonSerializable
      */
     public function minimum(int|float $min): static
     {
-        $this->rules['minimum'] = $min;
-        return $this;
+        return $this->setRule('minimum', $min);
     }
 
     /**
@@ -510,8 +523,7 @@ class Validator implements \JsonSerializable
      */
     public function maximum(int|float $max): static
     {
-        $this->rules['maximum'] = $max;
-        return $this;
+        return $this->setRule('maximum', $max);
     }
 
     /**
@@ -523,8 +535,7 @@ class Validator implements \JsonSerializable
      */
     public function exclusiveMinimum(int|float $min): static
     {
-        $this->rules['exclusiveMinimum'] = $min;
-        return $this;
+        return $this->setRule('exclusiveMinimum', $min);
     }
 
     /**
@@ -536,8 +547,7 @@ class Validator implements \JsonSerializable
      */
     public function exclusiveMaximum(int|float $max): static
     {
-        $this->rules['exclusiveMaximum'] = $max;
-        return $this;
+        return $this->setRule('exclusiveMaximum', $max);
     }
 
     /**
@@ -549,8 +559,7 @@ class Validator implements \JsonSerializable
      */
     public function multipleOf(int|float $divisor): static
     {
-        $this->rules['multipleOf'] = $divisor;
-        return $this;
+        return $this->setRule('multipleOf', $divisor);
     }
 
     /**
@@ -562,8 +571,7 @@ class Validator implements \JsonSerializable
      */
     public function minItems(int $min): static
     {
-        $this->rules['minItems'] = $min;
-        return $this;
+        return $this->setRule('minItems', $min);
     }
 
     /**
@@ -575,8 +583,7 @@ class Validator implements \JsonSerializable
      */
     public function maxItems(int $max): static
     {
-        $this->rules['maxItems'] = $max;
-        return $this;
+        return $this->setRule('maxItems', $max);
     }
 
     /**
@@ -588,8 +595,7 @@ class Validator implements \JsonSerializable
      */
     public function minProperties(int $min): static
     {
-        $this->rules['minProperties'] = $min;
-        return $this;
+        return $this->setRule('minProperties', $min);
     }
 
     /**
@@ -601,8 +607,7 @@ class Validator implements \JsonSerializable
      */
     public function maxProperties(int $max): static
     {
-        $this->rules['maxProperties'] = $max;
-        return $this;
+        return $this->setRule('maxProperties', $max);
     }
 
     /**
@@ -643,8 +648,7 @@ class Validator implements \JsonSerializable
      */
     public function items(Validator|array $validator): static
     {
-        $this->rules['items'] = $validator;
-        return $this;
+        return $this->setRule('items', $validator);
     }
 
     /**
@@ -659,8 +663,7 @@ class Validator implements \JsonSerializable
      */
     public function additionalItems(Validator|bool $validator): static
     {
-        $this->rules['additionalItems'] = $validator;
-        return $this;
+        return $this->setRule('additionalItems', $validator);
     }
 
     /**
@@ -704,8 +707,7 @@ class Validator implements \JsonSerializable
      */
     public function pattern(string $pattern): static
     {
-        $this->rules['pattern'] = $pattern;
-        return $this;
+        return $this->setRule('pattern', $pattern);
     }
 
     // ========================================================================
@@ -723,8 +725,7 @@ class Validator implements \JsonSerializable
      */
     public function anyOf(array $validators): static
     {
-        $this->rules['anyOf'] = $validators;
-        return $this;
+        return $this->setRule('anyOf', $validators);
     }
 
     /**
@@ -738,8 +739,7 @@ class Validator implements \JsonSerializable
      */
     public function allOf(array $validators): static
     {
-        $this->rules['allOf'] = $validators;
-        return $this;
+        return $this->setRule('allOf', $validators);
     }
 
     /**
@@ -753,8 +753,7 @@ class Validator implements \JsonSerializable
      */
     public function oneOf(array $validators): static
     {
-        $this->rules['oneOf'] = $validators;
-        return $this;
+        return $this->setRule('oneOf', $validators);
     }
 
     /**
@@ -768,8 +767,7 @@ class Validator implements \JsonSerializable
      */
     public function not(Validator $validator): static
     {
-        $this->rules['not'] = $validator;
-        return $this;
+        return $this->setRule('not', $validator);
     }
 
     // ========================================================================
@@ -798,8 +796,7 @@ class Validator implements \JsonSerializable
      */
     public function custom(Closure $callback): static
     {
-        $this->rules['custom:' . spl_object_id($callback)] = $callback;
-        return $this;
+        return $this->setRule('custom:' . spl_object_id($callback), $callback);
     }
 
     // ========================================================================
