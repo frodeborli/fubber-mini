@@ -259,14 +259,14 @@ class Validator
     }
 
     /**
-     * Validate numeric type (int or float)
+     * Validate numeric type (int or float) - JSON Schema: type "number"
      *
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
     public function isNumber(string|Stringable|null $message = null): static
     {
-        $this->rules[] = fn($v) => is_numeric($v) ? null
+        $this->rules[] = fn($v) => is_int($v) || is_float($v) ? null
             : ($message ?? \mini\t("Must be a number"));
         return $this;
     }
