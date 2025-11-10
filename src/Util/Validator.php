@@ -79,6 +79,7 @@ use Stringable;
 class Validator
 {
     private array $rules = [];
+    private array $ruleMetadata = [];
     private array $propertyValidators = [];
     private array $patternPropertyValidators = [];
     private ?Validator $additionalPropertiesValidator = null;
@@ -240,8 +241,10 @@ class Validator
      */
     public function isString(string|Stringable|null $message = null): static
     {
-        $this->rules[] = fn($v) => is_string($v) ? null
-            : ($message ?? \mini\t("Must be a string"));
+        $this->addRule(
+            fn($v) => is_string($v) ? null : ($message ?? \mini\t("Must be a string")),
+            ['type' => 'string']
+        );
         return $this;
     }
 
@@ -253,8 +256,11 @@ class Validator
      */
     public function isInt(string|Stringable|null $message = null): static
     {
-        $this->rules[] = fn($v) => is_int($v) || (is_string($v) && ctype_digit($v)) ? null
-            : ($message ?? \mini\t("Must be an integer"));
+        $this->addRule(
+            fn($v) => is_int($v) || (is_string($v) && ctype_digit($v)) ? null
+                : ($message ?? \mini\t("Must be an integer")),
+            ['type' => 'integer']
+        );
         return $this;
     }
 
@@ -646,15 +652,18 @@ class Validator
      */
     public function minimum(int|float $min, string|Stringable|null $message = null): static
     {
-        $this->rules[] = function($v) use ($min, $message) {
-            if ($v === null) {
+        $this->addRule(
+            function($v) use ($min, $message) {
+                if ($v === null) {
+                    return null;
+                }
+                if ($v < $min) {
+                    return $message ?? \mini\t("Must be at least {min}.", ['min' => $min]);
+                }
                 return null;
-            }
-            if ($v < $min) {
-                return $message ?? \mini\t("Must be at least {min}.", ['min' => $min]);
-            }
-            return null;
-        };
+            },
+            ['keyword' => 'minimum', 'value' => $min]
+        );
         return $this;
     }
 
@@ -1408,5 +1417,127 @@ class Validator
         if ($this->additionalPropertiesValidator !== null) {
             $this->additionalPropertiesValidator = clone $this->additionalPropertiesValidator;
         }
+    }
+
+    /**
+     * Helper to add both a rule closure and its metadata
+     *
+     * @param \Closure $closure Validation closure
+     * @param array $metadata Semantic description for export
+     * @return void
+     */
+    private function addRule(\Closure $closure, array $metadata): void
+    {
+        $this->rules[] = $closure;
+        $this->ruleMetadata[] = $metadata;
+    }
+
+    /**
+     * Export validator as JSON Schema
+     *
+     * @return array JSON Schema representation
+     */
+    public function toJsonSchema(): array
+    {
+        $schema = [];
+
+        // Collect type constraints
+        $types = [];
+        foreach ($this->ruleMetadata as $meta) {
+            if (isset($meta['type'])) {
+                $types[] = $meta['type'];
+            }
+        }
+        if (count($types) === 1) {
+            $schema['type'] = $types[0];
+        } elseif (count($types) > 1) {
+            $schema['type'] = $types;
+        }
+
+        // Apply constraints from metadata
+        foreach ($this->ruleMetadata as $meta) {
+            switch ($meta['keyword'] ?? null) {
+                case 'minimum':
+                    $schema['minimum'] = $meta['value'];
+                    break;
+                case 'maximum':
+                    $schema['maximum'] = $meta['value'];
+                    break;
+                case 'exclusiveMinimum':
+                    $schema['exclusiveMinimum'] = $meta['value'];
+                    break;
+                case 'exclusiveMaximum':
+                    $schema['exclusiveMaximum'] = $meta['value'];
+                    break;
+                case 'multipleOf':
+                    $schema['multipleOf'] = $meta['value'];
+                    break;
+                case 'minLength':
+                    $schema['minLength'] = $meta['value'];
+                    break;
+                case 'maxLength':
+                    $schema['maxLength'] = $meta['value'];
+                    break;
+                case 'pattern':
+                    $schema['pattern'] = $meta['value'];
+                    break;
+                case 'minItems':
+                    $schema['minItems'] = $meta['value'];
+                    break;
+                case 'maxItems':
+                    $schema['maxItems'] = $meta['value'];
+                    break;
+                case 'uniqueItems':
+                    $schema['uniqueItems'] = true;
+                    break;
+                case 'minProperties':
+                    $schema['minProperties'] = $meta['value'];
+                    break;
+                case 'maxProperties':
+                    $schema['maxProperties'] = $meta['value'];
+                    break;
+                case 'enum':
+                    $schema['enum'] = $meta['value'];
+                    break;
+                case 'const':
+                    $schema['const'] = $meta['value'];
+                    break;
+                case 'format':
+                    $schema['format'] = $meta['value'];
+                    break;
+            }
+        }
+
+        // Properties
+        if (!empty($this->propertyValidators)) {
+            $schema['properties'] = [];
+            $required = [];
+            foreach ($this->propertyValidators as $prop => $validator) {
+                $schema['properties'][$prop] = $validator->toJsonSchema();
+                if ($validator->isRequired) {
+                    $required[] = $prop;
+                }
+            }
+            if (!empty($required)) {
+                $schema['required'] = $required;
+            }
+        }
+
+        // Pattern properties
+        if (!empty($this->patternPropertyValidators)) {
+            $schema['patternProperties'] = [];
+            foreach ($this->patternPropertyValidators as $pattern => $validator) {
+                $schema['patternProperties'][$pattern] = $validator->toJsonSchema();
+            }
+        }
+
+        // Additional properties
+        if (!$this->allowAdditionalProperties) {
+            $schema['additionalProperties'] = false;
+        } elseif ($this->additionalPropertiesValidator !== null) {
+            $schema['additionalProperties'] = $this->additionalPropertiesValidator->toJsonSchema();
+        }
+
+        return $schema;
     }
 }
