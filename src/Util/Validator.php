@@ -800,6 +800,161 @@ class Validator
     }
 
     /**
+     * Validate dependent required properties (JSON Schema: dependentRequired)
+     *
+     * When a property exists, require other properties to also exist.
+     *
+     * @param string $property The property that triggers the requirement
+     * @param array $requiredProperties Properties required when $property exists
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function dependentRequired(string $property, array $requiredProperties, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($property, $requiredProperties, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!is_array($v) && !is_object($v)) {
+                return $message ?? \mini\t("Must be an object or array.");
+            }
+
+            // Check if the triggering property exists
+            $hasProperty = is_array($v)
+                ? array_key_exists($property, $v)
+                : property_exists($v, $property);
+
+            if (!$hasProperty) {
+                return null; // Property doesn't exist, no dependencies to check
+            }
+
+            // Property exists, check for required dependencies
+            $missing = [];
+            foreach ($requiredProperties as $required) {
+                $hasRequired = is_array($v)
+                    ? array_key_exists($required, $v)
+                    : property_exists($v, $required);
+
+                if (!$hasRequired) {
+                    $missing[] = $required;
+                }
+            }
+
+            if (!empty($missing)) {
+                return $message ?? \mini\t(
+                    "When '{property}' is present, {required} must also be present.",
+                    [
+                        'property' => $property,
+                        'required' => implode(', ', array_map(fn($p) => "'$p'", $missing))
+                    ]
+                );
+            }
+
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate array has unique items (JSON Schema: uniqueItems)
+     *
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function uniqueItems(string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!is_array($v)) {
+                return $message ?? \mini\t("Must be an array.");
+            }
+
+            // Use JSON encoding for deep comparison
+            $serialized = array_map('json_encode', $v);
+            if (count($serialized) !== count(array_unique($serialized))) {
+                return $message ?? \mini\t("Array must contain only unique items.");
+            }
+
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate minimum number of items matching a schema (JSON Schema: minContains)
+     *
+     * Requires at least $min items in the array to pass the validator.
+     *
+     * @param int $min Minimum number of matching items
+     * @param Validator $validator Validator that items must match
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function minContains(int $min, Validator $validator, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($min, $validator, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!is_array($v)) {
+                return $message ?? \mini\t("Must be an array.");
+            }
+
+            $matchCount = 0;
+            foreach ($v as $item) {
+                if ($validator->isInvalid($item) === null) {
+                    $matchCount++;
+                }
+            }
+
+            if ($matchCount < $min) {
+                return $message ?? \mini\t("Must contain at least {min} matching items.", ['min' => $min]);
+            }
+
+            return null;
+        };
+        return $this;
+    }
+
+    /**
+     * Validate maximum number of items matching a schema (JSON Schema: maxContains)
+     *
+     * Requires at most $max items in the array to pass the validator.
+     *
+     * @param int $max Maximum number of matching items
+     * @param Validator $validator Validator that items must match
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function maxContains(int $max, Validator $validator, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($max, $validator, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!is_array($v)) {
+                return $message ?? \mini\t("Must be an array.");
+            }
+
+            $matchCount = 0;
+            foreach ($v as $item) {
+                if ($validator->isInvalid($item) === null) {
+                    $matchCount++;
+                }
+            }
+
+            if ($matchCount > $max) {
+                return $message ?? \mini\t("Must contain at most {max} matching items.", ['max' => $max]);
+            }
+
+            return null;
+        };
+        return $this;
+    }
+
+    /**
      * Validate value matches regex pattern
      *
      * @param string $pattern Regular expression pattern
