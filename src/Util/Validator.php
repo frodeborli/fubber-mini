@@ -117,9 +117,10 @@ class Validator implements \JsonSerializable
      * For object/array validation: Returns null or array of field errors
      *
      * @param mixed $value Value to validate
+     * @param mixed $context Parent context (containing object/array) for custom validators
      * @return null|array|string|Stringable Null if valid, error(s) if invalid
      */
-    public function isInvalid(mixed $value): null|array|string|Stringable
+    public function isInvalid(mixed $value, mixed $context = null): null|array|string|Stringable
     {
         // Check required first
         $isEmpty = $value === null || $value === '' || $value === [];
@@ -133,8 +134,16 @@ class Validator implements \JsonSerializable
             return null;
         }
 
-        // For object/array validation, check properties
-        if ((!empty($this->propertyValidators) || !empty($this->patternPropertyValidators) || $this->additionalPropertiesValidator !== null || !$this->allowAdditionalProperties) && (is_array($value) || is_object($value))) {
+        // Run rules first (type, minProperties, maxProperties, etc.)
+        foreach ($this->rules as $keyword => $ruleValue) {
+            $error = $this->validateRule($keyword, $ruleValue, $value, $context);
+            if ($error !== null) {
+                return $error;
+            }
+        }
+
+        // For object/array validation, check properties after rules pass
+        if ((!empty($this->propertyValidators) || !empty($this->patternPropertyValidators) || $this->additionalPropertiesValidator !== null || !$this->allowAdditionalProperties) && $this->isObjectLike($value)) {
             $errors = [];
             $validatedProps = [];
 
@@ -143,7 +152,7 @@ class Validator implements \JsonSerializable
                 $validatedProps[$property] = true;
                 $propValue = is_array($value) ? ($value[$property] ?? null)
                                               : ($value->$property ?? null);
-                if ($error = $validator->isInvalid($propValue)) {
+                if ($error = $validator->isInvalid($propValue, $value)) {
                     $errors[$property] = $error;
                 }
             }
@@ -161,7 +170,7 @@ class Validator implements \JsonSerializable
                     if (preg_match($pattern, $property)) {
                         $validatedProps[$property] = true;
                         $propValue = is_array($value) ? $value[$property] : $value->$property;
-                        if ($error = $validator->isInvalid($propValue)) {
+                        if ($error = $validator->isInvalid($propValue, $value)) {
                             $errors[$property] = $error;
                         }
                         break; // Only validate against first matching pattern
@@ -179,21 +188,13 @@ class Validator implements \JsonSerializable
                     $errors[$property] = \mini\t("Additional property '{property}' is not allowed.", ['property' => $property]);
                 } elseif ($this->additionalPropertiesValidator !== null) {
                     $propValue = is_array($value) ? $value[$property] : $value->$property;
-                    if ($error = $this->additionalPropertiesValidator->isInvalid($propValue)) {
+                    if ($error = $this->additionalPropertiesValidator->isInvalid($propValue, $value)) {
                         $errors[$property] = $error;
                     }
                 }
             }
 
             return $errors ?: null;
-        }
-
-        // Run rules until first error (fail fast)
-        foreach ($this->rules as $keyword => $ruleValue) {
-            $error = $this->validateRule($keyword, $ruleValue, $value);
-            if ($error !== null) {
-                return $error;
-            }
         }
 
         return null;
@@ -205,16 +206,22 @@ class Validator implements \JsonSerializable
      * @param string $keyword Rule keyword
      * @param mixed $ruleValue Rule constraint value
      * @param mixed $value Value to validate
+     * @param mixed $context Parent context (containing object/array)
      * @return null|string|Stringable Null if valid, error message if invalid
      */
-    private function validateRule(string $keyword, mixed $ruleValue, mixed $value): null|string|Stringable
+    private function validateRule(string $keyword, mixed $ruleValue, mixed $value, mixed $context = null): null|string|Stringable
     {
         // Skip null values for most rules (required is handled separately)
         if ($value === null && $keyword !== 'type') {
             return null;
         }
 
-        return match($keyword) {
+        // Skip x-error "rule" - it's metadata, not a validation rule
+        if ($keyword === 'x-error') {
+            return null;
+        }
+
+        $error = match($keyword) {
             // Type validation
             'type' => $this->validateType($ruleValue, $value),
 
@@ -237,8 +244,8 @@ class Validator implements \JsonSerializable
             'items' => !is_array($value) ? null : $this->validateItems($ruleValue, $value),
 
             // Object constraints (only apply to objects/associative arrays)
-            'minProperties' => (!is_array($value) || array_is_list($value)) ? null : (count($value) < $ruleValue ? \mini\t("Must have at least {min} properties.", ['min' => $ruleValue]) : null),
-            'maxProperties' => (!is_array($value) || array_is_list($value)) ? null : (count($value) > $ruleValue ? \mini\t("Must have at most {max} properties.", ['max' => $ruleValue]) : null),
+            'minProperties' => !$this->isObjectLike($value) ? null : (count((array)$value) < $ruleValue ? \mini\t("Must have at least {min} properties.", ['min' => $ruleValue]) : null),
+            'maxProperties' => !$this->isObjectLike($value) ? null : (count((array)$value) > $ruleValue ? \mini\t("Must have at most {max} properties.", ['max' => $ruleValue]) : null),
 
             // Enum/const (apply to any type)
             'const' => $value !== $ruleValue ? \mini\t("Must be exactly {value}.", ['value' => $ruleValue]) : null,
@@ -260,8 +267,15 @@ class Validator implements \JsonSerializable
             'dependentRequired' => !is_array($value) ? null : $this->validateDependentRequired($ruleValue, $value),
 
             // Custom validators (closures - apply to any type)
-            default => str_starts_with($keyword, 'custom:') ? ($ruleValue($value) ? null : \mini\t("Validation failed.")) : null
+            default => str_starts_with($keyword, 'custom:') ? $this->validateCustom($ruleValue, $value, $context) : null
         };
+
+        // If validation failed and there's a custom error message, use it
+        if ($error !== null && isset($this->rules['x-error'][$keyword])) {
+            return $this->rules['x-error'][$keyword];
+        }
+
+        return $error;
     }
 
     /**
@@ -287,11 +301,12 @@ class Validator implements \JsonSerializable
      */
     public function required(string|Stringable|null $message = null): static
     {
-        $this->isRequired = true;
+        $clone = clone $this;
+        $clone->isRequired = true;
         if ($message !== null) {
-            $this->requiredMessage = $message;
+            $clone->requiredMessage = $message;
         }
-        return $this;
+        return $clone;
     }
 
     // ========================================================================
@@ -303,12 +318,19 @@ class Validator implements \JsonSerializable
      *
      * @param string $key Rule keyword
      * @param mixed $value Rule value
+     * @param string|Stringable|null $message Custom error message
      * @return static New instance with rule set
      */
-    private function setRule(string $key, mixed $value): static
+    private function setRule(string $key, mixed $value, string|Stringable|null $message = null): static
     {
         $clone = clone $this;
         $clone->rules[$key] = $value;
+        if ($message !== null) {
+            if (!isset($clone->rules['x-error'])) {
+                $clone->rules['x-error'] = [];
+            }
+            $clone->rules['x-error'][$key] = (string)$message;
+        }
         return $clone;
     }
 
@@ -336,119 +358,25 @@ class Validator implements \JsonSerializable
     // ========================================================================
 
     /**
-     * Validate email format (JSON Schema: format "email")
+     * Validate string format (JSON Schema: format)
      *
-     * @param string|Stringable|null $message Custom error message
+     * Supported formats:
+     * - email: Email address
+     * - uri: URL/URI
+     * - date-time: ISO 8601 date-time
+     * - date: ISO 8601 date (YYYY-MM-DD)
+     * - time: ISO 8601 time (HH:MM:SS)
+     * - ipv4: IPv4 address
+     * - ipv6: IPv6 address
+     * - uuid: UUID
+     * - slug: URL-safe string (not JSON Schema standard)
+     *
+     * @param string $format Format to validate
      * @return static
      */
-    public function email(): static
+    public function format(string $format, string|Stringable|null $message = null): static
     {
-        $this->rules['format'] = 'email';
-        return $this;
-    }
-
-    /**
-     * Validate URL format (JSON Schema: format "uri")
-     *
-     * @param string|Stringable|null $message Custom error message
-     * @return static
-     */
-    public function url(): static
-    {
-        $this->rules['format'] = 'uri';
-        return $this;
-    }
-
-    /**
-     * Validate date-time format (JSON Schema: format "date-time")
-     *
-     * Validates ISO 8601 date-time format.
-     *
-     * @param string|Stringable|null $message Custom error message
-     * @return static
-     */
-    public function dateTime(): static
-    {
-        $this->rules['format'] = 'date-time';
-        return $this;
-    }
-
-    /**
-     * Validate date format (JSON Schema: format "date")
-     *
-     * Validates ISO 8601 date format (YYYY-MM-DD).
-     *
-     * @param string|Stringable|null $message Custom error message
-     * @return static
-     */
-    public function date(): static
-    {
-        $this->rules['format'] = 'date';
-        return $this;
-    }
-
-    /**
-     * Validate time format (JSON Schema: format "time")
-     *
-     * Validates ISO 8601 time format (HH:MM:SS or HH:MM:SS.sss).
-     *
-     * @param string|Stringable|null $message Custom error message
-     * @return static
-     */
-    public function time(): static
-    {
-        $this->rules['format'] = 'time';
-        return $this;
-    }
-
-    /**
-     * Validate IPv4 address (JSON Schema: format "ipv4")
-     *
-     * @param string|Stringable|null $message Custom error message
-     * @return static
-     */
-    public function ipv4(): static
-    {
-        $this->rules['format'] = 'ipv4';
-        return $this;
-    }
-
-    /**
-     * Validate IPv6 address (JSON Schema: format "ipv6")
-     *
-     * @param string|Stringable|null $message Custom error message
-     * @return static
-     */
-    public function ipv6(): static
-    {
-        $this->rules['format'] = 'ipv6';
-        return $this;
-    }
-
-    /**
-     * Validate UUID format (JSON Schema: format "uuid")
-     *
-     * @param string|Stringable|null $message Custom error message
-     * @return static
-     */
-    public function uuid(): static
-    {
-        $this->rules['format'] = 'uuid';
-        return $this;
-    }
-
-    /**
-     * Validate slug format (URL-safe string)
-     *
-     * Not a JSON Schema standard, but commonly used.
-     *
-     * @param string|Stringable|null $message Custom error message
-     * @return static
-     */
-    public function slug(): static
-    {
-        $this->rules['format'] = 'slug';
-        return $this;
+        return $this->setRule('format', $format, $message);
     }
 
     // ========================================================================
@@ -461,9 +389,9 @@ class Validator implements \JsonSerializable
      * @param int $min Minimum length
      * @return static
      */
-    public function minLength(int $min): static
+    public function minLength(int $min, string|Stringable|null $message = null): static
     {
-        return $this->setRule('minLength', $min);
+        return $this->setRule('minLength', $min, $message);
     }
 
     /**
@@ -473,9 +401,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function maxLength(int $max): static
+    public function maxLength(int $max, string|Stringable|null $message = null): static
     {
-        return $this->setRule('maxLength', $max);
+        return $this->setRule('maxLength', $max, $message);
     }
 
     /**
@@ -509,9 +437,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function minimum(int|float $min): static
+    public function minimum(int|float $min, string|Stringable|null $message = null): static
     {
-        return $this->setRule('minimum', $min);
+        return $this->setRule('minimum', $min, $message);
     }
 
     /**
@@ -521,9 +449,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function maximum(int|float $max): static
+    public function maximum(int|float $max, string|Stringable|null $message = null): static
     {
-        return $this->setRule('maximum', $max);
+        return $this->setRule('maximum', $max, $message);
     }
 
     /**
@@ -533,9 +461,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function exclusiveMinimum(int|float $min): static
+    public function exclusiveMinimum(int|float $min, string|Stringable|null $message = null): static
     {
-        return $this->setRule('exclusiveMinimum', $min);
+        return $this->setRule('exclusiveMinimum', $min, $message);
     }
 
     /**
@@ -545,9 +473,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function exclusiveMaximum(int|float $max): static
+    public function exclusiveMaximum(int|float $max, string|Stringable|null $message = null): static
     {
-        return $this->setRule('exclusiveMaximum', $max);
+        return $this->setRule('exclusiveMaximum', $max, $message);
     }
 
     /**
@@ -557,9 +485,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function multipleOf(int|float $divisor): static
+    public function multipleOf(int|float $divisor, string|Stringable|null $message = null): static
     {
-        return $this->setRule('multipleOf', $divisor);
+        return $this->setRule('multipleOf', $divisor, $message);
     }
 
     /**
@@ -569,9 +497,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function minItems(int $min): static
+    public function minItems(int $min, string|Stringable|null $message = null): static
     {
-        return $this->setRule('minItems', $min);
+        return $this->setRule('minItems', $min, $message);
     }
 
     /**
@@ -581,9 +509,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function maxItems(int $max): static
+    public function maxItems(int $max, string|Stringable|null $message = null): static
     {
-        return $this->setRule('maxItems', $max);
+        return $this->setRule('maxItems', $max, $message);
     }
 
     /**
@@ -593,9 +521,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function minProperties(int $min): static
+    public function minProperties(int $min, string|Stringable|null $message = null): static
     {
-        return $this->setRule('minProperties', $min);
+        return $this->setRule('minProperties', $min, $message);
     }
 
     /**
@@ -605,9 +533,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function maxProperties(int $max): static
+    public function maxProperties(int $max, string|Stringable|null $message = null): static
     {
-        return $this->setRule('maxProperties', $max);
+        return $this->setRule('maxProperties', $max, $message);
     }
 
     /**
@@ -622,8 +550,9 @@ class Validator implements \JsonSerializable
      */
     public function dependentRequired(string $property, array $requiredProperties): static
     {
-        $this->rules['dependentRequired'] = [$property => $requiredProperties];
-        return $this;
+        $current = $this->rules['dependentRequired'] ?? [];
+        $current[$property] = $requiredProperties;
+        return $this->setRule('dependentRequired', $current);
     }
 
     /**
@@ -634,8 +563,7 @@ class Validator implements \JsonSerializable
      */
     public function uniqueItems(): static
     {
-        $this->rules['uniqueItems'] = true;
-        return $this;
+        return $this->setRule('uniqueItems', true);
     }
 
     /**
@@ -678,8 +606,7 @@ class Validator implements \JsonSerializable
      */
     public function minContains(int $min, Validator $validator): static
     {
-        $this->rules['minContains'] = ['min' => $min, 'validator' => $validator];
-        return $this;
+        return $this->setRule('minContains', ['min' => $min, 'validator' => $validator]);
     }
 
     /**
@@ -694,8 +621,7 @@ class Validator implements \JsonSerializable
      */
     public function maxContains(int $max, Validator $validator): static
     {
-        $this->rules['maxContains'] = ['max' => $max, 'validator' => $validator];
-        return $this;
+        return $this->setRule('maxContains', ['max' => $max, 'validator' => $validator]);
     }
 
     /**
@@ -705,9 +631,9 @@ class Validator implements \JsonSerializable
      * @param string|Stringable|null $message Custom error message
      * @return static
      */
-    public function pattern(string $pattern): static
+    public function pattern(string $pattern, string|Stringable|null $message = null): static
     {
-        return $this->setRule('pattern', $pattern);
+        return $this->setRule('pattern', $pattern, $message);
     }
 
     // ========================================================================
@@ -782,16 +708,25 @@ class Validator implements \JsonSerializable
      *
      * The callback should return truthy if valid, falsy if invalid.
      *
-     * Example:
+     * When validating object properties or array items, the callback can optionally
+     * accept a second parameter for the parent context (containing object/array):
+     *
+     * Examples:
      * ```php
-     * $validator->custom(
-     *     fn($v) => $v instanceof SomeClass,
-     *     mini\t("Must be instance of SomeClass")
-     * );
+     * // Simple validation (just the value)
+     * $validator->custom(fn($v) => $v instanceof SomeClass)
+     *
+     * // With parent context (for relational validation)
+     * $userValidator = (new Validator)
+     *     ->type('object')
+     *     ->forProperty('password_confirmation',
+     *         (new Validator)->custom(fn($confirmation, $user) =>
+     *             $confirmation === $user['password']
+     *         )
+     *     );
      * ```
      *
-     * @param Closure $callback Validation function: fn($value) => bool
-     * @param string|Stringable $message Error message to return on failure (required)
+     * @param Closure $callback Validation function: fn($value, $context = null) => bool
      * @return static
      */
     public function custom(Closure $callback): static
@@ -812,8 +747,9 @@ class Validator implements \JsonSerializable
      */
     public function forProperty(string $property, Validator $validator): static
     {
-        $this->propertyValidators[$property] = $validator;
-        return $this;
+        $clone = clone $this;
+        $clone->propertyValidators[$property] = $validator;
+        return $clone;
     }
 
     /**
@@ -826,13 +762,14 @@ class Validator implements \JsonSerializable
      */
     public function properties(array $properties): static
     {
+        $clone = clone $this;
         foreach ($properties as $property => $validator) {
             if (!($validator instanceof Validator)) {
                 throw new \InvalidArgumentException("properties() requires Validator instances");
             }
-            $this->propertyValidators[$property] = $validator;
+            $clone->propertyValidators[$property] = $validator;
         }
-        return $this;
+        return $clone;
     }
 
     /**
@@ -846,8 +783,9 @@ class Validator implements \JsonSerializable
      */
     public function patternProperties(string $pattern, Validator $validator): static
     {
-        $this->patternPropertyValidators[$pattern] = $validator;
-        return $this;
+        $clone = clone $this;
+        $clone->patternPropertyValidators[$pattern] = $validator;
+        return $clone;
     }
 
     /**
@@ -860,17 +798,18 @@ class Validator implements \JsonSerializable
      */
     public function additionalProperties(Validator|bool $validator): static
     {
+        $clone = clone $this;
         if ($validator === false) {
-            $this->allowAdditionalProperties = false;
-            $this->additionalPropertiesValidator = null;
+            $clone->allowAdditionalProperties = false;
+            $clone->additionalPropertiesValidator = null;
         } elseif ($validator === true) {
-            $this->allowAdditionalProperties = true;
-            $this->additionalPropertiesValidator = null;
+            $clone->allowAdditionalProperties = true;
+            $clone->additionalPropertiesValidator = null;
         } else {
-            $this->allowAdditionalProperties = true;
-            $this->additionalPropertiesValidator = $validator;
+            $clone->allowAdditionalProperties = true;
+            $clone->additionalPropertiesValidator = $validator;
         }
-        return $this;
+        return $clone;
     }
 
     /**
@@ -909,25 +848,30 @@ class Validator implements \JsonSerializable
         return $clone;
     }
 
-    /**
-     * Deep clone property validators
-     */
-    public function __clone()
-    {
-        foreach ($this->propertyValidators as $prop => $validator) {
-            $this->propertyValidators[$prop] = clone $validator;
-        }
-        foreach ($this->patternPropertyValidators as $pattern => $validator) {
-            $this->patternPropertyValidators[$pattern] = clone $validator;
-        }
-        if ($this->additionalPropertiesValidator !== null) {
-            $this->additionalPropertiesValidator = clone $this->additionalPropertiesValidator;
-        }
-    }
 
     // ========================================================================
     // Validation Helper Methods
     // ========================================================================
+
+    /**
+     * Check if a value is object-like (PHP object or associative array)
+     */
+    private function isObjectLike(mixed $value): bool
+    {
+        return is_object($value) || (is_array($value) && !array_is_list($value));
+    }
+
+    /**
+     * Validate using custom closure
+     *
+     * Calls the closure with both value and context. If the closure only accepts
+     * one parameter, the second parameter is simply ignored by PHP.
+     */
+    private function validateCustom(Closure $callback, mixed $value, mixed $context): ?string
+    {
+        $result = $callback($value, $context);
+        return $result ? null : \mini\t("Validation failed.");
+    }
 
     private function validateType(string|array $types, mixed $value): ?string
     {
@@ -940,7 +884,7 @@ class Validator implements \JsonSerializable
                 'number' => is_int($value) || is_float($value),
                 'boolean' => is_bool($value),
                 'array' => is_array($value) && array_is_list($value),
-                'object' => is_array($value) && !array_is_list($value),
+                'object' => $this->isObjectLike($value),
                 'null' => $value === null,
                 default => false
             };
@@ -1051,14 +995,26 @@ class Validator implements \JsonSerializable
         if ($value === null) return null;
         if (!is_array($value)) return \mini\t("Must be an array.");
 
+        // additionalItems only applies when items is a tuple (array of validators)
+        $itemsRule = $this->rules['items'] ?? null;
+        if (!is_array($itemsRule)) {
+            return null; // Not a tuple schema, additionalItems doesn't apply
+        }
+
+        $tupleLength = count($itemsRule);
+
         if ($validator === false) {
-            return null; // Would need tuple schema count to enforce
+            // Check if there are items beyond the tuple length
+            if (count($value) > $tupleLength) {
+                return \mini\t("Array must have at most {max} items.", ['max' => $tupleLength]);
+            }
         } elseif ($validator instanceof Validator) {
-            foreach ($value as $index => $item) {
-                $error = $validator->isInvalid($item);
+            // Validate items beyond tuple length
+            for ($i = $tupleLength; $i < count($value); $i++) {
+                $error = $validator->isInvalid($value[$i]);
                 if ($error !== null) {
                     return \mini\t("Additional item at index {index} is invalid: {error}", [
-                        'index' => $index,
+                        'index' => $i,
                         'error' => $error
                     ]);
                 }
