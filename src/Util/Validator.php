@@ -883,6 +883,40 @@ class Validator
     }
 
     /**
+     * Validate all array items against a schema (JSON Schema: items)
+     *
+     * All items in the array must pass the provided validator.
+     *
+     * @param Validator $validator Validator that all items must match
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function items(Validator $validator, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($validator, $message) {
+            if ($v === null) {
+                return null;
+            }
+            if (!is_array($v)) {
+                return $message ?? \mini\t("Must be an array.");
+            }
+
+            foreach ($v as $index => $item) {
+                $error = $validator->isInvalid($item);
+                if ($error !== null) {
+                    return $message ?? \mini\t("Item at index {index} is invalid: {error}", [
+                        'index' => $index,
+                        'error' => $error
+                    ]);
+                }
+            }
+
+            return null;
+        };
+        return $this;
+    }
+
+    /**
      * Validate minimum number of items matching a schema (JSON Schema: minContains)
      *
      * Requires at least $min items in the array to pass the validator.
