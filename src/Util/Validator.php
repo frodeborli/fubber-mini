@@ -223,12 +223,12 @@ class Validator implements \JsonSerializable
             'maxLength' => !is_string($value) ? null : (strlen($value) > $ruleValue ? \mini\t("Must be {max} characters or less.", ['max' => $ruleValue]) : null),
             'pattern' => !is_string($value) ? null : (!preg_match($ruleValue, $value) ? \mini\t("Invalid format.") : null),
 
-            // Numeric constraints (only apply to numbers)
-            'minimum' => !is_numeric($value) ? null : ($value < $ruleValue ? \mini\t("Must be at least {min}.", ['min' => $ruleValue]) : null),
-            'maximum' => !is_numeric($value) ? null : ($value > $ruleValue ? \mini\t("Must be {max} or less.", ['max' => $ruleValue]) : null),
-            'exclusiveMinimum' => !is_numeric($value) ? null : ($value <= $ruleValue ? \mini\t("Must be greater than {min}.", ['min' => $ruleValue]) : null),
-            'exclusiveMaximum' => !is_numeric($value) ? null : ($value >= $ruleValue ? \mini\t("Must be less than {max}.", ['max' => $ruleValue]) : null),
-            'multipleOf' => !is_numeric($value) ? null : (fmod($value, $ruleValue) != 0 ? \mini\t("Must be a multiple of {divisor}.", ['divisor' => $ruleValue]) : null),
+            // Numeric constraints (only apply to int/float, not numeric strings)
+            'minimum' => !(is_int($value) || is_float($value)) ? null : ($value < $ruleValue ? \mini\t("Must be at least {min}.", ['min' => $ruleValue]) : null),
+            'maximum' => !(is_int($value) || is_float($value)) ? null : ($value > $ruleValue ? \mini\t("Must be {max} or less.", ['max' => $ruleValue]) : null),
+            'exclusiveMinimum' => !(is_int($value) || is_float($value)) ? null : ($value <= $ruleValue ? \mini\t("Must be greater than {min}.", ['min' => $ruleValue]) : null),
+            'exclusiveMaximum' => !(is_int($value) || is_float($value)) ? null : ($value >= $ruleValue ? \mini\t("Must be less than {max}.", ['max' => $ruleValue]) : null),
+            'multipleOf' => !(is_int($value) || is_float($value)) ? null : (fmod($value, $ruleValue) != 0 ? \mini\t("Must be a multiple of {divisor}.", ['divisor' => $ruleValue]) : null),
 
             // Array constraints (only apply to arrays)
             'minItems' => !is_array($value) ? null : (count($value) < $ruleValue ? \mini\t("Must have at least {min} items.", ['min' => $ruleValue]) : null),
