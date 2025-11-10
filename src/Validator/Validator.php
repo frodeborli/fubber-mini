@@ -1,6 +1,6 @@
 <?php
 
-namespace mini\Util;
+namespace mini\Validator;
 
 use Closure;
 use Stringable;

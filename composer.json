@@ -43,7 +43,8 @@
             "src/Auth/functions.php",
             "src/Mailer/functions.php",
             "src/CLI/functions.php",
-            "src/UUID/functions.php"
+            "src/UUID/functions.php",
+            "src/Validator/functions.php"
         ]
     },
     "bin": [
