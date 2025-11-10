@@ -78,8 +78,7 @@ use Stringable;
  */
 class Validator
 {
-    private array $rules = [];
-    private array $ruleMetadata = [];
+    private array $rules = []; // ['keyword' => ['closure' => fn, 'value' => ..., 'message' => ...]]
     private array $propertyValidators = [];
     private array $patternPropertyValidators = [];
     private ?Validator $additionalPropertiesValidator = null;
@@ -190,8 +189,8 @@ class Validator
         }
 
         // Run rules until first error (fail fast)
-        foreach ($this->rules as $rule) {
-            if ($error = $rule($value)) {
+        foreach ($this->rules as $keyword => $rule) {
+            if ($error = $rule['closure']($value)) {
                 return $error;
             }
         }
@@ -242,8 +241,10 @@ class Validator
     public function isString(string|Stringable|null $message = null): static
     {
         $this->addRule(
+            'type:string',
             fn($v) => is_string($v) ? null : ($message ?? \mini\t("Must be a string")),
-            ['type' => 'string']
+            null,
+            $message
         );
         return $this;
     }
@@ -257,9 +258,11 @@ class Validator
     public function isInt(string|Stringable|null $message = null): static
     {
         $this->addRule(
+            'type:integer',
             fn($v) => is_int($v) || (is_string($v) && ctype_digit($v)) ? null
                 : ($message ?? \mini\t("Must be an integer")),
-            ['type' => 'integer']
+            null,
+            $message
         );
         return $this;
     }
@@ -272,8 +275,13 @@ class Validator
      */
     public function isNumber(string|Stringable|null $message = null): static
     {
-        $this->rules[] = fn($v) => is_int($v) || is_float($v) ? null
-            : ($message ?? \mini\t("Must be a number"));
+        $this->addRule(
+            'type:number',
+            fn($v) => is_int($v) || is_float($v) ? null
+                : ($message ?? \mini\t("Must be a number")),
+            null,
+            $message
+        );
         return $this;
     }
 
@@ -285,8 +293,13 @@ class Validator
      */
     public function isBool(string|Stringable|null $message = null): static
     {
-        $this->rules[] = fn($v) => is_bool($v) || in_array($v, [0, 1, '0', '1', 'true', 'false'], true) ? null
-            : ($message ?? \mini\t("Must be a boolean"));
+        $this->addRule(
+            'type:boolean',
+            fn($v) => is_bool($v) || in_array($v, [0, 1, '0', '1', 'true', 'false'], true) ? null
+                : ($message ?? \mini\t("Must be a boolean")),
+            null,
+            $message
+        );
         return $this;
     }
 
@@ -301,8 +314,13 @@ class Validator
      */
     public function isObject(string|Stringable|null $message = null): static
     {
-        $this->rules[] = fn($v) => is_object($v) || is_array($v) ? null
-            : ($message ?? \mini\t("Must be an object"));
+        $this->addRule(
+            'type:object',
+            fn($v) => is_object($v) || is_array($v) ? null
+                : ($message ?? \mini\t("Must be an object")),
+            null,
+            $message
+        );
         return $this;
     }
 
@@ -317,8 +335,13 @@ class Validator
      */
     public function isArray(string|Stringable|null $message = null): static
     {
-        $this->rules[] = fn($v) => is_array($v) && array_is_list($v) ? null
-            : ($message ?? \mini\t("Must be an array"));
+        $this->addRule(
+            'type:array',
+            fn($v) => is_array($v) && array_is_list($v) ? null
+                : ($message ?? \mini\t("Must be an array")),
+            null,
+            $message
+        );
         return $this;
     }
 
@@ -330,8 +353,13 @@ class Validator
      */
     public function isNull(string|Stringable|null $message = null): static
     {
-        $this->rules[] = fn($v) => $v === null ? null
-            : ($message ?? \mini\t("Must be null"));
+        $this->addRule(
+            'type:null',
+            fn($v) => $v === null ? null
+                : ($message ?? \mini\t("Must be null")),
+            null,
+            $message
+        );
         return $this;
     }
 
@@ -653,6 +681,7 @@ class Validator
     public function minimum(int|float $min, string|Stringable|null $message = null): static
     {
         $this->addRule(
+            'minimum',
             function($v) use ($min, $message) {
                 if ($v === null) {
                     return null;
@@ -662,7 +691,8 @@ class Validator
                 }
                 return null;
             },
-            ['keyword' => 'minimum', 'value' => $min]
+            $min,
+            $message
         );
         return $this;
     }
@@ -676,15 +706,20 @@ class Validator
      */
     public function maximum(int|float $max, string|Stringable|null $message = null): static
     {
-        $this->rules[] = function($v) use ($max, $message) {
-            if ($v === null) {
+        $this->addRule(
+            'maximum',
+            function($v) use ($max, $message) {
+                if ($v === null) {
+                    return null;
+                }
+                if ($v > $max) {
+                    return $message ?? \mini\t("Must be {max} or less.", ['max' => $max]);
+                }
                 return null;
-            }
-            if ($v > $max) {
-                return $message ?? \mini\t("Must be {max} or less.", ['max' => $max]);
-            }
-            return null;
-        };
+            },
+            $max,
+            $message
+        );
         return $this;
     }
 
@@ -697,15 +732,20 @@ class Validator
      */
     public function exclusiveMinimum(int|float $min, string|Stringable|null $message = null): static
     {
-        $this->rules[] = function($v) use ($min, $message) {
-            if ($v === null) {
+        $this->addRule(
+            'exclusiveMinimum',
+            function($v) use ($min, $message) {
+                if ($v === null) {
+                    return null;
+                }
+                if ($v <= $min) {
+                    return $message ?? \mini\t("Must be greater than {min}.", ['min' => $min]);
+                }
                 return null;
-            }
-            if ($v <= $min) {
-                return $message ?? \mini\t("Must be greater than {min}.", ['min' => $min]);
-            }
-            return null;
-        };
+            },
+            $min,
+            $message
+        );
         return $this;
     }
 
@@ -718,15 +758,20 @@ class Validator
      */
     public function exclusiveMaximum(int|float $max, string|Stringable|null $message = null): static
     {
-        $this->rules[] = function($v) use ($max, $message) {
-            if ($v === null) {
+        $this->addRule(
+            'exclusiveMaximum',
+            function($v) use ($max, $message) {
+                if ($v === null) {
+                    return null;
+                }
+                if ($v >= $max) {
+                    return $message ?? \mini\t("Must be less than {max}.", ['max' => $max]);
+                }
                 return null;
-            }
-            if ($v >= $max) {
-                return $message ?? \mini\t("Must be less than {max}.", ['max' => $max]);
-            }
-            return null;
-        };
+            },
+            $max,
+            $message
+        );
         return $this;
     }
 
@@ -1420,16 +1465,21 @@ class Validator
     }
 
     /**
-     * Helper to add both a rule closure and its metadata
+     * Helper to add a validation rule with metadata
      *
+     * @param string $keyword JSON Schema keyword (type, minimum, pattern, etc)
      * @param \Closure $closure Validation closure
-     * @param array $metadata Semantic description for export
+     * @param mixed $value Optional value for the constraint (min value, pattern, etc)
+     * @param string|Stringable|null $message Custom error message
      * @return void
      */
-    private function addRule(\Closure $closure, array $metadata): void
+    private function addRule(string $keyword, \Closure $closure, mixed $value = null, string|Stringable|null $message = null): void
     {
-        $this->rules[] = $closure;
-        $this->ruleMetadata[] = $metadata;
+        $this->rules[$keyword] = [
+            'closure' => $closure,
+            'value' => $value,
+            'message' => $message
+        ];
     }
 
     /**
@@ -1441,70 +1491,34 @@ class Validator
     {
         $schema = [];
 
-        // Collect type constraints
+        // Collect types
         $types = [];
-        foreach ($this->ruleMetadata as $meta) {
-            if (isset($meta['type'])) {
-                $types[] = $meta['type'];
-            }
-        }
+        if (isset($this->rules['type:string'])) $types[] = 'string';
+        if (isset($this->rules['type:integer'])) $types[] = 'integer';
+        if (isset($this->rules['type:number'])) $types[] = 'number';
+        if (isset($this->rules['type:boolean'])) $types[] = 'boolean';
+        if (isset($this->rules['type:null'])) $types[] = 'null';
+        if (isset($this->rules['type:array'])) $types[] = 'array';
+        if (isset($this->rules['type:object'])) $types[] = 'object';
+
         if (count($types) === 1) {
             $schema['type'] = $types[0];
         } elseif (count($types) > 1) {
             $schema['type'] = $types;
         }
 
-        // Apply constraints from metadata
-        foreach ($this->ruleMetadata as $meta) {
-            switch ($meta['keyword'] ?? null) {
-                case 'minimum':
-                    $schema['minimum'] = $meta['value'];
-                    break;
-                case 'maximum':
-                    $schema['maximum'] = $meta['value'];
-                    break;
-                case 'exclusiveMinimum':
-                    $schema['exclusiveMinimum'] = $meta['value'];
-                    break;
-                case 'exclusiveMaximum':
-                    $schema['exclusiveMaximum'] = $meta['value'];
-                    break;
-                case 'multipleOf':
-                    $schema['multipleOf'] = $meta['value'];
-                    break;
-                case 'minLength':
-                    $schema['minLength'] = $meta['value'];
-                    break;
-                case 'maxLength':
-                    $schema['maxLength'] = $meta['value'];
-                    break;
-                case 'pattern':
-                    $schema['pattern'] = $meta['value'];
-                    break;
-                case 'minItems':
-                    $schema['minItems'] = $meta['value'];
-                    break;
-                case 'maxItems':
-                    $schema['maxItems'] = $meta['value'];
-                    break;
-                case 'uniqueItems':
-                    $schema['uniqueItems'] = true;
-                    break;
-                case 'minProperties':
-                    $schema['minProperties'] = $meta['value'];
-                    break;
-                case 'maxProperties':
-                    $schema['maxProperties'] = $meta['value'];
-                    break;
-                case 'enum':
-                    $schema['enum'] = $meta['value'];
-                    break;
-                case 'const':
-                    $schema['const'] = $meta['value'];
-                    break;
-                case 'format':
-                    $schema['format'] = $meta['value'];
-                    break;
+        // Add constraints from rules
+        foreach ($this->rules as $keyword => $rule) {
+            if (str_starts_with($keyword, 'type:')) {
+                continue; // Already handled above
+            }
+
+            if ($rule['value'] !== null) {
+                if ($keyword === 'uniqueItems') {
+                    $schema[$keyword] = true;
+                } else {
+                    $schema[$keyword] = $rule['value'];
+                }
             }
         }
 
