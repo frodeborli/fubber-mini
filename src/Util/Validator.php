@@ -821,6 +821,134 @@ class Validator
     }
 
     // ========================================================================
+    // Combinators (JSON Schema: anyOf, allOf, oneOf, not)
+    // ========================================================================
+
+    /**
+     * Validate against any of the provided validators (JSON Schema: anyOf)
+     *
+     * The value is valid if it passes at least one of the validators.
+     *
+     * @param array<Validator> $validators Array of Validator instances
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function anyOf(array $validators, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($validators, $message) {
+            if ($v === null) {
+                return null;
+            }
+
+            foreach ($validators as $validator) {
+                if (!($validator instanceof Validator)) {
+                    throw new \InvalidArgumentException("anyOf requires an array of Validator instances");
+                }
+                $error = $validator->isInvalid($v);
+                if ($error === null) {
+                    return null; // Valid - at least one passed
+                }
+            }
+
+            return $message ?? \mini\t("Must match at least one of the allowed types.");
+        };
+        return $this;
+    }
+
+    /**
+     * Validate against all of the provided validators (JSON Schema: allOf)
+     *
+     * The value is valid only if it passes all validators.
+     *
+     * @param array<Validator> $validators Array of Validator instances
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function allOf(array $validators, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($validators, $message) {
+            if ($v === null) {
+                return null;
+            }
+
+            foreach ($validators as $validator) {
+                if (!($validator instanceof Validator)) {
+                    throw new \InvalidArgumentException("allOf requires an array of Validator instances");
+                }
+                $error = $validator->isInvalid($v);
+                if ($error !== null) {
+                    return $message ?? $error; // Failed - return first error
+                }
+            }
+
+            return null; // Valid - all passed
+        };
+        return $this;
+    }
+
+    /**
+     * Validate against exactly one of the provided validators (JSON Schema: oneOf)
+     *
+     * The value is valid only if it passes exactly one validator (not zero, not multiple).
+     *
+     * @param array<Validator> $validators Array of Validator instances
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function oneOf(array $validators, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($validators, $message) {
+            if ($v === null) {
+                return null;
+            }
+
+            $passedCount = 0;
+            foreach ($validators as $validator) {
+                if (!($validator instanceof Validator)) {
+                    throw new \InvalidArgumentException("oneOf requires an array of Validator instances");
+                }
+                $error = $validator->isInvalid($v);
+                if ($error === null) {
+                    $passedCount++;
+                }
+            }
+
+            if ($passedCount === 1) {
+                return null; // Valid - exactly one passed
+            }
+
+            return $message ?? \mini\t("Must match exactly one of the allowed types.");
+        };
+        return $this;
+    }
+
+    /**
+     * Validate that value does NOT match validator (JSON Schema: not)
+     *
+     * The value is valid only if it fails the provided validator.
+     *
+     * @param Validator $validator Validator instance
+     * @param string|Stringable|null $message Custom error message
+     * @return static
+     */
+    public function not(Validator $validator, string|Stringable|null $message = null): static
+    {
+        $this->rules[] = function($v) use ($validator, $message) {
+            if ($v === null) {
+                return null;
+            }
+
+            $error = $validator->isInvalid($v);
+            if ($error === null) {
+                return $message ?? \mini\t("Must not match the disallowed type.");
+            }
+
+            return null; // Valid - validation failed as expected
+        };
+        return $this;
+    }
+
+    // ========================================================================
     // Advanced Validators
     // ========================================================================
 
