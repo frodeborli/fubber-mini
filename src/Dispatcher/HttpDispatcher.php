@@ -47,12 +47,23 @@ use Nyholm\Psr7Server\ServerRequestCreator;
 class HttpDispatcher
 {
     private ConverterRegistryInterface $exceptionConverters;
+    private ?ServerRequestInterface $currentServerRequest = null;
 
     public function __construct()
     {
         // Create separate converter registry for exceptions
         // This keeps exception handling separate from content conversion
         $this->exceptionConverters = new \mini\Converter\ConverterRegistry();
+
+        // Register ServerRequest as Transient service that returns current request
+        // This allows mini\request() to work and get the current request from dispatcher
+        Mini::$mini->addService(
+            ServerRequestInterface::class,
+            \mini\Lifetime::Transient,
+            fn() => $this->currentServerRequest ?? throw new \RuntimeException(
+                'No ServerRequest available. ServerRequest is only available during request handling.'
+            )
+        );
     }
 
     /**
@@ -95,19 +106,23 @@ class HttpDispatcher
      * Dispatch the current HTTP request
      *
      * Complete HTTP request lifecycle:
-     * 1. Create PSR-7 ServerRequest from globals
-     * 2. Store request for mini\request() helper
-     * 3. Get RequestHandlerInterface from container (Router)
-     * 4. Handle request and get response
-     * 5. Catch exceptions and convert to responses
-     * 6. Emit response to browser
+     * 1. Transition to Ready phase (enables Scoped services)
+     * 2. Create PSR-7 ServerRequest from PHP request globals
+     * 3. Set as current request (available via mini\request())
+     * 4. Get RequestHandlerInterface from container (Router)
+     * 5. Handle request and get response
+     * 6. Catch exceptions and convert to responses
+     * 7. Emit response to browser
      *
      * @return void
      */
     public function dispatch(): void
     {
         try {
-            // 1. Create PSR-7 ServerRequest from PHP globals
+            // 1. Transition to Ready phase (enables Scoped services)
+            Mini::$mini->phase->trigger(\mini\Phase::Ready);
+
+            // 2. Create PSR-7 ServerRequest from PHP request globals
             $psr17Factory = new Psr17Factory();
             $creator = new ServerRequestCreator(
                 $psr17Factory, // ServerRequestFactory
@@ -115,13 +130,21 @@ class HttpDispatcher
                 $psr17Factory, // UploadedFileFactory
                 $psr17Factory  // StreamFactory
             );
-
             $serverRequest = $creator->fromGlobals();
 
-            // 2. Store request in service container (makes mini\request() work)
-            Mini::$mini->set(ServerRequestInterface::class, $serverRequest);
+            // 3. Set current request (makes it available via mini\request())
+            $this->currentServerRequest = $serverRequest;
 
-            // 3. Dispatch into the framework
+            // 4. Add callback to allow Router to replace current request
+            //    Router uses this after Redirect/Reroute to update the request
+            $serverRequest = $serverRequest->withAttribute(
+                'mini.dispatcher.replaceRequest',
+                function(ServerRequestInterface $newRequest) {
+                    $this->currentServerRequest = $newRequest;
+                }
+            );
+
+            // 5. Dispatch into the framework
             try {
                 $handler = Mini::$mini->get(RequestHandlerInterface::class);
                 $response = $handler->handle($serverRequest);
@@ -141,7 +164,7 @@ class HttpDispatcher
                 }
             }
 
-            // 3. Emit response to browser
+            // 6. Emit response to browser
             $this->emitResponse($response);
 
         } catch (\Throwable $e) {

@@ -14,29 +14,6 @@ use Nyholm\Psr7Server\ServerRequestCreator;
  * Uses Nyholm's PSR-7 implementation.
  */
 
-// Register ServerRequest as Scoped service (per-request lifetime)
-\mini\Mini::$mini->addService(
-    ServerRequestInterface::class,
-    \mini\Lifetime::Scoped,
-    fn() => create_request_from_globals()
-);
-
-/**
- * Create ServerRequest from PHP globals
- *
- * @return ServerRequestInterface
- */
-function create_request_from_globals(): ServerRequestInterface {
-    $psr17Factory = new Psr17Factory();
-    $creator = new ServerRequestCreator(
-        $psr17Factory,  // ServerRequestFactory
-        $psr17Factory,  // UriFactory
-        $psr17Factory,  // UploadedFileFactory
-        $psr17Factory   // StreamFactory
-    );
-
-    return $creator->fromGlobals();
-}
 
 /**
  * Create a PSR-7 Response

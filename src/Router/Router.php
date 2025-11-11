@@ -68,9 +68,6 @@ class Router implements RequestHandlerInterface
      */
     public function handle(ServerRequestInterface $request): ResponseInterface
     {
-        // Populate $_GET and $_POST from request
-        $this->populateRequestglobals($request);
-
         // Iterative route resolution loop
         while (true) {
             try {
@@ -329,9 +326,6 @@ class Router implements RequestHandlerInterface
             ->withAttribute('mini.previousRequest', $request)
             ->withRequestTarget($newTarget);
 
-        // Update $_GET request global
-        $_GET = array_merge($_GET, $queryParams);
-
         return $newRequest;
     }
 
@@ -476,37 +470,20 @@ class Router implements RequestHandlerInterface
     }
 
     /**
-     * Populate $_GET and $_POST request globals from request
-     *
-     * Makes request data available via traditional PHP request globals.
-     * This maintains compatibility with Mini's "back to basics" philosophy.
-     *
-     * @param ServerRequestInterface $request
-     * @return void
-     */
-    private function populateRequestglobals(ServerRequestInterface $request): void
-    {
-        // Populate $_GET from query params
-        $_GET = $request->getQueryParams();
-
-        // Populate $_POST from parsed body (if it's an array)
-        $parsedBody = $request->getParsedBody();
-        if (is_array($parsedBody)) {
-            $_POST = $parsedBody;
-        }
-    }
-
-    /**
      * Replace the global request instance
      *
-     * Updates the service container so mini\request() returns the updated request.
-     * This allows middleware/hooks to modify the request and have controllers see the changes.
+     * Uses the callback provided by HttpDispatcher to update the current request.
+     * This allows controllers to see updated request with route attributes and
+     * redirected paths.
      *
      * @param ServerRequestInterface $request
      * @return void
      */
     private function replaceGlobalRequest(ServerRequestInterface $request): void
     {
-        Mini::$mini->set(ServerRequestInterface::class, $request);
+        $callback = $request->getAttribute('mini.dispatcher.replaceRequest');
+        if ($callback instanceof \Closure) {
+            $callback($request);
+        }
     }
 }
