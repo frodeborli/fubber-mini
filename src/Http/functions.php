@@ -14,6 +14,13 @@ use Nyholm\Psr7Server\ServerRequestCreator;
  * Uses Nyholm's PSR-7 implementation.
  */
 
+// Register ServerRequest as Scoped service (per-request lifetime)
+\mini\Mini::$mini->addService(
+    ServerRequestInterface::class,
+    \mini\Lifetime::Scoped,
+    fn() => create_request_from_globals()
+);
+
 /**
  * Create ServerRequest from PHP globals
  *
@@ -85,4 +92,23 @@ function emit_response(ResponseInterface $response): void {
 
     // Send body
     echo $response->getBody();
+}
+
+/**
+ * Get current request instance
+ *
+ * Returns the PSR-7 ServerRequest for the current request scope.
+ * Works in both traditional PHP-FPM and async environments (Swoole/RoadRunner).
+ *
+ * Usage:
+ * ```php
+ * $query = request()->getQueryParams();
+ * $body = request()->getParsedBody();
+ * $accept = request()->getHeaderLine('Accept');
+ * ```
+ *
+ * @return ServerRequestInterface Current request
+ */
+function request(): ServerRequestInterface {
+    return \mini\Mini::$mini->get(ServerRequestInterface::class);
 }

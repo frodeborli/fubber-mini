@@ -1,3 +1,3 @@
 <?php
-header('Content-Type: application/json');
-echo json_encode("pong");
+// Simple string return - automatically converted to text/plain response
+return "pong";

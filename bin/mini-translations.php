@@ -256,7 +256,7 @@ class TranslationManager
                 $this->outputCsv($data);
                 break;
             case 'validate':
-                $this->validateTranslations($data);
+                $this->validateTranslations($data, './_translations');
                 break;
             default:
                 $this->outputText($data);
@@ -264,13 +264,13 @@ class TranslationManager
         }
     }
 
-    public function validateTranslations(array $sourceData): void
+    public function validateTranslations(array $sourceData, string $translationsDir = './_translations'): void
     {
-        $translationsDir = './_translations/default';
+        $defaultDir = $translationsDir . '/default';
         $issues = [];
 
         foreach ($sourceData as $filePath => $strings) {
-            $translationFile = $translationsDir . '/' . $filePath . '.json';
+            $translationFile = $defaultDir . '/' . $filePath . '.json';
 
             // Check if translation file exists
             if (!file_exists($translationFile)) {
@@ -307,18 +307,18 @@ class TranslationManager
         }
 
         // Check for orphaned translation files (files that don't have corresponding source files)
-        if (is_dir($translationsDir)) {
+        if (is_dir($defaultDir)) {
             $iterator = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($translationsDir, RecursiveDirectoryIterator::SKIP_DOTS)
+                new RecursiveDirectoryIterator($defaultDir, RecursiveDirectoryIterator::SKIP_DOTS)
             );
 
             foreach ($iterator as $file) {
                 if ($file->getExtension() === 'json') {
                     $fullPath = $file->getRealPath();
-                    $translationsDirReal = realpath($translationsDir);
+                    $defaultDirReal = realpath($defaultDir);
 
                     // Get path relative to _translations/default/
-                    $relativePath = str_replace($translationsDirReal . '/', '', $fullPath);
+                    $relativePath = str_replace($defaultDirReal . '/', '', $fullPath);
                     $sourceFile = str_replace('.json', '', $relativePath);
 
                     if (!array_key_exists($sourceFile, $sourceData)) {
@@ -329,13 +329,13 @@ class TranslationManager
         }
     }
 
-    public function addMissingTranslations(array $sourceData): void
+    public function addMissingTranslations(array $sourceData, string $translationsDir = './_translations'): void
     {
-        $translationsDir = './_translations/default';
+        $defaultDir = $translationsDir . '/default';
         $added = 0;
 
         foreach ($sourceData as $filePath => $strings) {
-            $translationFile = $translationsDir . '/' . $filePath . '.json';
+            $translationFile = $defaultDir . '/' . $filePath . '.json';
 
             if (!file_exists($translationFile)) {
                 // Create new translation file
@@ -390,13 +390,13 @@ class TranslationManager
         }
     }
 
-    public function removeOrphanedTranslations(array $sourceData): void
+    public function removeOrphanedTranslations(array $sourceData, string $translationsDir = './_translations'): void
     {
-        $translationsDir = './_translations/default';
+        $defaultDir = $translationsDir . '/default';
         $removed = 0;
 
         foreach ($sourceData as $filePath => $strings) {
-            $translationFile = $translationsDir . '/' . $filePath . '.json';
+            $translationFile = $defaultDir . '/' . $filePath . '.json';
 
             if (!file_exists($translationFile)) {
                 continue;
@@ -430,17 +430,17 @@ class TranslationManager
         }
 
         // Remove orphaned translation files
-        if (is_dir($translationsDir)) {
+        if (is_dir($defaultDir)) {
             $iterator = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($translationsDir, RecursiveDirectoryIterator::SKIP_DOTS)
+                new RecursiveDirectoryIterator($defaultDir, RecursiveDirectoryIterator::SKIP_DOTS)
             );
 
             foreach ($iterator as $file) {
                 if ($file->getExtension() === 'json') {
                     $fullPath = $file->getRealPath();
-                    $translationsDirReal = realpath($translationsDir);
+                    $defaultDirReal = realpath($defaultDir);
 
-                    $relativePath = str_replace($translationsDirReal . '/', '', $fullPath);
+                    $relativePath = str_replace($defaultDirReal . '/', '', $fullPath);
                     $sourceFile = str_replace('.json', '', $relativePath);
 
                     if (!array_key_exists($sourceFile, $sourceData)) {
@@ -459,10 +459,10 @@ class TranslationManager
         }
     }
 
-    public function addLanguage(string $language, array $sourceData): void
+    public function addLanguage(string $language, array $sourceData, string $translationsDir = './_translations'): void
     {
-        $defaultDir = './_translations/default';
-        $langDir = "./_translations/$language";
+        $defaultDir = $translationsDir . '/default';
+        $langDir = "$translationsDir/$language";
 
         if (!is_dir($defaultDir)) {
             echo "Error: Default translations directory not found\n";
@@ -512,10 +512,10 @@ class TranslationManager
         echo "\nTotal: Created $created translation files for language '$language'\n";
     }
 
-    public function updateLanguage(string $language, array $sourceData): void
+    public function updateLanguage(string $language, array $sourceData, string $translationsDir = './_translations'): void
     {
-        $defaultDir = './_translations/default';
-        $langDir = "./_translations/$language";
+        $defaultDir = $translationsDir . '/default';
+        $langDir = "$translationsDir/$language";
 
         if (!is_dir($defaultDir)) {
             echo "Error: Default translations directory not found\n";
@@ -639,6 +639,8 @@ function showUsage(): void
     echo "  --format=FORMAT          Output format: text, json, csv (for status)\n";
     echo "  --exclude=DIRS           Comma-separated list of directories to exclude\n";
     echo "                           (default: vendor,node_modules,.git,.svn)\n";
+    echo "  --dir=PATH               Translations directory (default: ./_translations)\n";
+    echo "                           Use 'translations' for framework translations\n";
     echo "  --help                   Show this help message\n";
     echo "\n";
     echo "Examples:\n";
@@ -655,6 +657,7 @@ $action = null;
 $language = null;
 $format = 'validate';
 $directory = '.';
+$translationsDir = './_translations';
 $excludedDirs = ['vendor', 'node_modules', '.git', '.svn']; // Default exclusions
 
 for ($i = 1; $i < $argc; $i++) {
@@ -667,6 +670,8 @@ for ($i = 1; $i < $argc; $i++) {
         $format = substr($arg, 9);
     } elseif (str_starts_with($arg, '--exclude=')) {
         $excludedDirs = explode(',', substr($arg, 10));
+    } elseif (str_starts_with($arg, '--dir=')) {
+        $translationsDir = substr($arg, 6);
     } elseif ($action === null && !str_starts_with($arg, '--')) {
         $action = $arg;
     } elseif ($action === 'add-language' || $action === 'update-language') {
@@ -700,19 +705,23 @@ $data = $manager->searchDirectory($directory);
 
 switch ($action) {
     case 'add-missing':
-        $manager->addMissingTranslations($data);
+        $manager->addMissingTranslations($data, $translationsDir);
         break;
     case 'remove-orphans':
-        $manager->removeOrphanedTranslations($data);
+        $manager->removeOrphanedTranslations($data, $translationsDir);
         break;
     case 'add-language':
-        $manager->addLanguage($language, $data);
+        $manager->addLanguage($language, $data, $translationsDir);
         break;
     case 'update-language':
-        $manager->updateLanguage($language, $data);
+        $manager->updateLanguage($language, $data, $translationsDir);
         break;
     default:
-        // Default action: show status
-        $manager->outputResults($data, $format);
+        // Default action: show status (with validation)
+        if ($format === 'validate') {
+            $manager->validateTranslations($data, $translationsDir);
+        } else {
+            $manager->outputResults($data, $format);
+        }
         break;
 }

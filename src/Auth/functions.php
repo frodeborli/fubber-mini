@@ -36,23 +36,3 @@ function auth(): Auth
     return Mini::$mini->get(Auth::class);
 }
 
-/**
- * Handle AccessDeniedException with proper 401/403 logic
- */
-function handleAccessDeniedException(Http\AccessDeniedException $exception): void
-{
-    // Determine correct HTTP status based on authentication state
-    try {
-        $authFacade = auth();
-        if ($authFacade->isAuthenticated()) {
-            // User is authenticated but lacks permission → 403 Forbidden
-            showErrorPage(403, $exception);
-        } else {
-            // User is not authenticated → 401 Unauthorized
-            showErrorPage(401, $exception);
-        }
-    } catch (\Throwable) {
-        // Auth not configured → 401 Unauthorized
-        showErrorPage(401, $exception);
-    }
-}

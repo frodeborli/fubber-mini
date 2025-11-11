@@ -4,6 +4,7 @@ namespace mini\I18n;
 
 use mini\Mini;
 use mini\Util\QueryParser;
+use mini\Util\PathsRegistry;
 use MessageFormatter;
 
 /**
@@ -11,19 +12,42 @@ use MessageFormatter;
  *
  * Handles translation file loading, caching, and fallback logic.
  * Automatically creates missing translation entries in the default language files.
+ *
+ * Implements TranslatorInterface to allow custom translator implementations.
  */
-class Translator
+class Translator implements TranslatorInterface
 {
-    private string $translationsPath;
+    private PathsRegistry $translationsPaths;
     private string $defaultLanguage = 'default';
     private array $loadedTranslations = [];
     private bool $autoCreateDefaults;
-    private array $namedScopes = [];
+    private array $pathAliases = [];
 
-    public function __construct(string $translationsPath, bool $autoCreateDefaults = true)
+    public function __construct(PathsRegistry $translationsPaths, bool $autoCreateDefaults = true)
     {
-        $this->translationsPath = rtrim($translationsPath, '/');
+        $this->translationsPaths = $translationsPaths;
         $this->autoCreateDefaults = $autoCreateDefaults;
+    }
+
+    /**
+     * Add a path alias for translation file resolution
+     *
+     * Maps an absolute source path to an alias prefix. When a t() call originates from
+     * a file under the aliased path, translations are searched under {alias}/ prefix.
+     *
+     * Example:
+     *   $translator->addPathAlias('/var/www/vendor/fubber/mini', 'MINI');
+     *
+     *   A t() call from /var/www/vendor/fubber/mini/src/Invalid.php will search for:
+     *   - _translations/default/MINI/src/Invalid.php.json (application override)
+     *   - vendor/fubber/mini/translations/default/MINI/src/Invalid.php.json (framework)
+     *
+     * @param string $absolutePath Absolute path to the source directory
+     * @param string $alias Alias prefix for translations (e.g., 'MINI', 'MY-PLUGIN')
+     */
+    public function addPathAlias(string $absolutePath, string $alias): void
+    {
+        $this->pathAliases[rtrim($absolutePath, '/')] = $alias;
     }
 
     /**
@@ -35,13 +59,6 @@ class Translator
     }
 
 
-    /**
-     * Check if a language is supported (available in filesystem)
-     */
-    private function isLanguageSupported(string $languageCode): bool
-    {
-        return in_array($languageCode, $this->getAvailableLanguages());
-    }
 
     /**
      * Translate a Translatable instance using ICU MessageFormatter
@@ -77,12 +94,12 @@ class Translator
             $fallbackChain[] = 'default';
         }
 
-        // Determine scope for this source file
-        $scope = $this->getScopeForSourceFile($sourceFile);
+        // Determine alias prefix for this source file
+        $aliasPrefix = $this->getAliasPrefix($sourceFile);
 
         // Try each language in the fallback chain
         foreach ($fallbackChain as $langCode) {
-            $translation = $this->loadTranslationFromFile($langCode, $sourceFile, $sourceText, $vars, $scope);
+            $translation = $this->loadTranslationFromFile($langCode, $sourceFile, $sourceText, $vars, $aliasPrefix);
 
             if ($translation !== null) {
                 return $translation;
@@ -91,7 +108,7 @@ class Translator
 
         // Auto-create entry in default language file if enabled
         if ($this->autoCreateDefaults) {
-            $this->createDefaultTranslation($sourceFile, $sourceText, $scope);
+            $this->createDefaultTranslation($sourceFile, $sourceText, $aliasPrefix);
         }
 
         // Final fallback: return original text
@@ -99,34 +116,17 @@ class Translator
     }
 
     /**
-     * Load translation from a specific language file with scope support
+     * Load translation from a specific language file with alias prefix support
      */
-    private function loadTranslationFromFile(string $languageCode, string $sourceFile, string $sourceText, array $vars = [], ?string $scope = null): ?string
+    private function loadTranslationFromFile(string $languageCode, string $sourceFile, string $sourceText, array $vars = [], ?string $aliasPrefix = null): ?string
     {
-        // For scoped files, try app-scoped translations first (allows app to override framework)
-        if ($scope !== null) {
-            $scopedTranslations = $this->getFileTranslations($languageCode, $sourceFile, $scope);
-            $translation = $this->extractTranslation($scopedTranslations, $sourceText, $vars);
-            if ($translation !== null) {
-                return $translation;
-            }
+        // Build translation file path with alias prefix if present
+        $translationPath = $aliasPrefix ? "{$aliasPrefix}/{$sourceFile}" : $sourceFile;
 
-            // Fall back to package's own translations
-            $packageTranslations = $this->getPackageTranslations($languageCode, $sourceFile, $scope);
-            $translation = $this->extractTranslation($packageTranslations, $sourceText, $vars);
-            if ($translation !== null) {
-                return $translation;
-            }
-        } else {
-            // Regular app files - use standard translation path
-            $translations = $this->getFileTranslations($languageCode, $sourceFile);
-            $translation = $this->extractTranslation($translations, $sourceText, $vars);
-            if ($translation !== null) {
-                return $translation;
-            }
-        }
+        $translations = $this->getFileTranslations($languageCode, $translationPath, $aliasPrefix);
+        $translation = $this->extractTranslation($translations, $sourceText, $vars);
 
-        return null;
+        return $translation;
     }
 
     /**
@@ -154,57 +154,6 @@ class Translator
         return $translation;
     }
 
-    /**
-     * Get package's own translations (from the package's translation directory)
-     */
-    private function getPackageTranslations(string $languageCode, string $sourceFile, string $scope): array
-    {
-        $packagePath = $this->namedScopes[$scope] ?? null;
-        if ($packagePath === null) {
-            return [];
-        }
-
-        // Convert source file from project-relative to package-relative
-        $projectRoot = Mini::$mini->root;
-        $absoluteSourcePath = $projectRoot . '/' . ltrim($sourceFile, '/');
-
-        if (!str_starts_with($absoluteSourcePath, $packagePath . '/')) {
-            return [];
-        }
-
-        $relativeToPackage = substr($absoluteSourcePath, strlen($packagePath) + 1);
-        $packageTranslationsPath = $packagePath . '/translations';
-
-        // Map 'en' to 'default' for backward compatibility
-        $folderName = ($languageCode === 'en') ? 'default' : $languageCode;
-        $packageTranslationFile = $packageTranslationsPath . '/' . $folderName . '/' . $relativeToPackage . '.json';
-
-        $cacheKey = "package:{$scope}:{$languageCode}:{$relativeToPackage}";
-
-        if (isset($this->loadedTranslations[$cacheKey])) {
-            return $this->loadedTranslations[$cacheKey];
-        }
-
-        if (!file_exists($packageTranslationFile)) {
-            $this->loadedTranslations[$cacheKey] = [];
-            return [];
-        }
-
-        $jsonContent = file_get_contents($packageTranslationFile);
-        if ($jsonContent === false) {
-            $this->loadedTranslations[$cacheKey] = [];
-            return [];
-        }
-
-        $translations = json_decode($jsonContent, true);
-        if (!is_array($translations)) {
-            $this->loadedTranslations[$cacheKey] = [];
-            return [];
-        }
-
-        $this->loadedTranslations[$cacheKey] = $translations;
-        return $translations;
-    }
 
     /**
      * Resolve conditional translation based on variable values using QueryParser
@@ -243,17 +192,17 @@ class Translator
     }
 
     /**
-     * Get all translations for a specific language and file with scope support
+     * Get all translations for a specific language and file with alias prefix support
      */
-    private function getFileTranslations(string $languageCode, string $sourceFile, ?string $scope = null): array
+    private function getFileTranslations(string $languageCode, string $sourceFile, ?string $aliasPrefix = null): array
     {
-        $cacheKey = $scope ? "{$scope}:{$languageCode}:{$sourceFile}" : "{$languageCode}:{$sourceFile}";
+        $cacheKey = $aliasPrefix ? "{$aliasPrefix}:{$languageCode}:{$sourceFile}" : "{$languageCode}:{$sourceFile}";
 
         if (isset($this->loadedTranslations[$cacheKey])) {
             return $this->loadedTranslations[$cacheKey];
         }
 
-        $filePath = $this->getTranslationFilePath($languageCode, $sourceFile, $scope);
+        $filePath = $this->getTranslationFilePath($languageCode, $sourceFile, $aliasPrefix);
 
         if (!file_exists($filePath)) {
             $this->loadedTranslations[$cacheKey] = [];
@@ -281,12 +230,12 @@ class Translator
     }
 
     /**
-     * Ensure default translation exists for a source text with scope support
+     * Ensure default translation exists for a source text with alias prefix support
      * Creates file if missing, adds string if not present in existing file
      */
-    private function createDefaultTranslation(string $sourceFile, string $sourceText, ?string $scope = null): void
+    private function createDefaultTranslation(string $sourceFile, string $sourceText, ?string $aliasPrefix = null): void
     {
-        $filePath = $this->getTranslationFilePath($this->defaultLanguage, $sourceFile, $scope);
+        $filePath = $this->getTranslationFilePath($this->defaultLanguage, $sourceFile, $aliasPrefix);
 
         // Ensure directory exists
         $directory = dirname($filePath);
@@ -298,7 +247,7 @@ class Translator
         $fileExists = file_exists($filePath);
 
         // Load existing translations (will be empty array if file doesn't exist)
-        $translations = $this->getFileTranslations($this->defaultLanguage, $sourceFile, $scope);
+        $translations = $this->getFileTranslations($this->defaultLanguage, $sourceFile, $aliasPrefix);
 
         // Track if we need to update the file
         $needsUpdate = false;
@@ -320,27 +269,42 @@ class Translator
 
             if (file_put_contents($filePath, $jsonContent) !== false) {
                 // Update cache
-                $cacheKey = $scope ? "{$scope}:{$this->defaultLanguage}:{$sourceFile}" : "{$this->defaultLanguage}:{$sourceFile}";
+                $cacheKey = $aliasPrefix ? "{$aliasPrefix}:{$this->defaultLanguage}:{$sourceFile}" : "{$this->defaultLanguage}:{$sourceFile}";
                 $this->loadedTranslations[$cacheKey] = $translations;
             }
         }
     }
 
     /**
-     * Get the full path to a translation file with scope support
+     * Get the full path to a translation file with alias prefix support
+     *
+     * Uses PathsRegistry to find the first existing translation file, searching in priority order:
+     * 1. Application translations (_translations/)
+     * 2. Framework translations (vendor/fubber/mini/translations/)
      */
-    private function getTranslationFilePath(string $languageCode, string $sourceFile, ?string $scope = null): string
+    private function getTranslationFilePath(string $languageCode, string $sourceFile, ?string $aliasPrefix = null): string
     {
         // Map 'en' (default language) to 'default' folder for backward compatibility
         $folderName = ($languageCode === 'en') ? 'default' : $languageCode;
 
-        if ($scope !== null) {
-            // Scoped translation files go under {app}/_translations/{SCOPE}/{lang}/{file}.json
-            return "{$this->translationsPath}/{$scope}/{$folderName}/{$sourceFile}.json";
+        if ($aliasPrefix !== null) {
+            // Aliased translation files go under {translations}/{lang}/{ALIAS}/{file}.json
+            $relativePath = "{$folderName}/{$aliasPrefix}/{$sourceFile}.json";
         } else {
-            // Regular app translations go under {app}/_translations/{lang}/{file}.json
-            return "{$this->translationsPath}/{$folderName}/{$sourceFile}.json";
+            // Regular app translations go under {translations}/{lang}/{file}.json
+            $relativePath = "{$folderName}/{$sourceFile}.json";
         }
+
+        // Try to find the file in registered paths
+        $foundPath = $this->translationsPaths->findFirst($relativePath);
+
+        // If not found, return the path where we would create it (first path in registry)
+        if ($foundPath === null) {
+            $paths = $this->translationsPaths->getPaths();
+            return $paths[0] . '/' . $relativePath;
+        }
+
+        return $foundPath;
     }
 
     /**
@@ -362,178 +326,29 @@ class Translator
         }
     }
 
-    /**
-     * Get current language code
-     */
-    public function getLanguageCode(): string
-    {
-        return $this->getCurrentLanguageCode();
-    }
+
 
     /**
-     * Set language code (useful for switching languages)
-     * Updates the global locale via Locale::setDefault()
-     */
-    public function setLanguageCode(string $languageCode): void
-    {
-        // Construct full locale from language code (e.g., 'en' -> 'en_US', 'nb' -> 'nb_NO')
-        $locale = \Locale::composeLocale(['language' => $languageCode]);
-        \Locale::setDefault($locale);
-    }
-
-    /**
-     * Try to set language code only if it's supported
-     * Returns true if language was changed, false if not supported
-     * Automatically persists successful language changes to session
-     */
-    public function trySetLanguageCode(string $languageCode): bool
-    {
-        if ($this->isLanguageSupported($languageCode)) {
-            $this->setLanguageCode($languageCode);
-            // No need to clear cache - translation files are language-agnostic keys
-
-            // Start session and persist the language choice
-            session();
-            $_SESSION['language'] = $languageCode;
-
-            return true;
-        }
-
-        return false;
-    }
-
-    /**
-     * Clear translation cache (useful after language change)
-     */
-    public function clearCache(): void
-    {
-        $this->loadedTranslations = [];
-    }
-
-    /**
-     * Add a named scope for translation file resolution
+     * Determine the alias prefix for a source file based on registered path aliases
      *
-     * @param string $scopeName Name of the scope (e.g., 'MINI-FRAMEWORK')
-     * @param string $basePath Base path where the scoped source files are located
+     * @param string $sourceFile Relative path from project root
+     * @return string|null Alias prefix or null for application files
      */
-    public function addNamedScope(string $scopeName, string $basePath): void
-    {
-        $this->namedScopes[$scopeName] = rtrim($basePath, '/');
-    }
-
-    /**
-     * Determine which scope a source file belongs to based on its path
-     */
-    private function getScopeForSourceFile(string $sourceFile): ?string
+    private function getAliasPrefix(string $sourceFile): ?string
     {
         $projectRoot = Mini::$mini->root;
 
         // Convert relative path to absolute for comparison
         $absoluteSourcePath = $projectRoot . '/' . ltrim($sourceFile, '/');
 
-        // Check each named scope to see if the source file falls under it
-        foreach ($this->namedScopes as $scopeName => $basePath) {
+        // Check each path alias to see if the source file falls under it
+        foreach ($this->pathAliases as $basePath => $alias) {
             if (str_starts_with($absoluteSourcePath, $basePath . '/')) {
-                return $scopeName;
+                return $alias;
             }
         }
 
-        return null; // Default scope (application files)
+        return null; // No alias (application files)
     }
 
-    /**
-     * Get translation statistics for a language
-     */
-    public function getTranslationStats(string $languageCode): array
-    {
-        $defaultStats = $this->getLanguageFileStats($this->defaultLanguage);
-        $targetStats = $this->getLanguageFileStats($languageCode);
-
-        $stats = [];
-        foreach ($defaultStats as $file => $defaultCount) {
-            $translatedCount = $targetStats[$file] ?? 0;
-            $stats[$file] = [
-                'total' => $defaultCount,
-                'translated' => $translatedCount,
-                'percentage' => $defaultCount > 0 ? round(($translatedCount / $defaultCount) * 100, 1) : 0
-            ];
-        }
-
-        return $stats;
-    }
-
-    /**
-     * Get all available languages (directories in translations folder)
-     */
-    public function getAvailableLanguages(): array
-    {
-        $languages = ['default']; // Always include default
-
-        if (!is_dir($this->translationsPath)) {
-            return $languages;
-        }
-
-        $iterator = new \DirectoryIterator($this->translationsPath);
-        foreach ($iterator as $item) {
-            if ($item->isDot() || !$item->isDir()) {
-                continue;
-            }
-
-            $langCode = $item->getFilename();
-            if ($langCode !== 'default') {
-                $languages[] = $langCode;
-            }
-        }
-
-        sort($languages);
-        return $languages;
-    }
-
-    /**
-     * Check if translation system is working correctly
-     */
-    public function healthCheck(): array
-    {
-        $health = [
-            'translations_path_exists' => is_dir($this->translationsPath),
-            'translations_path_writable' => is_writable($this->translationsPath),
-            'default_language_path_exists' => is_dir($this->translationsPath . '/' . $this->defaultLanguage),
-            'current_language_path_exists' => is_dir($this->translationsPath . '/' . $this->getCurrentLanguageCode()),
-            'auto_create_enabled' => $this->autoCreateDefaults,
-            'cache_entries' => count($this->loadedTranslations)
-        ];
-
-        $health['status'] = $health['translations_path_exists'] && $health['translations_path_writable'] ? 'healthy' : 'error';
-
-        return $health;
-    }
-
-    /**
-     * Get file statistics for a specific language
-     */
-    private function getLanguageFileStats(string $languageCode): array
-    {
-        $stats = [];
-        $languagePath = "{$this->translationsPath}/{$languageCode}";
-
-        if (!is_dir($languagePath)) {
-            return $stats;
-        }
-
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($languagePath)
-        );
-
-        foreach ($iterator as $file) {
-            if ($file->getExtension() === 'json') {
-                $relativePath = str_replace($languagePath . '/', '', $file->getPathname());
-                $relativePath = str_replace('.json', '', $relativePath);
-
-                $translations = $this->getFileTranslations($languageCode, $relativePath);
-                $stats[$relativePath] = count($translations);
-            }
-        }
-
-        return $stats;
-    }
 }

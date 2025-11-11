@@ -15,7 +15,7 @@ Mini::$mini->addService(AttributeValidatorFactory::class, Lifetime::Singleton, f
  * Get or create a Validator instance
  *
  * With no arguments: Returns a new Validator for building validation rules.
- * With class name: Returns a cached validator built from class attributes.
+ * With class name: Returns a validator built from class attributes (auto-cached by ValidatorStore).
  * With custom name: Returns a cached validator by identifier.
  *
  * Examples:
@@ -23,7 +23,7 @@ Mini::$mini->addService(AttributeValidatorFactory::class, Lifetime::Singleton, f
  * // New validator
  * $v = validator()->type('string')->minLength(5);
  *
- * // From class attributes
+ * // From class attributes (auto-built and cached)
  * $v = validator(User::class);
  *
  * // From custom identifier
@@ -33,6 +33,7 @@ Mini::$mini->addService(AttributeValidatorFactory::class, Lifetime::Singleton, f
  *
  * @param class-string|string|null $classOrName Class name or custom identifier
  * @return Validator Validator instance
+ * @throws \InvalidArgumentException If identifier not found and not a valid class
  */
 function validator(?string $classOrName = null): Validator {
     // No argument: return new validator
@@ -42,22 +43,15 @@ function validator(?string $classOrName = null): Validator {
 
     $store = Mini::$mini->get(ValidatorStore::class);
 
-    // Check if already in registry
-    if ($store->has($classOrName)) {
-        return clone $store->get($classOrName);
+    // Get from store (auto-builds from attributes if class/interface)
+    $validator = $store->get($classOrName);
+
+    if ($validator === null) {
+        throw new \InvalidArgumentException(
+            "Validator '$classOrName' not found. Register it in ValidatorStore or ensure the class exists."
+        );
     }
 
-    // If it's a class or interface, build from attributes
-    if (class_exists($classOrName) || interface_exists($classOrName)) {
-        $factory = Mini::$mini->get(AttributeValidatorFactory::class);
-        $validator = $factory->forClass($classOrName);
-
-        // Cache it
-        $store->set($classOrName, $validator);
-
-        return clone $validator;
-    }
-
-    // Not found and not a class
-    throw new \InvalidArgumentException("Validator '$classOrName' not found. Register it in ValidatorStore or ensure the class exists.");
+    // Return clone to allow modifications without affecting cached version
+    return clone $validator;
 }

@@ -5,10 +5,10 @@ namespace mini\I18n;
 use IntlDateFormatter;
 
 /**
- * Stateless formatting utility that provides shortcuts to common formatting tasks
+ * Stateless formatting utility that queries the current request locale
  *
- * All methods use the current locale from mini\locale() and delegate to PHP's intl classes.
- * This class provides no caching - it's purely a convenience wrapper.
+ * All methods query the current locale via \Locale::getDefault() and delegate to PHP's intl classes.
+ * This class holds no state - it's purely a convenience wrapper that reads request state on each call.
  */
 class Fmt
 {

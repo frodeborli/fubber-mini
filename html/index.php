@@ -1,1 +1,1 @@
-<?php require __DIR__ . "/../vendor/autoload.php"; mini\router();
+<?php require __DIR__ . "/../vendor/autoload.php"; mini\dispatch();

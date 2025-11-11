@@ -47,7 +47,17 @@ namespace mini\I18n;
 
 use mini\Mini;
 use mini\Lifetime;
+use mini\Util\PathsRegistry;
+
+// Register translations path registry
+$primaryTranslationsPath = $_ENV['MINI_TRANSLATIONS_ROOT'] ?? (Mini::$mini->root . '/_translations');
+Mini::$mini->paths->translations = new PathsRegistry($primaryTranslationsPath);
+$frameworkTranslationsPath = \dirname((new \ReflectionClass(Mini::class))->getFileName(), 2) . '/translations';
+Mini::$mini->paths->translations->addPath($frameworkTranslationsPath);
 
 // Register I18n services
-Mini::$mini->addService(Translator::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(Translator::class));
+// Register interface (loads from config, allows custom implementations)
+Mini::$mini->addService(TranslatorInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(TranslatorInterface::class));
+// Register concrete class as alias to interface (for backward compatibility)
+Mini::$mini->addService(Translator::class, Lifetime::Singleton, fn() => Mini::$mini->get(TranslatorInterface::class));
 Mini::$mini->addService(Fmt::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(Fmt::class));

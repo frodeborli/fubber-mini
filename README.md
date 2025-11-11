@@ -14,7 +14,7 @@ Minimalist PHP framework that embraces native PHP instead of hiding it. Use `$_G
 - `header()`, `http_response_code()`, `echo` - Direct output control
 - Output buffering - Transform responses without forcing abstractions
 
-**Request scope, not global scope.** Variables like `$_GET` and `$_POST` are called "superglobals," but they're really request-scoped in traditional PHP (FPM, CGI, mod_php, RoadRunner). Mini maintains this pattern:
+**Request scope, not global scope.** Variables like `$_GET` and `$_POST` are **request globals** - they're request-scoped in traditional PHP (FPM, CGI, mod_php, RoadRunner), not truly global like `$_SERVER` or `$GLOBALS`. Mini maintains this pattern:
 
 - `db()` returns a request-scoped database connection, not a shared global
 - When we add support for long-running environments (Swoole, ReactPHP, phasync), we'll context-switch these variables per request using Fibers/Coroutines

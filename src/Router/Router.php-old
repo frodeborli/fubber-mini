@@ -1,0 +1,513 @@
+<?php
+
+namespace mini\Router;
+
+use mini\Mini;
+
+/**
+ * Simple file-based router for Mini framework
+ *
+ * Maps URLs to route handler files in _routes/ directory:
+ * - /users → _routes/users.php
+ * - /api/posts → _routes/api/posts.php
+ *
+ * Security: Files starting with underscore are NOT publicly routable
+ * - _routes/api/_helpers.php → NOT accessible via /api/_helpers
+ * - _routes/mini/_function.php → NOT accessible via /mini/_function
+ *
+ * Use underscore-prefixed files for:
+ * - Internal route handlers (accessed via __DEFAULT__.php dynamic routing)
+ * - Shared helper functions (included by other routes)
+ *
+ * Use double-underscore for framework-reserved files:
+ * - __DEFAULT__.php → Custom route handler (framework convention)
+ *
+ * __DEFAULT__.php handlers:
+ * - Return null: Assume response sent directly (like regular routes)
+ * - Return array: Route patterns (default behavior)
+ * - Return PSR-15 RequestHandler: Delegates to handler->handle()
+ * - Return custom object: Processed by registered defaultHandlers
+ *
+ * Example mounting PSR-15 app:
+ *   // _routes/api/__DEFAULT__.php
+ *   <?php return new SlimApp(); // implements RequestHandlerInterface
+ */
+class Router
+{
+    private array $routes;
+    private string $scope;
+    public readonly \mini\Hooks\Handler $defaultHandlers;
+
+    public function __construct(array $routes = [], string $scope = '')
+    {
+        $this->routes = $routes;
+        $this->scope = $scope;
+        $this->defaultHandlers = new \mini\Hooks\Handler();
+
+        // Register PSR-15 RequestHandler support
+        $this->defaultHandlers->listen(function($result, $routeInfo) {
+            if ($result instanceof \Psr\Http\Server\RequestHandlerInterface) {
+                $request = \mini\Http\create_request_from_globals();
+                $response = $result->handle($request);
+                \mini\Http\emit_response($response);
+                return true; // Handled
+            }
+            return null; // Not handled, continue to next handler
+        });
+    }
+
+    /**
+     * Handle a complete routing request
+     * Searches _routes/ directory for route handlers
+     */
+    public function handleRequest(string $requestUri): void
+    {
+        $path = parse_url($requestUri, PHP_URL_PATH) ?? '';
+        $baseUrl = Mini::$mini->baseUrl ?? '';
+
+        // Try to resolve the route for the current path
+        $target = $this->tryFileBasedRouting($path, $baseUrl);
+
+        // Only check for alternate path redirect if NO route exists for current path
+        if (!$target) {
+            // Path doesn't end with '/' - check if path with trailing slash has a route
+            if (!str_ends_with($path, '/')) {
+                $alternateTarget = $this->tryFileBasedRouting($path . '/', $baseUrl);
+                if ($alternateTarget) {
+                    // No route for /path but route exists for /path/ - redirect
+                    $this->redirectTo($path . '/');
+                    return;
+                }
+            }
+            // Path ends with '/' - check if path without trailing slash has a route
+            elseif ($path !== '/') {
+                $alternateTarget = $this->tryFileBasedRouting(rtrim($path, '/'), $baseUrl);
+                if ($alternateTarget) {
+                    // No route for /path/ but route exists for /path - redirect
+                    $this->redirectTo(rtrim($path, '/'));
+                    return;
+                }
+            }
+        }
+
+        // 1. Try file-based routing in _routes/ directory
+        if ($target) {
+            $this->routes = [$path => $target];
+            $this->scope = '';
+            $this->resolve($path);
+            return;
+        }
+
+        // 2. Try hierarchical __DEFAULT__.php files
+        $strippedPath = $this->stripBasePath($path, $baseUrl);
+        $routeInfo = $this->findScopedRouteFile($strippedPath);
+
+        if ($routeInfo) {
+            $result = require $routeInfo['file'];
+
+            // If __DEFAULT__.php returns null, assume it handled response directly
+            if ($result === null) {
+                return;
+            }
+
+            // Allow registered handlers to process the result
+            // This enables mounting PSR-15 apps, custom handlers, etc.
+            $response = $this->defaultHandlers->trigger($result, $routeInfo);
+
+            if ($response !== null) {
+                return;
+            }
+
+            // Handle routes array (default behavior)
+            if (is_array($result)) {
+                // Include base URL prefix in the basePath for proper pattern matching
+                $basePath = '';
+                if (!empty($baseUrl)) {
+                    $basePath = parse_url($baseUrl, PHP_URL_PATH) ?? '';
+                }
+                $fullBasePath = $basePath . $routeInfo['basePath'];
+
+                $this->routes = $this->processRoutesWithScope($result, $routeInfo['scope'], $fullBasePath);
+                $this->scope = $routeInfo['scope'];
+
+                if ($this->resolve($requestUri)) {
+                    return;
+                }
+            }
+        }
+
+        // 3. Try global config/routes.php with stripped path (in project root - outside web root)
+        $globalRoutesFile = Mini::$mini->root . '/config/routes.php';
+        if (file_exists($globalRoutesFile)) {
+            $globalRoutes = require $globalRoutesFile;
+            $this->routes = $globalRoutes;
+            $this->scope = '';
+
+            if ($this->resolve($requestUri)) {
+                return;
+            }
+        }
+
+        // 4. 404 - nothing found
+        $this->handle404();
+    }
+
+    public function resolve(string $requestUri): bool
+    {
+        $path = parse_url($requestUri, PHP_URL_PATH);
+
+        // 1. Try exact match
+        if ($target = $this->findMatch($path)) {
+            $this->executeTarget($target);
+            return true;
+        }
+
+        // 2. Try with trailing slash (common case)
+        if (!str_ends_with($path, '/')) {
+            if ($target = $this->findMatch($path . '/')) {
+                $this->redirectTo($path . '/');
+                return true;
+            }
+        }
+
+        // 3. Try without trailing slash (less common)
+        if (str_ends_with($path, '/') && $path !== '/') {
+            $pathWithoutSlash = rtrim($path, '/');
+            if ($target = $this->findMatch($pathWithoutSlash)) {
+                $this->redirectTo($pathWithoutSlash);
+                return true;
+            }
+        }
+
+        // 4. Handle 404
+        $this->handle404();
+
+        return true;
+    }
+
+    private function findMatch(string $path): string|false
+    {
+        // Check routes in declared order - important!
+        foreach ($this->routes as $pattern => $handler) {
+            $regex = $this->compilePattern($pattern);
+
+            if (preg_match($regex, $path, $matches)) {
+                $namedMatches = array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY);
+
+                $target = $this->dispatchHandler($handler, $namedMatches);
+
+                if ($target === false) {
+                    // Handler returned false (404), but pattern matched
+                    return false;
+                }
+
+                return $target;
+            }
+        }
+
+        return false;
+    }
+
+    private function compilePattern(string $pattern): string
+    {
+        // Convert FastRoute-inspired patterns to regex with named capture groups
+        // {param} becomes (?<param>[^/]+)
+        // {param:\d+} becomes (?<param>\d+)
+        $pattern = preg_replace_callback(
+            '/\{(\w+)(?::([^}]+))?\}/',
+            fn($matches) => "(?<{$matches[1]}>" . ($matches[2] ?? '[^/]+') . ")",
+            $pattern
+        );
+
+        return "#^{$pattern}$#";
+    }
+
+    private function dispatchHandler(callable|string $handler, array $matches): string|false
+    {
+        // Handle string targets directly (for file-based routing)
+        if (is_string($handler)) {
+            return $handler;
+        }
+
+        // Handle callable handlers (for dynamic routing)
+        $reflection = new \ReflectionFunction($handler);
+        $params = [];
+
+        foreach ($reflection->getParameters() as $param) {
+            $name = $param->getName();
+            $value = $matches[$name] ?? null;
+
+            // Type casting based on parameter type hints
+            if ($value !== null && $param->hasType()) {
+                $type = $param->getType();
+                if (!$type instanceof \ReflectionUnionType) {
+                    $typeName = $type->getName();
+                    $value = match($typeName) {
+                        'int' => (int)$value,
+                        'float' => (float)$value,
+                        'bool' => (bool)$value,
+                        default => $value
+                    };
+                }
+            }
+
+            $params[] = $value;
+        }
+
+        return $handler(...$params);
+    }
+
+    private function executeTarget($target): void
+    {
+        if (is_string($target)) {
+            $this->executeStringTarget($target);
+        } elseif (is_callable($target)) {
+            $this->executeCallableTarget($target);
+        } elseif (is_array($target)) {
+            $this->executeArrayTarget($target);
+        } else {
+            throw new \InvalidArgumentException('Invalid route target type: ' . gettype($target));
+        }
+    }
+
+    private function executeStringTarget(string $target): void
+    {
+        // Parse target URL and populate $_GET
+        $parts = parse_url($target);
+        $file = $parts['path'];
+
+        if (isset($parts['query'])) {
+            parse_str($parts['query'], $queryParams);
+            $_GET = array_merge($_GET, $queryParams);
+        }
+
+        // Resolve relative paths within scope
+        if (!empty($this->scope) && !str_starts_with($file, '/')) {
+            $file = $this->scope . '/' . $file;
+        }
+
+        // Find route file in _routes/ directory via PathsRegistry
+        $routeFile = ltrim($file, '/');
+        $fullPath = Mini::$mini->paths->routes->findFirst($routeFile);
+
+        if (!$fullPath) {
+            http_response_code(500);
+            echo "Internal Server Error: Route target not found: $routeFile";
+            return;
+        }
+
+        // Execute controller with exception handling
+        try {
+            // Include the target file (it will echo its output)
+            require $fullPath;
+        } catch (\Throwable $e) {
+            // Re-throw for global exception handler
+            throw $e;
+        }
+    }
+
+    private function executeCallableTarget(callable $target): void
+    {
+        try {
+            // Call the target function/closure
+            $result = call_user_func($target);
+
+            // If callable returns a string, treat it as a redirect target
+            if (is_string($result)) {
+                $this->executeStringTarget($result);
+            }
+            // Otherwise, assume callable echoed its output directly
+
+        } catch (\Throwable $e) {
+            // Re-throw for global exception handler
+            throw $e;
+        }
+    }
+
+    private function executeArrayTarget(array $target): void
+    {
+        // Future extension for complex routing (controllers, middleware, etc.)
+        throw new \RuntimeException('Array route targets not yet implemented');
+    }
+
+
+    private function redirectTo(string $path): void
+    {
+        $redirectUrl = $path;
+        if (!empty($_SERVER['QUERY_STRING'])) {
+            $redirectUrl .= '?' . $_SERVER['QUERY_STRING'];
+        }
+
+        http_response_code(301);
+        header('Location: ' . $redirectUrl);
+        exit;
+    }
+
+    // === Helper methods moved from functions.php ===
+
+    private function tryFileBasedRouting(string $path, string $baseUrl): ?string
+    {
+        // Remove base_url path from the request path
+        if (!empty($baseUrl)) {
+            $basePath = parse_url($baseUrl, PHP_URL_PATH) ?? '';
+            if (!empty($basePath) && str_starts_with($path, $basePath)) {
+                $path = substr($path, strlen($basePath));
+            }
+        }
+
+        // Remove only leading slash - preserve trailing slash distinction
+        $remaining = ltrim($path, '/');
+
+        // Security: Block access to files starting with underscore
+        // Files like __DEFAULT__.php, _function.php are internal handlers, not public routes
+        $pathSegments = explode('/', $remaining);
+        foreach ($pathSegments as $segment) {
+            if (str_starts_with($segment, '_')) {
+                return null;  // 404 - underscore-prefixed paths are not routable
+            }
+        }
+
+        // Root path: / → _routes/index.php
+        if ($remaining === '') {
+            $routeFile = 'index.php';
+            $foundPath = Mini::$mini->paths->routes->findFirst($routeFile);
+            if ($foundPath) {
+                return $routeFile;
+            }
+            return null;
+        }
+
+        // Path WITH trailing slash: /users/ → _routes/users/index.php
+        if (str_ends_with($remaining, '/')) {
+            $dirPath = rtrim($remaining, '/');
+            $indexFile = $dirPath . '/index.php';
+            $foundPath = Mini::$mini->paths->routes->findFirst($indexFile);
+            if ($foundPath) {
+                return $indexFile;
+            }
+            return null;
+        }
+
+        // Path WITHOUT trailing slash: /users → _routes/users.php
+        $routeFile = $remaining . '.php';
+        $foundPath = Mini::$mini->paths->routes->findFirst($routeFile);
+        if ($foundPath) {
+            return $routeFile;
+        }
+
+        return null;
+    }
+
+    private function stripBasePath(string $path, string $baseUrl): string
+    {
+        if (empty($baseUrl)) {
+            return $path;
+        }
+
+        $basePath = parse_url($baseUrl, PHP_URL_PATH) ?? '';
+        if (!empty($basePath) && str_starts_with($path, $basePath)) {
+            $stripped = substr($path, strlen($basePath));
+            return $stripped ?: '/';
+        }
+
+        return $path;
+    }
+
+    private function findScopedRouteFile(string $requestPath): ?array
+    {
+        // Strip leading slash and split path
+        $pathParts = explode('/', trim($requestPath, '/'));
+        $pathParts = array_filter($pathParts, fn($part) => $part !== '');
+
+        // Check from most specific to least specific directory in _routes/
+        while (!empty($pathParts)) {
+            $dirPath = implode('/', $pathParts);
+            $routeFile = $dirPath . '/__DEFAULT__.php';
+
+            // Try to find in _routes/ via PathsRegistry
+            $foundPath = Mini::$mini->paths->routes->findFirst($routeFile);
+
+            if ($foundPath) {
+                return [
+                    'file' => $foundPath,
+                    'scope' => $dirPath,
+                    'basePath' => '/' . $dirPath
+                ];
+            }
+
+            array_pop($pathParts);
+        }
+
+        // No scoped routes found, fall back to global routes file
+        $globalFile = Mini::$mini->root . '/_config/routes.php';
+        if (file_exists($globalFile)) {
+            return [
+                'file' => $globalFile,
+                'scope' => '',
+                'basePath' => ''
+            ];
+        }
+
+        return null;
+    }
+
+    private function processRoutesWithScope(array $routes, string $scope, string $basePath): array
+    {
+        $processedRoutes = [];
+
+        foreach ($routes as $pattern => $target) {
+            // Prefix pattern with base path for scoped routes
+            if ($scope !== '') {
+                // Transform relative patterns: '/' -> '/admin/users/', '/edit' -> '/admin/users/edit'
+                if ($pattern === '/') {
+                    $fullPattern = $basePath . '/';
+                } elseif (str_starts_with($pattern, '/')) {
+                    $fullPattern = $basePath . $pattern;
+                } else {
+                    $fullPattern = $basePath . '/' . $pattern;
+                }
+            } else {
+                $fullPattern = $pattern;
+            }
+
+            // Note: Target transformation is now handled by Router internally
+            // No need to transform targets here since router has scope awareness
+
+            $processedRoutes[$fullPattern] = $target;
+        }
+
+        return $processedRoutes;
+    }
+
+    private function resolveTargetFile(string $target): string
+    {
+        // Parse target URL and extract file path
+        $parts = parse_url($target);
+        $file = $parts['path'] ?? $target;
+
+        // Resolve relative paths within scope
+        if (!empty($this->scope) && !str_starts_with($file, '/')) {
+            $file = $this->scope . '/' . $file;
+        }
+
+        // Remove leading slash for PathsRegistry lookup
+        $file = ltrim($file, '/');
+
+        // Try to find in _routes/ via PathsRegistry
+        $foundPath = Mini::$mini->paths->routes->findFirst($file);
+
+        if ($foundPath) {
+            return $foundPath;
+        }
+
+        // Fallback: return as-is (for backwards compatibility or error handling)
+        return Mini::$mini->root . '/_routes/' . $file;
+    }
+
+    private function handle404(): void
+    {
+        // Throw exception - Dispatcher will handle rendering
+        throw new \mini\Http\NotFoundException('Page not found');
+    }
+
+}

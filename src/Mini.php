@@ -56,9 +56,9 @@ final class Mini implements ContainerInterface {
      *
      * Example: $paths->config searches _config/ first, then vendor/fubber/mini/config/ as fallback.
      *
-     * @var Util\InstanceStore<string, Util\PathsRegistry>
+     * @var Mini\PathRegistries
      */
-    public readonly Util\InstanceStore $paths;
+    public readonly Mini\PathRegistries $paths;
 
     /**
      * Web-accessible document root directory path.
@@ -378,22 +378,17 @@ final class Mini implements ContainerInterface {
             $dotenv->load($this->root . '/.env');
         }
 
-        // Initialize paths collection with registries for framework resources
-        $this->paths = new InstanceStore(Util\PathsRegistry::class);
+        // Initialize paths registries directly (too fundamental to be a configurable service)
+        $this->paths = new Mini\PathRegistries();
+
+        // Register as singleton service for consistency and future DI
+        $this->addService(Mini\PathRegistries::class, Lifetime::Singleton, fn() => $this->paths);
 
         // Config registry: application config first, framework config as fallback
         $primaryConfigPath = $_ENV['MINI_CONFIG_ROOT'] ?? ($this->root . '/_config');
         $this->paths->config = new Util\PathsRegistry($primaryConfigPath);
         $frameworkConfigPath = \dirname((new \ReflectionClass(self::class))->getFileName(), 2) . '/config';
         $this->paths->config->addPath($frameworkConfigPath);
-
-        // Routes registry for route handlers
-        $primaryRoutesPath = $_ENV['MINI_ROUTES_ROOT'] ?? ($this->root . '/_routes');
-        $this->paths->routes = new Util\PathsRegistry($primaryRoutesPath);
-
-        // Views registry for templates
-        $primaryViewsPath = $_ENV['MINI_VIEWS_ROOT'] ?? ($this->root . '/_views');
-        $this->paths->views = new Util\PathsRegistry($primaryViewsPath);
 
         $this->debug = !empty($_ENV['DEBUG']);
 

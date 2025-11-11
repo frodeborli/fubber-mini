@@ -34,17 +34,22 @@
             "bootstrap.php",
             "functions.php",
             "src/Cache/functions.php",
+            "src/Converter/functions.php",
             "src/Database/functions.php",
+            "src/Dispatcher/functions.php",
             "src/Router/functions.php",
             "src/Http/functions.php",
             "src/I18n/functions.php",
+            "src/Template/functions.php",
             "src/Tables/functions.php",
             "src/Logger/functions.php",
             "src/Auth/functions.php",
             "src/Mailer/functions.php",
             "src/CLI/functions.php",
             "src/UUID/functions.php",
-            "src/Validator/functions.php"
+            "src/Validator/functions.php",
+            "src/Metadata/functions.php",
+            "src/Dispatcher/defaults.php"
         ]
     },
     "bin": [

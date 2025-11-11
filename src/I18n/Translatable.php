@@ -30,7 +30,7 @@ class Translatable implements \Stringable
     {
         // Get translator from container if available, otherwise fallback to direct interpolation
         try {
-            $translator = Mini::$mini->get(Translator::class);
+            $translator = Mini::$mini->get(TranslatorInterface::class);
             return $translator->translate($this);
         } catch (\Exception $e) {
             // Fallback if translator is not available or throws error

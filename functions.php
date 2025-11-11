@@ -17,86 +17,14 @@ use ReflectionClass;
  */
 
 /**
- * Render a template with provided variables
+ * Get current request instance
  *
- * Supports multi-level template inheritance via extend() and block() helpers.
- * Uses path registry to find templates in _views/ directory.
+ * Alias for \mini\Http\request() in the mini namespace.
  *
- * Simple templates:
- *   echo render('settings.php', ['user' => $user])
- *
- * With layout inheritance:
- *   // child.php
- *   <?php $extend('layout.php'); ?>
- *   <?php $block('title', 'My Page'); ?>
- *   <?php $block('content'); ?><p>Content here</p><?php $end(); ?>
- *
- *   // layout.php
- *   <html><head><title><?php $show('title', 'Untitled'); ?></title></head>
- *   <body><?php $show('content'); ?></body></html>
- *
- * Including sub-templates (partials):
- *   <?= mini\render('user-card.php', ['user' => $currentUser]) ?>
- *
- * @param string $template Template filename (e.g., 'settings.php', 'admin/dashboard.php')
- * @param array $vars Variables to extract for template
- * @return string Rendered content
+ * @return \Psr\Http\Message\ServerRequestInterface
  */
-function render(string $template, array $vars = []): string {
-    // Use path registry to find template
-    $templatePath = Mini::$mini->paths->views->findFirst($template);
-
-    if (!$templatePath) {
-        $searchedPaths = implode(', ', Mini::$mini->paths->views->getPaths());
-        throw new Exception("Template not found: $template (searched in: $searchedPaths)");
-    }
-
-    $ctx = new TplCtx();
-
-    // Make helper closures available in template scope
-    $extend = fn(string $file) => $ctx->extend($file);
-    $block  = fn(string $name, ?string $value = null) => $ctx->block($name, $value);
-    $end    = fn() => $ctx->end();
-    $show   = fn(string $name, string $default = '') => $ctx->show($name, $default);
-
-    // Merge blocks from lower-level (child) into current context BEFORE rendering
-    // This ensures $show() calls in parent templates can access child blocks
-    if (isset($vars['__blocks'])) {
-        $ctx->blocks = $vars['__blocks'] + $ctx->blocks;
-    }
-
-    // Isolated scope render function
-    $renderOnce = function(string $__file, array $__vars) use ($extend, $block, $end, $show) {
-        extract($__vars, EXTR_SKIP);
-        require $__file;
-    };
-
-    // Render template
-    ob_start();
-    try {
-        $renderOnce($templatePath, $vars);
-    } catch (Throwable $e) {
-        ob_end_clean();
-        return (string) $e;
-    }
-    $output = ob_get_clean();
-
-    // Capture any raw output as "content" ONLY if no child provided content
-    // and we didn't receive blocks from a child (meaning we're not a parent template)
-    if (!isset($ctx->blocks['content']) && $output !== '' && !isset($vars['__blocks'])) {
-        $ctx->blocks['content'] = $output;
-    }
-
-    // If this template extends another, recurse upward
-    if ($ctx->layout) {
-        $newVars = $vars;
-        $newVars['__blocks'] = $ctx->blocks;
-        return render($ctx->layout, $newVars);
-    }
-
-    // Otherwise, this is the topmost template — render final output
-    // If we have output (from a layout), return it; otherwise return content block
-    return $output !== '' ? $output : ($ctx->blocks['content'] ?? '');
+function request(): \Psr\Http\Message\ServerRequestInterface {
+    return \mini\Http\request();
 }
 
 /**
@@ -191,7 +119,7 @@ function url(string|\Psr\Http\Message\UriInterface $path = '', array $query = []
     }
 
     // Normalize path (handle .. and .)
-    $resolvedPath = normalizePath($resolvedPath);
+    $resolvedPath = (string) (new \mini\Util\Path($resolvedPath))->canonical();
 
     // Merge query parameters: input query + $query array
     parse_str($inputQuery, $inputQueryParams);
@@ -202,32 +130,6 @@ function url(string|\Psr\Http\Message\UriInterface $path = '', array $query = []
         ->withPath($resolvedPath)
         ->withQuery($mergedQuery)
         ->withFragment($inputFragment);
-}
-
-/**
- * Normalize path by resolving '.' and '..' segments
- *
- * @param string $path Path to normalize
- * @return string Normalized path
- */
-function normalizePath(string $path): string {
-    $parts = explode('/', $path);
-    $resolved = [];
-
-    foreach ($parts as $part) {
-        if ($part === '' || $part === '.') {
-            continue;
-        }
-        if ($part === '..') {
-            if (count($resolved) > 0 && end($resolved) !== '..') {
-                array_pop($resolved);
-            }
-        } else {
-            $resolved[] = $part;
-        }
-    }
-
-    return '/' . implode('/', $resolved);
 }
 
 /**
@@ -304,13 +206,14 @@ function bootstrap(): void
         throw new \ErrorException($message, 0, $severity, $file, $line);
     });
 
-    // Set up exception handler (renders error pages) - only if none exists
+    // Set up exception handler (fallback for bootstrap errors) - only if none exists
     $existingHandler = set_exception_handler(null);
     if ($existingHandler !== null) {
         // Developer has their own exception handler - keep it
         set_exception_handler($existingHandler);
     } else {
-        // No handler exists - set Mini's default handler
+        // No handler exists - set Mini's fallback handler
+        // Note: When using dispatch(), Dispatcher handles exceptions during request lifecycle
         set_exception_handler(function(\Throwable $exception) {
             error_log("Uncaught exception: " . $exception->getMessage() . " in " . $exception->getFile() . " line " . $exception->getLine());
             error_log("Stack trace: " . $exception->getTraceAsString());
@@ -328,23 +231,14 @@ function bootstrap(): void
                 ob_clean();
             }
 
-            if ($exception instanceof \mini\Http\AccessDeniedException) {
-                handleAccessDeniedException($exception);
-            } elseif ($exception instanceof \mini\Http\HttpException) {
-                handleHttpException($exception);
+            // Render basic error page
+            http_response_code(500);
+            echo "<h1>500 - Internal Server Error</h1>";
+            if (Mini::$mini->debug) {
+                echo "<pre>" . htmlspecialchars($exception->getMessage()) . "\n\n";
+                echo $exception->getTraceAsString() . "</pre>";
             } else {
-                try {
-                    showErrorPage(500, $exception);
-                } catch (\Throwable $e) {
-                    http_response_code(500);
-                    echo "<h1>Internal Server Error</h1>";
-                    echo "<p>An unexpected error occurred.</p>";
-                    if (Mini::$mini->debug) {
-                        echo "<pre>" . htmlspecialchars($exception->getMessage()) . "</pre>";
-                        echo "<hr><p>Error page also failed:</p>";
-                        echo "<pre>" . htmlspecialchars($e->getMessage()) . "</pre>";
-                    }
-                }
+                echo "<p>An unexpected error occurred.</p>";
             }
         });
     }
@@ -392,6 +286,11 @@ function bootstrap(): void
  *
  * Route handlers in _routes/ don't need to call bootstrap().
  */
+// dispatch() function moved to src/Dispatcher/functions.php
+
+/**
+ * @deprecated Use dispatch() instead. Will be removed in future version.
+ */
 function router(): void
 {
     // Set global flag that routing is enabled
@@ -412,71 +311,6 @@ function router(): void
     }
 }
 
-
-/**
- * Handle other HTTP exceptions
- */
-function handleHttpException(\mini\Http\HttpException $exception): void
-{
-    showErrorPage($exception->getStatusCode(), $exception);
-}
-
-/**
- * Show error page with fallback logic
- */
-function showErrorPage(int $statusCode, \Throwable $exception): void
-{
-    // Error pages stored in project root (not web-accessible, like 404.php)
-    $errorFile = Mini::$mini->root . "/_errors/{$statusCode}.php";
-
-    // If the specific error page doesn't exist, try fallbacks for auth errors
-    if (!file_exists($errorFile)) {
-        if ($statusCode === 401 && file_exists(Mini::$mini->root . "/_errors/403.php")) {
-            $errorFile = Mini::$mini->root . "/_errors/403.php";
-        } elseif ($statusCode === 403 && file_exists(Mini::$mini->root . "/_errors/401.php")) {
-            $errorFile = Mini::$mini->root . "/_errors/401.php";
-        }
-    }
-
-    // Set response code
-    http_response_code($statusCode);
-
-    if (file_exists($errorFile)) {
-        // Make exception available to error page
-        $httpException = $exception;
-        require $errorFile;
-    } else {
-        // Fallback error page
-        $statusText = getHttpStatusText($statusCode);
-        echo "<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-    <meta charset=\"UTF-8\">
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
-    <title>{$statusCode} - {$statusText}</title>
-</head>
-<body>
-    <h1>{$statusCode} - {$statusText}</h1>
-    <p>" . htmlspecialchars($exception->getMessage()) . "</p>
-</body>
-</html>";
-    }
-}
-
-/**
- * Get HTTP status text for status code
- */
-function getHttpStatusText(int $statusCode): string
-{
-    return match($statusCode) {
-        400 => 'Bad Request',
-        401 => 'Unauthorized',
-        403 => 'Forbidden',
-        404 => 'Not Found',
-        500 => 'Internal Server Error',
-        default => 'Error'
-    };
-}
 
 /**
  * Create a CSRF token for a specific action
