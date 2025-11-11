@@ -109,10 +109,12 @@ class HttpDispatcher
      * 1. Transition to Ready phase (enables Scoped services)
      * 2. Create PSR-7 ServerRequest from PHP request globals
      * 3. Set as current request (available via mini\request())
-     * 4. Get RequestHandlerInterface from container (Router)
-     * 5. Handle request and get response
-     * 6. Catch exceptions and convert to responses
-     * 7. Emit response to browser
+     * 4. Populate request globals ($_GET, $_POST)
+     * 5. Add request replacement callback for Router
+     * 6. Get RequestHandlerInterface from container (Router)
+     * 7. Handle request and get response
+     * 8. Catch exceptions and convert to responses
+     * 9. Emit response to browser
      *
      * @return void
      */
@@ -135,7 +137,17 @@ class HttpDispatcher
             // 3. Set current request (makes it available via mini\request())
             $this->currentServerRequest = $serverRequest;
 
-            // 4. Add callback to allow Router to replace current request
+            // 4. Populate request globals from ServerRequest
+            //    This makes $_GET, $_POST available in controllers
+            //    Note: In production, $_GET is already populated by the SAPI (Apache/nginx/php-fpm)
+            //    We re-populate here to ensure consistency with PSR-7 request
+            $_GET = $serverRequest->getQueryParams();
+            $parsedBody = $serverRequest->getParsedBody();
+            if (is_array($parsedBody)) {
+                $_POST = $parsedBody;
+            }
+
+            // 5. Add callback to allow Router to replace current request
             //    Router uses this after Redirect/Reroute to update the request
             $serverRequest = $serverRequest->withAttribute(
                 'mini.dispatcher.replaceRequest',

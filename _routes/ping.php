@@ -1,3 +1,3 @@
 <?php
-// Simple string return - automatically converted to text/plain response
-return "pong";
+// Return query parameter or default to "pong"
+return $_GET['say'] ?? 'pong';
