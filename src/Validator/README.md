@@ -70,6 +70,164 @@ $tagsValidator = validator()
     ->uniqueItems();
 ```
 
+## Attribute-Based Validation
+
+Define validation schemas using PHP 8 attributes on classes and interfaces:
+
+```php
+use mini\Validator\Attributes as V;
+
+// Define validation on an interface (no properties needed!)
+#[V\Field(name: 'username', type: 'string', minLength: 3, maxLength: 20, required: true)]
+#[V\Field(name: 'email', type: 'string', format: 'email', required: true)]
+#[V\Field(name: 'age', type: 'integer', minimum: 18, maximum: 120)]
+interface LoginForm {}
+
+// Get validator from class/interface
+$validator = validator(LoginForm::class);
+$errors = $validator->isInvalid($_POST);
+```
+
+### Property-Based Attributes
+
+Add validation directly to class properties:
+
+```php
+use mini\Validator\Attributes as V;
+
+class User {
+    #[V\Type('string')]
+    #[V\MinLength(3, 'Username must be at least 3 characters.')]
+    #[V\MaxLength(20, 'Username cannot exceed 20 characters.')]
+    #[V\Pattern('/^[a-zA-Z0-9_]+$/', 'Only letters, numbers, and underscores allowed.')]
+    #[V\Required('Username is required.')]
+    public string $username;
+
+    #[V\Type('string')]
+    #[V\Format('email')]
+    #[V\Required('Email is required.')]
+    public string $email;
+
+    #[V\Type('integer')]
+    #[V\Minimum(18, 'Must be at least 18 years old.')]
+    public int $age;
+}
+
+$validator = validator(User::class);
+$errors = $validator->isInvalid($_POST);
+```
+
+### Field Attribute (Property-less)
+
+The `#[Field]` attribute allows defining validation schemas without actual properties. Perfect for:
+- **Interfaces** - Define validation contracts
+- **DTOs** - Lean data transfer objects
+- **Form schemas** - Validation without class structure
+
+```php
+// Complex validation on empty class
+#[V\Field(name: 'id', type: 'string', pattern: '/^[A-Z]{2}\d{6}$/', required: true)]
+#[V\Field(name: 'status', type: 'string', enum: ['active', 'pending', 'disabled'], required: true)]
+#[V\Field(name: 'tags', type: 'array', minItems: 1, maxItems: 5, uniqueItems: true)]
+class AccountDTO {}
+```
+
+All validation rules can be passed as named parameters to `#[Field]`:
+- `name` - Field name (required)
+- `type` - JSON Schema type
+- `minLength`, `maxLength` - String constraints
+- `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` - Numeric constraints
+- `multipleOf` - Number must be multiple of value
+- `pattern` - Regex pattern
+- `format` - String format (email, uri, date, uuid, etc.)
+- `minItems`, `maxItems`, `uniqueItems` - Array constraints
+- `minProperties`, `maxProperties` - Object constraints
+- `required` - Mark field as required
+- `const` - Exact value match
+- `enum` - Array of allowed values
+- `message` - Custom error message
+
+### Mixed Approach
+
+Combine `#[Field]` attributes with property attributes:
+
+```php
+#[V\Field(name: 'metadata', type: 'object', minProperties: 1)]
+class Product {
+    #[V\Type('string'), V\MinLength(3), V\Required()]
+    public string $name;
+
+    #[V\Type('number'), V\Minimum(0)]
+    public float $price;
+}
+
+// Validates: name, price (properties) + metadata (Field attribute)
+$validator = validator(Product::class);
+```
+
+### Validator Registry & Caching
+
+Validators are automatically cached for performance:
+
+```php
+// First call: builds from attributes
+$validator = validator(User::class);
+
+// Subsequent calls: returns cached validator (0.0005ms per call)
+$validator = validator(User::class);
+```
+
+Manual registration for custom validators:
+
+```php
+use mini\Validator\ValidatorStore;
+
+$store = Mini::$mini->get(ValidatorStore::class);
+$store['custom-validator'] = validator()
+    ->type('string')
+    ->minLength(5);
+
+// Retrieve custom validator
+$validator = validator('custom-validator');
+```
+
+### Available Attributes
+
+All validator rules have corresponding attributes:
+
+**Type & Required:**
+- `#[Type(string $type, ?string $message)]`
+- `#[Required(?string $message)]`
+
+**String Constraints:**
+- `#[MinLength(int $min, ?string $message)]`
+- `#[MaxLength(int $max, ?string $message)]`
+- `#[Pattern(string $pattern, ?string $message)]`
+- `#[Format(string $format, ?string $message)]`
+
+**Numeric Constraints:**
+- `#[Minimum(int|float $min, ?string $message)]`
+- `#[Maximum(int|float $max, ?string $message)]`
+- `#[ExclusiveMinimum(int|float $min, ?string $message)]`
+- `#[ExclusiveMaximum(int|float $max, ?string $message)]`
+- `#[MultipleOf(int|float $divisor, ?string $message)]`
+
+**Array Constraints:**
+- `#[MinItems(int $min, ?string $message)]`
+- `#[MaxItems(int $max, ?string $message)]`
+- `#[UniqueItems()]`
+
+**Object Constraints:**
+- `#[MinProperties(int $min, ?string $message)]`
+- `#[MaxProperties(int $max, ?string $message)]`
+
+**Value Constraints:**
+- `#[Const(mixed $value, ?string $message)]`
+- `#[Enum(array $values, ?string $message)]`
+
+**Virtual Fields:**
+- `#[Field(...)]` - Define field without property (repeatable)
+
 ## Object Validation
 
 Validate complex nested objects with property-specific validators:
