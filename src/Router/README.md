@@ -346,7 +346,7 @@ use Psr\Http\Server\RequestHandlerInterface;
 
 return new class implements RequestHandlerInterface {
     public function handle(ServerRequestInterface $request): ResponseInterface {
-        $response = \mini\Http\create_response(200, 'Custom handler response');
+        $response = new \mini\Http\Message\Response('Custom handler response', [], 200);
         return $response->withHeader('X-Custom', 'true');
     }
 };

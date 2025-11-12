@@ -47,21 +47,35 @@ Mini::$mini->addService(
 
 #### 2. Create PSR-7 ServerRequest from Globals
 
+HttpDispatcher creates the ServerRequest directly from PHP superglobals:
+
 ```php
-$psr17Factory = new Psr17Factory();
-$creator = new ServerRequestCreator(
-    $psr17Factory, // ServerRequestFactory
-    $psr17Factory, // UriFactory
-    $psr17Factory, // UploadedFileFactory
-    $psr17Factory  // StreamFactory
+// HttpDispatcher internals (SAPI-specific)
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+$requestTarget = $_SERVER['REQUEST_URI'] ?? '/';
+$body = Stream::create(fopen('php://input', 'r'));
+$headers = $this->extractHeadersFromServer($_SERVER);
+
+$serverRequest = new ServerRequest(
+    method: $method,
+    requestTarget: $requestTarget,
+    body: $body,
+    headers: $headers,
+    queryParams: null, // Derived from request target
+    serverParams: $_SERVER,
+    cookieParams: $_COOKIE,
+    uploadedFiles: $uploadedFiles,
+    parsedBody: $_POST,
+    protocolVersion: $protocolVersion
 );
-$serverRequest = $creator->fromGlobals();
 ```
 
-**fromGlobals() behavior:**
-- Reads from `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`
-- Creates immutable PSR-7 ServerRequest object
-- Parses multipart/form-data, application/json bodies
+**Request creation behavior:**
+- Reads from `$_SERVER`, `$_POST`, `$_COOKIE`, `$_FILES`
+- Uses request target (not URI) as source of truth
+- Query params derived from request target
+- Headers extracted from `$_SERVER` (HTTP_* keys)
+- HTTPS detected from `$_SERVER['HTTPS']`
 - Handles uploaded files according to PSR-7 spec
 
 **SAPI compatibility:**
