@@ -14,7 +14,7 @@ use mini\Mini;
 use mini\Converter\ConverterRegistryInterface;
 use mini\Dispatcher\HttpDispatcher;
 use Psr\Http\Message\ResponseInterface;
-use Nyholm\Psr7\Response;
+use mini\Http\Message\Response;
 
 // ============================================================================
 // Register Default Converters (for controller return values)
@@ -24,13 +24,13 @@ $converters = Mini::$mini->get(ConverterRegistryInterface::class);
 
 // string → ResponseInterface (text/plain responses)
 $converters->register(function(string $content): ResponseInterface {
-    return new Response(200, ['Content-Type' => 'text/plain; charset=utf-8'], $content);
+    return new Response($content, ['Content-Type' => 'text/plain; charset=utf-8'], 200);
 });
 
 // array → ResponseInterface (JSON responses)
 $converters->register(function(array $data): ResponseInterface {
     $json = json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    return new Response(200, ['Content-Type' => 'application/json; charset=utf-8'], $json);
+    return new Response($json, ['Content-Type' => 'application/json; charset=utf-8'], 200);
 });
 
 // ResponseInterface → ResponseInterface (passthrough)
@@ -63,7 +63,7 @@ $dispatcher->registerExceptionConverter(function(\mini\Http\HttpException $e): R
         htmlspecialchars($message)
     );
 
-    return new Response($statusCode, ['Content-Type' => 'text/html; charset=utf-8'], $body);
+    return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], $statusCode);
 });
 
 // Handle generic exceptions (500 Internal Server Error)
@@ -84,5 +84,5 @@ $dispatcher->registerExceptionConverter(function(\Throwable $e): ResponseInterfa
         htmlspecialchars($message)
     );
 
-    return new Response($statusCode, ['Content-Type' => 'text/html; charset=utf-8'], $body);
+    return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], $statusCode);
 });

@@ -17,17 +17,6 @@ use ReflectionClass;
  */
 
 /**
- * Get current request instance
- *
- * Alias for \mini\Http\request() in the mini namespace.
- *
- * @return \Psr\Http\Message\ServerRequestInterface
- */
-function request(): \Psr\Http\Message\ServerRequestInterface {
-    return \mini\Http\request();
-}
-
-/**
  * Redirect to URL and exit
  *
  * @param string $url Target URL for redirect
@@ -87,7 +76,7 @@ function url(string|\Psr\Http\Message\UriInterface $path = '', array $query = []
     }
 
     // Parse base URL
-    $base = new \Nyholm\Psr7\Uri($baseUrl);
+    $base = new \mini\Http\Message\Uri($baseUrl);
 
     // Extract path from input (strip scheme/host if present)
     if ($path instanceof \Psr\Http\Message\UriInterface) {
@@ -96,7 +85,7 @@ function url(string|\Psr\Http\Message\UriInterface $path = '', array $query = []
         $inputFragment = $path->getFragment();
     } else {
         // Parse string to extract path, query, fragment
-        $parsed = new \Nyholm\Psr7\Uri($path);
+        $parsed = new \mini\Http\Message\Uri($path);
         $inputPath = $parsed->getPath();
         $inputQuery = $parsed->getQuery();
         $inputFragment = $parsed->getFragment();

@@ -81,10 +81,10 @@ $dispatcher = Mini::$mini->get(\mini\Dispatcher\HttpDispatcher::class);
 // Handle 404 errors
 $dispatcher->registerExceptionConverter(
     function(\mini\Http\NotFoundException $e): \Psr\Http\Message\ResponseInterface {
-        return new \Nyholm\Psr7\Response(
-            404,
+        return new \mini\Http\Message\Response(
+            render('errors/404'),
             ['Content-Type' => 'text/html'],
-            render('errors/404')
+            404
         );
     }
 );
@@ -93,10 +93,10 @@ $dispatcher->registerExceptionConverter(
 $dispatcher->registerExceptionConverter(
     function(\mini\Validator\ValidationException $e): \Psr\Http\Message\ResponseInterface {
         $json = json_encode(['errors' => $e->errors]);
-        return new \Nyholm\Psr7\Response(
-            400,
+        return new \mini\Http\Message\Response(
+            $json,
             ['Content-Type' => 'application/json'],
-            $json
+            400
         );
     }
 );
@@ -106,10 +106,10 @@ $dispatcher->registerExceptionConverter(
     function(\Throwable $e): \Psr\Http\Message\ResponseInterface {
         $statusCode = 500;
         $message = Mini::$mini->debug ? $e->getMessage() : 'Internal Server Error';
-        return new \Nyholm\Psr7\Response(
-            $statusCode,
+        return new \mini\Http\Message\Response(
+            render('errors/500', compact('message')),
             ['Content-Type' => 'text/html'],
-            render('errors/500', compact('message'))
+            $statusCode
         );
     }
 );

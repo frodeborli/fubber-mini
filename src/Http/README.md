@@ -4,22 +4,29 @@ This namespace provides HTTP-related utilities including PSR-7 message support a
 
 ## Purpose
 
-Mini primarily uses native PHP (`$_GET`, `$_POST`, `header()`, etc.), but provides PSR-7 helpers when you need to integrate with PSR-7/PSR-15 middleware or libraries.
+Mini primarily uses native PHP (`$_GET`, `$_POST`, `header()`, `echo`), but provides PSR-7 support for integrating with PSR-7/PSR-15 middleware or libraries.
 
-## PSR-7 Helpers
+## PSR-7 Usage
 
-Convenience functions for working with PSR-7 HTTP messages (requires `nyholm/psr7` and `nyholm/psr7-server`):
+Mini includes a native PSR-7 implementation. Use it when integrating with PSR-7/PSR-15 libraries:
 
 ```php
-// Create PSR-7 request from globals
-$request = \mini\Http\create_request_from_globals();
+// Get current request
+$request = \mini\request();
+$query = $request->getQueryParams();
+$body = $request->getParsedBody();
 
 // Create responses
-$response = \mini\Http\create_response(200, 'Hello World');
-$jsonResponse = \mini\Http\create_json_response(['status' => 'ok']);
+use mini\Http\Message\Response;
+$response = new Response('Hello World', [], 200);
+$jsonResponse = new Response(
+    json_encode(['status' => 'ok']),
+    ['Content-Type' => 'application/json'],
+    200
+);
 
-// Send response to client
-\mini\Http\emit_response($response);
+// HttpDispatcher handles response emission automatically
+return $response;
 ```
 
 ## Error Handling

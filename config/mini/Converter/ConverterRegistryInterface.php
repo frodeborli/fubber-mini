@@ -36,6 +36,6 @@
 
 use mini\Converter\ConverterRegistry;
 use Psr\Http\Message\ResponseInterface;
-use Nyholm\Psr7\Response;
+use mini\Http\Message\Response;
 
 return new ConverterRegistry();

@@ -70,54 +70,42 @@ class Router implements RequestHandlerInterface
     {
         // Iterative route resolution loop
         while (true) {
+            // 1. Resolve request path to controller file
+            $requestTarget = $request->getRequestTarget();
+            $path = parse_url($requestTarget, PHP_URL_PATH) ?? '/';
+
+            // Check if this is an internal redirect (allows underscore-prefixed paths)
+            $redirectCount = $request->getAttribute('mini.router.redirectCount', 0);
+
+            $internalRequest = $redirectCount > 0;
+            $handlerFile = $this->resolveHandlerFile($path, $internalRequest, $resolvedPath);
+
+            if ($handlerFile === null) {
+                throw new \mini\Http\NotFoundException("Not Found: $path");
+            }
+
+            // 2. Annotate request with route info
+            $request = $request->withAttribute('mini.router.handlerFile', $handlerFile);
+
+            // Parse query string from request target and update query params explicitly
+            // Query params are separate from request target per PSR-7, so we sync them here
+            $requestTarget = $request->getRequestTarget();
+            $queryString = parse_url($requestTarget, PHP_URL_QUERY);
+            if ($queryString !== null && $queryString !== '') {
+                parse_str($queryString, $queryParams);
+                $request = $request->withQueryParams($queryParams);
+            } elseif ($redirectCount > 0) {
+                // If we redirected and there's no query string, clear query params
+                $request = $request->withQueryParams([]);
+            }
+
+            // 3. Replace global request instance
+            $this->replaceGlobalRequest($request);
+
+            // 4. Include controller file and get return value
             try {
-                // 1. Resolve request path to controller file
-                $requestTarget = $request->getRequestTarget();
-                $path = parse_url($requestTarget, PHP_URL_PATH) ?? '/';
-
-                // Check if this is an internal redirect (allows underscore-prefixed paths)
-                $redirectCount = $request->getAttribute('mini.router.redirectCount', 0);
-                $allowUnderscore = $redirectCount > 0;
-                $handlerFile = $this->resolveHandlerFile($path, $allowUnderscore);
-
-                if ($handlerFile === null) {
-                    throw new \mini\Http\NotFoundException("Not Found: $path");
-                }
-
-                // 2. Annotate request with route info
-                $request = $request->withAttribute('mini.router.handlerFile', $handlerFile);
-
-                // 3. Replace global request instance
-                $this->replaceGlobalRequest($request);
-
-                // 4. Include controller file and get return value
-                $returnValue = require $handlerFile;
-
-                // 5. Handle null return (classical PHP)
-                if ($returnValue === null) {
-                    throw new ResponseAlreadySentException();
-                }
-
-                // 6. Check if return value is already a response
-                if ($returnValue instanceof ResponseInterface) {
-                    return $returnValue;
-                }
-
-                // 7. Convert to response
-                $response = \mini\convert($returnValue, ResponseInterface::class);
-
-                if ($response === null) {
-                    throw new \RuntimeException(
-                        'Controller returned ' . get_debug_type($returnValue) .
-                        ' but no converter is registered to convert it to ResponseInterface'
-                    );
-                }
-
-                return $response;
-
+                $returnValue = (static function() use ($handlerFile) { return require $handlerFile; })();
             } catch (Redirect $redirect) {
-                // Increment redirect count and check limit
-                $redirectCount = 1 + $request->getAttribute('mini.router.redirectCount', 0);
                 if ($redirectCount > self::MAX_REDIRECTS) {
                     throw new \RuntimeException(
                         'Too many redirects (limit: ' . self::MAX_REDIRECTS . '). ' .
@@ -126,30 +114,50 @@ class Router implements RequestHandlerInterface
                 }
 
                 // Handle Redirect: resolve target path and restart routing
-                $request = $this->handleRedirect($request, $handlerFile ?? null, $redirect->target);
-                $request = $request->withAttribute('mini.router.redirectCount', $redirectCount);
+                $request = $this->handleRedirect($request, $resolvedPath, $redirect->target);
                 continue;
 
             } catch (Reroute $reroute) {
-                // Increment redirect count and check limit (reroute counts as redirect)
-                $redirectCount = 1 + $request->getAttribute('mini.router.redirectCount', 0);
+                if (!str_ends_with($handlerFile, '/__DEFAULT__.php')) {
+                    throw new \RuntimeException("Can only use Reroute in __DEFAULT__ routes");
+                }
                 if ($redirectCount > self::MAX_REDIRECTS) {
                     throw new \RuntimeException(
-                        'Too many redirects (limit: ' . self::MAX_REDIRECTS . '). ' .
+                        'Too many internal redirects (limit: ' . self::MAX_REDIRECTS . '). ' .
                         'Possible infinite redirect loop in Reroute patterns.'
                     );
                 }
 
-                // Handle Reroute: match patterns and restart routing
-                $request = $this->handleReroute($request, $handlerFile ?? null, $reroute->routes);
-                $request = $request->withAttribute('mini.router.redirectCount', $redirectCount);
+                $request = $this->handleReroute($request, $resolvedPath, $reroute->routes);
                 continue;
             }
+
+            // 5. Handle null return (classical PHP)
+            if ($returnValue === null) {
+                throw new ResponseAlreadySentException();
+            }
+
+            // 6. Check if return value is already a response
+            if ($returnValue instanceof ResponseInterface) {
+                return $returnValue;
+            }
+
+            // 7. Convert to response
+            $response = \mini\convert($returnValue, ResponseInterface::class);
+
+            if ($response === null) {
+                throw new \RuntimeException(
+                    'Controller returned ' . get_debug_type($returnValue) .
+                    ' but no converter is registered to convert it to ResponseInterface'
+                );
+            }
+
+            return $response;
         }
     }
 
     /**
-     * Resolve request path to controller file
+     * Resolve request path to controller file. Supports internal redirects (allowing _* path components) if $internalRequest is true
      *
      * Tries multiple candidate files in order of specificity:
      * - /path → ["_routes/path.php", "_routes/__DEFAULT__.php"]
@@ -161,128 +169,55 @@ class Router implements RequestHandlerInterface
      * - Internal redirects: Underscore paths allowed (developer-controlled)
      *
      * @param string $path Request path (without query string)
-     * @param bool $allowUnderscore Whether to allow underscore-prefixed paths
+     * @param bool $internalRequest Whether to allow underscore-prefixed paths
+     * @param ?string $resolvedPath The path that was found the route registry
      * @return string|null Absolute path to controller file, or null if not found
      */
-    private function resolveHandlerFile(string $path, bool $allowUnderscore = false): ?string
+    private function resolveHandlerFile(string $path, bool $internalRequest = false, ?string &$resolvedPath=null): ?string
     {
-        // Normalize path
-        $path = '/' . trim($path, '/');
-
-        // Security: Block client requests to underscore-prefixed paths
-        if (!$allowUnderscore && $this->pathContainsUnderscoreComponent($path)) {
-            return null; // 404 - not routable
+        if ($path === '' || $path[0] !== '/') {
+            throw new \LogicException("Router::resolveHandlerFile expects absolute paths from the root of the router");
         }
 
-        // Build candidate list
-        $candidates = $this->buildCandidateFiles($path);
+        $isDir = substr($path, -1) === '/';
+        $parts = explode("/", substr($path, 1));
+        $partCount = count($parts);
 
-        // Try each candidate
-        foreach ($candidates as $candidate) {
-            $fullPath = Mini::$mini->paths->routes->findFirst($candidate);
-            if ($fullPath) {
-                return $fullPath;
+        // validate path
+        foreach ($parts as $i => $part) {
+            if ($isDir && $i === $partCount - 1) {
+                // empty as expected
+            } elseif ($part === '' || (!$internalRequest && $part[0] === '_')) {
+                return null;
             }
         }
+
+        // Route file registry:
+        $routes = Mini::$mini->paths->routes;
+
+        // First try direct match
+        if (null !== ($match = $routes->findFirst($resolvedPath = implode("/", $parts) . ($isDir ? 'index.php' : '.php')))) {
+            // Set resolvedPath to parent directory for redirect resolution
+            // e.g., "mini/_page.php" -> "mini/", "mini/index.php" -> "mini/"
+            $resolvedPath = dirname($resolvedPath) . '/';
+            if ($resolvedPath === './') {
+                $resolvedPath = '';
+            }
+            return $match;
+        }
+
+        // no direct match, so we must look for __DEFAULT__.php files
+        for ($i = $partCount - 1; $i >= 0; $i--) {
+            $candidatePath = implode("/", array_slice($parts, 0, $i)) . '/__DEFAULT__.php';
+            if (null !== ($match = $routes->findFirst($candidatePath))) {
+                $resolvedPath = dirname($candidatePath) . '/';
+                return $match;
+            }
+        }
+
+        $resolvedPath = null;
 
         return null;
-    }
-
-    /**
-     * Check if path contains any underscore-prefixed components
-     *
-     * Security check for client requests.
-     * Examples:
-     * - /_ping → true (blocked)
-     * - /users/_internal → true (blocked)
-     * - /user-profile → false (hyphen, not underscore)
-     *
-     * @param string $path
-     * @return bool
-     */
-    private function pathContainsUnderscoreComponent(string $path): bool
-    {
-        $parts = explode('/', trim($path, '/'));
-        foreach ($parts as $part) {
-            if ($part !== '' && str_starts_with($part, '_')) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Build list of candidate files for a given path
-     *
-     * Returns candidates in order of specificity (most specific first).
-     *
-     * IMPORTANT: Trailing slash matters!
-     * - /path → path.php (NOT path/index.php)
-     * - /path/ → path/index.php (NOT path.php)
-     *
-     * @param string $path Normalized path (leading slash)
-     * @return array<string> List of candidate files to try
-     */
-    private function buildCandidateFiles(string $path): array
-    {
-        $candidates = [];
-
-        // Handle root path specially
-        if ($path === '/') {
-            return ['index.php', '__DEFAULT__.php'];
-        }
-
-        // Check if path ends with slash
-        $hasTrailingSlash = str_ends_with($path, '/');
-
-        if ($hasTrailingSlash) {
-            // Path with trailing slash: /users/123/
-            // Try: users/123/index.php, users/123/__DEFAULT__.php, users/__DEFAULT__.php, __DEFAULT__.php
-            $pathWithoutSlash = rtrim($path, '/');
-            $candidates[] = trim($pathWithoutSlash, '/') . '/index.php';
-            $candidates[] = trim($pathWithoutSlash, '/') . '/__DEFAULT__.php';
-
-            // Add parent __DEFAULT__.php files
-            $this->addParentDefaults($pathWithoutSlash, $candidates);
-
-        } else {
-            // Path without trailing slash: /users/123
-            // Try: users/123.php, users/__DEFAULT__.php, __DEFAULT__.php
-            $candidates[] = trim($path, '/') . '.php';
-
-            // Add __DEFAULT__.php files from parent directories
-            $dir = dirname($path);
-            if ($dir === '/') {
-                $candidates[] = '__DEFAULT__.php';
-            } else {
-                $this->addParentDefaults($dir, $candidates);
-            }
-        }
-
-        return $candidates;
-    }
-
-    /**
-     * Add parent __DEFAULT__.php files to candidates list
-     *
-     * @param string $path Path to get parents for
-     * @param array $candidates Candidates array to append to
-     * @return void
-     */
-    private function addParentDefaults(string $path, array &$candidates): void
-    {
-        $parts = explode('/', trim($path, '/'));
-
-        // Walk up the directory tree
-        while (count($parts) > 0) {
-            array_pop($parts);
-            if (count($parts) > 0) {
-                $candidates[] = implode('/', $parts) . '/__DEFAULT__.php';
-            }
-        }
-
-        // Root __DEFAULT__.php
-        $candidates[] = '__DEFAULT__.php';
     }
 
     /**
@@ -296,37 +231,31 @@ class Router implements RequestHandlerInterface
      * @param string $target Redirect target REQUEST PATH (e.g., "../_user?id=123")
      * @return ServerRequestInterface Updated request
      */
-    private function handleRedirect(ServerRequestInterface $request, ?string $currentFile, string $target): ServerRequestInterface
+    private function handleRedirect(ServerRequestInterface $request, string $resolvedPath, string $target): ServerRequestInterface
     {
-        // Resolve target path relative to current file
-        $resolvedPath = $this->resolveRedirectPath($currentFile, $target);
 
-        // Parse query string from target
-        $parts = parse_url($resolvedPath);
-        $path = $parts['path'] ?? $resolvedPath;
-        $queryString = $parts['query'] ?? '';
+        $requestTarget = $request->getRequestTarget();
 
-        // Parse query params
-        $queryParams = [];
-        if ($queryString !== '') {
-            parse_str($queryString, $queryParams);
+        $rtPath = new \mini\Util\Path('/' . $resolvedPath);
+
+        // Split target into path and query string
+        $targetParts = explode("?", $target, 2);
+        $targetPath = $targetParts[0];
+        $targetQuery = $targetParts[1] ?? '';
+
+        // Resolve the new path
+        $newPath = $rtPath->join($targetPath);
+
+        // Build complete request target (path + query string)
+        $newRequestTarget = (string) $newPath;
+        if ($targetQuery !== '') {
+            $newRequestTarget .= '?' . $targetQuery;
         }
 
-        // Build new request target
-        $newTarget = $path;
-        if ($queryString !== '') {
-            $newTarget .= '?' . $queryString;
-        }
+        // Update request target
+        $request = $this->incrementRedirectCount($request)->withRequestTarget($newRequestTarget);
 
-        // Update request
-        $uri = $request->getUri()->withPath($path)->withQuery($queryString);
-        $newRequest = $request
-            ->withUri($uri)
-            ->withQueryParams(array_merge($request->getQueryParams(), $queryParams))
-            ->withAttribute('mini.previousRequest', $request)
-            ->withRequestTarget($newTarget);
-
-        return $newRequest;
+        return $request;
     }
 
     /**
@@ -336,34 +265,52 @@ class Router implements RequestHandlerInterface
      * Only valid from __DEFAULT__.php files.
      *
      * @param ServerRequestInterface $request Current request
-     * @param string|null $currentFile Current controller file path
+     * @param string|null $resolvedPath The url path where rerouting happens from
      * @param array $routes Pattern => target mapping
      * @return ServerRequestInterface Updated request
      * @throws \RuntimeException If not called from __DEFAULT__.php
      */
-    private function handleReroute(ServerRequestInterface $request, ?string $currentFile, array $routes): ServerRequestInterface
+    private function handleReroute(ServerRequestInterface $request, string $resolvedPath, array $routes): ServerRequestInterface
     {
-        // Verify called from __DEFAULT__.php
-        if ($currentFile === null || !str_ends_with(basename($currentFile), '__DEFAULT__.php')) {
-            throw new \RuntimeException('Reroute can only be used in __DEFAULT__.php files');
-        }
 
-        // Get current path relative to __DEFAULT__.php directory
-        $currentPath = parse_url($request->getRequestTarget(), PHP_URL_PATH) ?? '/';
-        $defaultDir = dirname($currentFile);
+        $requestTarget = $request->getRequestTarget();
+        $partialRequestTarget = substr($requestTarget, strlen($resolvedPath));
 
-        // Match patterns (simplified - you may want to use a proper pattern matcher)
         foreach ($routes as $pattern => $target) {
-            if ($this->matchPattern($pattern, $currentPath, $matches)) {
-                // Pattern matched - resolve target
-                $resolvedTarget = $this->resolveRerouteTarget($target, $matches, $defaultDir);
+            if ($this->matchPattern($pattern, $partialRequestTarget, $matches)) {
 
-                // Handle as redirect
-                return $this->handleRedirect($request, $currentFile, $resolvedTarget);
+                if ($target instanceof \Closure) {
+                    try {
+                        $target = $this->injectRunClosure($target, $matches);
+                    } catch (\Throwable $e) {
+                        throw new \RuntimeException("Reroute handlers must not throw exceptions; they must return a string path which will be resolved from the directory of the __DEFAULT__.php file (query parameters can be included): Example target: '../other-dir/_custom-handler?id=123' (relative or absolute path allowed), query parameters optional. Exception received:\n$e");
+                    }
+                } elseif (is_string($target)) {
+                } else {
+                    throw new \RuntimeException("Reroute target must be Closure or string, got " . get_debug_type($target));
+                }
+
+                return $this->handleRedirect($request, $resolvedPath, $target);
             }
         }
 
         throw new \mini\Http\NotFoundException("No route pattern matched: $currentPath");
+    }
+
+    private function injectRunClosure(\Closure $target, array $vars): string {
+        $rf = new \ReflectionFunction($target);
+
+        $finalArgs = [];
+
+        foreach ($rf->getParameters() as $rp) {
+            if (\array_key_exists($rp->name, $vars)) {
+                $finalArgs[] = $vars[$rp->name];
+            } else {
+                throw new \InvalidArgumentException("Unable to inject parameter named '" . $rp->name . "'");
+            }
+        }
+
+        return $target(...$finalArgs);
     }
 
     /**
@@ -410,16 +357,24 @@ class Router implements RequestHandlerInterface
     /**
      * Match a route pattern against a path
      *
-     * Simple pattern matching. Supports:
-     * - /{id}/ - Named parameter
-     * - / - Exact match
+     * Pattern matching supports:
+     * - Exact match: `/users` matches `/users`
+     * - Simple placeholder: `/{id}` matches `/123` (captures single segment, no slashes)
+     * - Constrained placeholder: `/{id:\d+}` matches `/123` but not `/abc`
+     * - Greedy placeholder: `/{path:.*}` matches `/foo/bar/baz` (captures everything including slashes)
      *
-     * @param string $pattern
-     * @param string $path
-     * @param array &$matches Output parameter matches
-     * @return bool
+     * Examples:
+     * - `/{id}` → matches `/123`, captures `['id' => '123']`
+     * - `/{id:\d+}` → matches `/123`, not `/abc`
+     * - `/{page:.*}` → matches `/foo/bar`, captures `['page' => 'foo/bar']`
+     * - `/users/{id}/posts/{slug:.*}` → matches `/users/42/posts/hello/world`
+     *
+     * @param string $pattern Route pattern with optional placeholders
+     * @param string $path Request path to match
+     * @param array &$matches Output array of captured parameters
+     * @return bool True if pattern matches, false otherwise
      */
-    private function matchPattern(string $pattern, string $path, array &$matches): bool
+    private function matchPattern(string $pattern, string $path, ?array &$matches = null): bool
     {
         // Exact match
         if ($pattern === $path) {
@@ -427,11 +382,22 @@ class Router implements RequestHandlerInterface
             return true;
         }
 
-        // Pattern matching - convert {id} to regex
-        $regex = preg_replace('/\{(\w+)\}/', '(?P<$1>[^/]+)', $pattern);
+        // Convert pattern to regex, supporting {name:regex} syntax
+        $regex = preg_replace_callback(
+            '/\{(\w+)(?::([^}]+))?\}/',
+            function ($m) {
+                $name = $m[1];
+                $constraint = $m[2] ?? '[^/]+';  // Default: match anything except slashes
+                return '(?P<' . $name . '>' . $constraint . ')';
+            },
+            $pattern
+        );
+
+        // Escape forward slashes and other regex special chars in the static parts
         $regex = '#^' . $regex . '$#';
 
         if (preg_match($regex, $path, $m)) {
+            // Filter to only named captures (string keys)
             $matches = array_filter($m, 'is_string', ARRAY_FILTER_USE_KEY);
             return true;
         }
@@ -485,5 +451,9 @@ class Router implements RequestHandlerInterface
         if ($callback instanceof \Closure) {
             $callback($request);
         }
+    }
+
+    private function incrementRedirectCount(ServerRequestInterface $request): ServerRequestInterface {
+        return $request->withAttribute('mini.router.redirectCount', 1 + $request->getAttribute('mini.router.redirectCount', 0));
     }
 }

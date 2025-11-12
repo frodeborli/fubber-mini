@@ -39,7 +39,7 @@ $response = convert($value, ResponseInterface::class);
 use mini\Mini;
 use mini\Converter\ConverterRegistryInterface;
 use Psr\Http\Message\ResponseInterface;
-use Nyholm\Psr7\Response;
+use mini\Http\Message\Response;
 
 // Get the converter registry
 $registry = Mini::$mini->get(ConverterRegistryInterface::class);

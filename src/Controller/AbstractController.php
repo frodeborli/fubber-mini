@@ -123,7 +123,8 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     protected function json(mixed $data, int $status = 200, array $headers = []): ResponseInterface
     {
-        $response = \mini\Http\create_json_response($data, $status);
+        $json = json_encode($data, JSON_THROW_ON_ERROR);
+        $response = new Response($json, ['Content-Type' => 'application/json'], $status);
 
         foreach ($headers as $name => $value) {
             $response = $response->withHeader($name, $value);
@@ -142,8 +143,7 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     protected function html(string $body, int $status = 200, array $headers = []): ResponseInterface
     {
-        $response = \mini\Http\create_response($status, $body)
-            ->withHeader('Content-Type', 'text/html; charset=utf-8');
+        $response = new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], $status);
 
         foreach ($headers as $name => $value) {
             $response = $response->withHeader($name, $value);
@@ -162,8 +162,7 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     protected function text(string $body, int $status = 200, array $headers = []): ResponseInterface
     {
-        $response = \mini\Http\create_response($status, $body)
-            ->withHeader('Content-Type', 'text/plain; charset=utf-8');
+        $response = new Response($body, ['Content-Type' => 'text/plain; charset=utf-8'], $status);
 
         foreach ($headers as $name => $value) {
             $response = $response->withHeader($name, $value);
@@ -181,7 +180,7 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     protected function empty(int $status = 204, array $headers = []): ResponseInterface
     {
-        $response = \mini\Http\create_response($status, '');
+        $response = new Response('', [], $status);
 
         foreach ($headers as $name => $value) {
             $response = $response->withHeader($name, $value);
@@ -199,8 +198,7 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     protected function redirect(string $url, int $status = 302): ResponseInterface
     {
-        return \mini\Http\create_response($status, '')
-            ->withHeader('Location', $url);
+        return new Response('', ['Location' => $url], $status);
     }
 
     /**

@@ -5,11 +5,9 @@ namespace mini\Dispatcher;
 use mini\Mini;
 use mini\Converter\ConverterRegistryInterface;
 use mini\Http\ResponseAlreadySentException;
-use Psr\Http\Message\ServerRequestInterface;
-use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\{ServerRequestInterface, ResponseInterface, UploadedFileInterface};
 use Psr\Http\Server\RequestHandlerInterface;
-use Nyholm\Psr7\Factory\Psr17Factory;
-use Nyholm\Psr7Server\ServerRequestCreator;
+use mini\Http\Message\{ServerRequest, Stream, UploadedFile};
 
 /**
  * HTTP request dispatcher
@@ -121,15 +119,8 @@ class HttpDispatcher
                 )
             );
 
-            // 2. Create PSR-7 ServerRequest from PHP request globals
-            $psr17Factory = new Psr17Factory();
-            $creator = new ServerRequestCreator(
-                $psr17Factory, // ServerRequestFactory
-                $psr17Factory, // UriFactory
-                $psr17Factory, // UploadedFileFactory
-                $psr17Factory  // StreamFactory
-            );
-            $serverRequest = $creator->fromGlobals();
+            // 2. Create PSR-7 ServerRequest from PHP request globals (SAPI-specific)
+            $serverRequest = $this->createServerRequestFromGlobals();
 
             // 3. Set current request
             $this->currentServerRequest = $serverRequest;
@@ -233,7 +224,8 @@ class HttpDispatcher
     /**
      * Handle fatal errors when no exception converter is registered
      *
-     * Last resort error handling - renders a basic error page.
+     * Last resort error handling - renders a detailed error page in debug mode,
+     * or a simple error page in production.
      *
      * @param \Throwable $e
      * @return void
@@ -246,26 +238,397 @@ class HttpDispatcher
         }
 
         $statusCode = 500;
-        $message = Mini::$mini->debug
-            ? htmlspecialchars($e->getMessage())
-            : 'Internal Server Error';
-
         http_response_code($statusCode);
-        echo "<!DOCTYPE html>
+
+        if (Mini::$mini->debug) {
+            // Detailed debug error page
+            echo $this->renderDebugErrorPage($e);
+        } else {
+            // Simple production error page
+            echo $this->renderProductionErrorPage($statusCode);
+        }
+    }
+
+    /**
+     * Render detailed error page for debug mode
+     *
+     * Shows exception type, message, stack trace, and context information.
+     *
+     * @param \Throwable $e
+     * @return string
+     */
+    private function renderDebugErrorPage(\Throwable $e): string
+    {
+        $exceptionClass = get_class($e);
+        $message = htmlspecialchars($e->getMessage());
+        $file = htmlspecialchars($e->getFile());
+        $line = $e->getLine();
+        $code = $e->getCode();
+
+        // Get stack trace
+        $trace = $e->getTraceAsString();
+        $traceHtml = htmlspecialchars($trace);
+
+        // Get source code context (5 lines before and after)
+        $sourceContext = $this->getSourceContext($e->getFile(), $e->getLine(), 5);
+
+        // Get previous exceptions
+        $previousHtml = '';
+        $previous = $e->getPrevious();
+        if ($previous) {
+            $previousList = [];
+            while ($previous) {
+                $prevClass = htmlspecialchars(get_class($previous));
+                $prevMessage = htmlspecialchars($previous->getMessage());
+                $prevFile = htmlspecialchars($previous->getFile());
+                $prevLine = $previous->getLine();
+                $previousList[] = "<li><strong>$prevClass</strong>: $prevMessage<br><small>in $prevFile:$prevLine</small></li>";
+                $previous = $previous->getPrevious();
+            }
+            $previousHtml = '<h2>Previous Exceptions</h2><ul>' . implode('', $previousList) . '</ul>';
+        }
+
+        // Request information
+        $requestInfo = '';
+        try {
+            if ($this->currentServerRequest) {
+                $method = htmlspecialchars($this->currentServerRequest->getMethod());
+                $uri = htmlspecialchars((string)$this->currentServerRequest->getUri());
+                $requestInfo = "<h2>Request Information</h2>
+                <p><strong>Method:</strong> $method</p>
+                <p><strong>URI:</strong> $uri</p>";
+            }
+        } catch (\Throwable $ignored) {
+            // Ignore errors getting request info
+        }
+
+        return "<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+    <title>Error - $exceptionClass</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            color: #e0e0e0;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 {
+            color: #ff6b6b;
+            font-size: 28px;
+            margin-bottom: 10px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #333;
+        }
+        h2 {
+            color: #4ecdc4;
+            font-size: 20px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #333;
+        }
+        .error-header {
+            background: #2d2d2d;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 4px solid #ff6b6b;
+        }
+        .error-type {
+            font-size: 18px;
+            color: #ff6b6b;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .error-message {
+            font-size: 16px;
+            margin-bottom: 15px;
+            color: #fff;
+        }
+        .error-location {
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            color: #95a5a6;
+        }
+        .error-code {
+            color: #f39c12;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+        .section {
+            background: #2d2d2d;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .source-code {
+            background: #1e1e1e;
+            border-radius: 4px;
+            overflow-x: auto;
+            margin-top: 10px;
+        }
+        .source-line {
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            padding: 4px 10px;
+            border-left: 3px solid transparent;
+        }
+        .source-line-number {
+            display: inline-block;
+            width: 50px;
+            color: #666;
+            text-align: right;
+            margin-right: 15px;
+            user-select: none;
+        }
+        .source-line-error {
+            background: #3d2020;
+            border-left-color: #ff6b6b;
+        }
+        .source-line-error .source-line-number {
+            color: #ff6b6b;
+            font-weight: bold;
+        }
+        .stack-trace {
+            background: #1e1e1e;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            overflow-x: auto;
+            white-space: pre;
+            color: #95a5a6;
+        }
+        ul { list-style: none; }
+        li {
+            padding: 10px;
+            margin: 5px 0;
+            background: #1e1e1e;
+            border-radius: 4px;
+        }
+        small { color: #95a5a6; }
+        p { margin: 10px 0; }
+        strong { color: #4ecdc4; }
+        .debug-badge {
+            display: inline-block;
+            background: #f39c12;
+            color: #000;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class=\"container\">
+        <div class=\"debug-badge\">🐛 DEBUG MODE</div>
+
+        <div class=\"error-header\">
+            <div class=\"error-type\">$exceptionClass</div>
+            <div class=\"error-message\">$message</div>
+            <div class=\"error-location\">📁 $file:$line</div>
+            " . ($code ? "<div class=\"error-code\">Code: $code</div>" : "") . "
+        </div>
+
+        $requestInfo
+
+        <div class=\"section\">
+            <h2>Source Code Context</h2>
+            <div class=\"source-code\">$sourceContext</div>
+        </div>
+
+        <div class=\"section\">
+            <h2>Stack Trace</h2>
+            <div class=\"stack-trace\">$traceHtml</div>
+        </div>
+
+        $previousHtml
+    </div>
+</body>
+</html>";
+    }
+
+    /**
+     * Render simple error page for production
+     *
+     * @param int $statusCode
+     * @return string
+     */
+    private function renderProductionErrorPage(int $statusCode): string
+    {
+        return "<!DOCTYPE html>
 <html lang=\"en\">
 <head>
     <meta charset=\"UTF-8\">
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
     <title>$statusCode - Error</title>
     <style>
-        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 100px auto; padding: 20px; }
-        h1 { color: #dc3545; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 100px auto;
+            padding: 20px;
+            text-align: center;
+        }
+        h1 { color: #dc3545; font-size: 48px; margin-bottom: 20px; }
+        p { color: #666; font-size: 18px; }
     </style>
 </head>
 <body>
-    <h1>$statusCode - Internal Server Error</h1>
-    <p>$message</p>
+    <h1>$statusCode</h1>
+    <p>Internal Server Error</p>
 </body>
 </html>";
+    }
+
+    /**
+     * Get source code context around the error line
+     *
+     * @param string $file
+     * @param int $errorLine
+     * @param int $contextLines Number of lines before and after to show
+     * @return string
+     */
+    private function getSourceContext(string $file, int $errorLine, int $contextLines = 5): string
+    {
+        if (!is_readable($file)) {
+            return '<div class="source-line">Unable to read source file</div>';
+        }
+
+        $lines = file($file);
+        if ($lines === false) {
+            return '<div class="source-line">Unable to read source file</div>';
+        }
+
+        $startLine = max(1, $errorLine - $contextLines);
+        $endLine = min(count($lines), $errorLine + $contextLines);
+
+        $html = '';
+        for ($i = $startLine; $i <= $endLine; $i++) {
+            $lineContent = htmlspecialchars(rtrim($lines[$i - 1]));
+            $isErrorLine = ($i === $errorLine);
+            $class = $isErrorLine ? 'source-line source-line-error' : 'source-line';
+            $html .= "<div class=\"$class\"><span class=\"source-line-number\">$i</span>$lineContent</div>";
+        }
+
+        return $html;
+    }
+
+    /**
+     * Create ServerRequest from PHP superglobals
+     *
+     * SAPI-specific logic for creating ServerRequest from PHP globals.
+     * Future FastCGI/fiber-based dispatchers will have their own creation logic.
+     */
+    private function createServerRequestFromGlobals(): ServerRequestInterface
+    {
+        $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+        $requestTarget = $_SERVER['REQUEST_URI'] ?? '/';
+        $body = Stream::create(fopen('php://input', 'r'));
+        $headers = $this->extractHeadersFromServer($_SERVER);
+        $protocolVersion = isset($_SERVER['SERVER_PROTOCOL'])
+            ? str_replace('HTTP/', '', $_SERVER['SERVER_PROTOCOL'])
+            : '1.1';
+
+        $uploadedFiles = $this->normalizeFiles($_FILES);
+
+        return new ServerRequest(
+            method: $method,
+            requestTarget: $requestTarget,
+            body: $body,
+            headers: $headers,
+            queryParams: null, // Derive from request target
+            serverParams: $_SERVER,
+            cookieParams: $_COOKIE,
+            uploadedFiles: $uploadedFiles,
+            parsedBody: $_POST,
+            protocolVersion: $protocolVersion
+        );
+    }
+
+    /**
+     * Extract headers from $_SERVER
+     */
+    private function extractHeadersFromServer(array $server): array
+    {
+        $headers = [];
+
+        foreach ($server as $key => $value) {
+            // HTTP_ prefix headers
+            if (str_starts_with($key, 'HTTP_')) {
+                $name = str_replace('_', '-', substr($key, 5));
+                $headers[$name] = [$value];
+                continue;
+            }
+
+            // Special case headers without HTTP_ prefix
+            if (in_array($key, ['CONTENT_TYPE', 'CONTENT_LENGTH', 'CONTENT_MD5'], true)) {
+                $name = str_replace('_', '-', $key);
+                $headers[$name] = [$value];
+            }
+        }
+
+        return $headers;
+    }
+
+    /**
+     * Normalize $_FILES array to UploadedFileInterface instances
+     */
+    private function normalizeFiles(array $files): array
+    {
+        $normalized = [];
+
+        foreach ($files as $key => $value) {
+            if ($value instanceof UploadedFileInterface) {
+                $normalized[$key] = $value;
+            } elseif (is_array($value) && isset($value['tmp_name'])) {
+                $normalized[$key] = $this->createUploadedFileFromSpec($value);
+            } elseif (is_array($value)) {
+                $normalized[$key] = $this->normalizeFiles($value);
+            }
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * Create UploadedFile instance from $_FILES specification
+     */
+    private function createUploadedFileFromSpec(array $spec): UploadedFileInterface|array
+    {
+        if (!is_array($spec['tmp_name'])) {
+            // Single file
+            $stream = Stream::create($spec['tmp_name']);
+
+            return new UploadedFile(
+                $stream,
+                $spec['size'] ?? null,
+                $spec['error'] ?? \UPLOAD_ERR_OK,
+                $spec['name'] ?? null,
+                $spec['type'] ?? null
+            );
+        }
+
+        // Multiple files - normalize nested structure
+        $files = [];
+        foreach (array_keys($spec['tmp_name']) as $key) {
+            $files[$key] = $this->createUploadedFileFromSpec([
+                'tmp_name' => $spec['tmp_name'][$key],
+                'size' => $spec['size'][$key] ?? null,
+                'error' => $spec['error'][$key] ?? \UPLOAD_ERR_OK,
+                'name' => $spec['name'][$key] ?? null,
+                'type' => $spec['type'][$key] ?? null,
+            ]);
+        }
+
+        return $files;
     }
 }
