@@ -11,6 +11,25 @@
 
 **See CHANGE-LOG.md** when reviewing old code or conversation history.
 
+## Dependency Policy
+
+**Mini is a zero-dependency monolith framework** to enable safe sub-application mounting:
+
+- **Zero required dependencies** - No external packages in `composer.json` "require" section (only PHP itself)
+- **No PSR implementation dependencies** - Don't require `nyholm/psr7`, `guzzlehttp/psr7`, etc.
+- **No polyfills** - Throw `MissingDependencyException` instead of depending on `symfony/polyfill-*`
+- **Optional features via suggestions** - Use `composer.json` "suggest" for optional integrations
+  - Example: `symfony/mailer` → suggested, `mini\mail()` throws if not installed
+- **Wide version support** - When we DO depend on PSR interfaces (dev/suggest), support multiple major versions
+  - Example: `"psr/http-message": "^1.0 || ^2.0 || ^3.0"`
+
+**Why?** This allows mounting sub-applications with their own dependencies without conflicts:
+```php
+_routes/marketing/__DEFAULT__.php  // Slim 4 app (guzzle 7.x)
+_routes/support/__DEFAULT__.php    // Symfony app (guzzle 6.x)
+_routes/api/__DEFAULT__.php        // Mini native (no conflicts!)
+```
+
 ## Philosophy: Back to PHP Basics
 
 Mini is a deliberate departure from modern PHP frameworks:

@@ -54,16 +54,6 @@ class HttpDispatcher
         // Create separate converter registry for exceptions
         // This keeps exception handling separate from content conversion
         $this->exceptionConverters = new \mini\Converter\ConverterRegistry();
-
-        // Register ServerRequest as Transient service that returns current request
-        // This allows mini\request() to work and get the current request from dispatcher
-        Mini::$mini->addService(
-            ServerRequestInterface::class,
-            \mini\Lifetime::Transient,
-            fn() => $this->currentServerRequest ?? throw new \RuntimeException(
-                'No ServerRequest available. ServerRequest is only available during request handling.'
-            )
-        );
     }
 
     /**
@@ -106,23 +96,30 @@ class HttpDispatcher
      * Dispatch the current HTTP request
      *
      * Complete HTTP request lifecycle:
-     * 1. Transition to Ready phase (enables Scoped services)
+     * 1. Register ServerRequest as Transient service
      * 2. Create PSR-7 ServerRequest from PHP request globals
-     * 3. Set as current request (available via mini\request())
-     * 4. Populate request globals ($_GET, $_POST)
-     * 5. Add request replacement callback for Router
-     * 6. Get RequestHandlerInterface from container (Router)
-     * 7. Handle request and get response
-     * 8. Catch exceptions and convert to responses
-     * 9. Emit response to browser
+     * 3. Set as current request
+     * 4. Replace $_GET, $_POST, $_COOKIE with proxies (fiber-safe)
+     * 5. Declare Ready phase (locks down service registration)
+     * 6. Add request replacement callback for Router
+     * 7. Get RequestHandlerInterface from container (Router)
+     * 8. Handle request and get response
+     * 9. Catch exceptions and convert to responses
+     * 10. Emit response to browser
      *
      * @return void
      */
     public function dispatch(): void
     {
         try {
-            // 1. Transition to Ready phase (enables Scoped services)
-            Mini::$mini->phase->trigger(\mini\Phase::Ready);
+            // 1. Register ServerRequest as Transient service that returns current request
+            Mini::$mini->addService(
+                ServerRequestInterface::class,
+                \mini\Lifetime::Transient,
+                fn() => $this->currentServerRequest ?? throw new \RuntimeException(
+                    'No ServerRequest available. ServerRequest is only available during request handling.'
+                )
+            );
 
             // 2. Create PSR-7 ServerRequest from PHP request globals
             $psr17Factory = new Psr17Factory();
@@ -134,20 +131,16 @@ class HttpDispatcher
             );
             $serverRequest = $creator->fromGlobals();
 
-            // 3. Set current request (makes it available via mini\request())
+            // 3. Set current request
             $this->currentServerRequest = $serverRequest;
 
-            // 4. Populate request globals from ServerRequest
-            //    This makes $_GET, $_POST available in controllers
-            //    Note: In production, $_GET is already populated by the SAPI (Apache/nginx/php-fpm)
-            //    We re-populate here to ensure consistency with PSR-7 request
-            $_GET = $serverRequest->getQueryParams();
-            $parsedBody = $serverRequest->getParsedBody();
-            if (is_array($parsedBody)) {
-                $_POST = $parsedBody;
-            }
+            // 4. Replace request globals with proxies (fiber-safe)
+            $this->installRequestGlobalProxies();
 
-            // 5. Add callback to allow Router to replace current request
+            // 5. Declare Ready phase (locks down service registration)
+            Mini::$mini->phase->trigger(\mini\Phase::Ready);
+
+            // 6. Add callback to allow Router to replace current request
             //    Router uses this after Redirect/Reroute to update the request
             $serverRequest = $serverRequest->withAttribute(
                 'mini.dispatcher.replaceRequest',
@@ -156,7 +149,7 @@ class HttpDispatcher
                 }
             );
 
-            // 5. Dispatch into the framework
+            // 7. Dispatch into the framework
             try {
                 $handler = Mini::$mini->get(RequestHandlerInterface::class);
                 $response = $handler->handle($serverRequest);
@@ -183,6 +176,34 @@ class HttpDispatcher
             // Last resort error handling
             $this->handleFatalError($e);
         }
+    }
+
+    /**
+     * Install request global proxies for fiber-safe request handling
+     *
+     * Replaces $_GET, $_POST, $_COOKIE with ArrayAccess proxies that delegate
+     * to the current ServerRequest. This enables:
+     * - Fiber-safe concurrent request handling
+     * - Zero code changes (existing $_GET['id'] works)
+     * - Works with all SAPIs (FPM, Swoole, ReactPHP, etc.)
+     *
+     * Called once during HttpDispatcher construction. Idempotent - safe to call multiple times.
+     *
+     * @return void
+     */
+    private function installRequestGlobalProxies(): void
+    {
+        static $installed = false;
+
+        if ($installed) {
+            return;
+        }
+
+        $_GET = new \mini\Http\RequestGlobalProxy('query');
+        $_POST = new \mini\Http\RequestGlobalProxy('post');
+        $_COOKIE = new \mini\Http\RequestGlobalProxy('cookie');
+
+        $installed = true;
     }
 
     /**

@@ -9,7 +9,7 @@ Mini's router is **convention-driven, not configuration-heavy**. URL paths map d
 - **Hierarchical scoping** - `__DEFAULT__.php` for dynamic routes within directories
 - **Security by convention** - Files starting with `_` are NOT publicly accessible
 - **Pattern matching** - FastRoute-inspired syntax: `{id}`, `{slug:\w+}`
-- **Native PHP** - Routes populate `$_GET` and execute directly
+- **Native PHP** - Routes use `$_GET`, `$_POST`, `$_COOKIE` directly (request-scoped, fiber-safe)
 
 ## Setup
 
