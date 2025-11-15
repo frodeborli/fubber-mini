@@ -2,7 +2,7 @@
 
 namespace mini\Auth;
 
-use mini\Http\AccessDeniedException;
+use mini\Exceptions\AccessDeniedException;
 use mini\Mini;
 
 /**

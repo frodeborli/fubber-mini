@@ -5,7 +5,7 @@ namespace mini\Tables;
 use mini\Tables\RepositoryInterface;
 use mini\Tables\RepositoryException;
 use mini\Util\IdentityMap;
-use mini\Http\AccessDeniedException;
+use mini\Exceptions\AccessDeniedException;
 
 /**
  * User-friendly repository wrapper with clone-based state tracking

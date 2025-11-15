@@ -250,43 +250,85 @@ return response()->json(['users' => db()->query("SELECT * FROM users")->fetchAll
 
 ### Controller-Based Routing
 
-**File-based routing doesn't mean "no OOP."** Return controller instances for structured applications:
+**File-based routing doesn't mean "no OOP."** Use `__DEFAULT__.php` to mount controllers with attribute-based routing:
 
 ```php
-// _routes/users.php - File system routes to this file, returns a controller
-use mini\Controller\Attributes\{GET, POST, Route};
+// _routes/users/__DEFAULT__.php - Handles /users/*
+use mini\Controller\AbstractController;
+use mini\Controller\Attributes\{GET, POST, PUT, DELETE};
 
-#[Route('/users')]
-class UsersController {
-    #[GET('')]
-    public function index() {
-        return response()->json(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
+return new class extends AbstractController {
+    #[GET('/')]
+    public function index(): array
+    {
+        return db()->query("SELECT * FROM users")->fetchAll();
     }
 
-    #[GET('/{id}')]
-    public function show(int $id) {
+    #[GET('/{id}/')]
+    public function show(int $id): array
+    {
         $user = db()->query("SELECT * FROM users WHERE id = ?", [$id])->fetch();
-        return response()->json(['user' => $user]);
+        if (!$user) throw new \mini\Exceptions\ResourceNotFoundException();
+        return $user;
     }
 
-    #[POST('')]
-    public function create(ServerRequestInterface $request) {
-        $data = $request->getParsedBody();
-        // ... create user
-        return response()->json(['success' => true], 201);
+    #[POST('/')]
+    public function create(): array
+    {
+        $id = db()->insert('users', $_POST);
+        return ['id' => $id, 'message' => 'Created'];
     }
-}
 
-return new UsersController();
+    #[PUT('/{id}/')]
+    public function update(int $id): array
+    {
+        db()->update('users', $_POST, 'id = ?', [$id]);
+        return ['message' => 'Updated'];
+    }
+
+    #[DELETE('/{id}/')]
+    public function delete(int $id): ResponseInterface
+    {
+        db()->delete('users', 'id = ?', [$id]);
+        return $this->empty(204);
+    }
+};
 ```
 
-**Hybrid dispatch model:** File system handles the routing (fast), controllers handle the logic (structured).
+**Key benefits:**
+- **Scoped routing:** `/users/123/` becomes `/{id}/` inside the controller
+- **Type-aware parameters:** `int $id` automatically extracts and casts URL parameter
+- **Converter integration:** Return arrays, strings, or domain objects - auto-converted to JSON/text
+- **Attribute-based:** Routes declared with method attributes (no manual registration)
+
+**URL mapping:**
+- `GET /users/` → `index()` → returns array → JSON response
+- `GET /users/123/` → `show(int $id)` → `$id = 123` (typed!)
+- `POST /users/` → `create()` → uses `$_POST` directly
+- `DELETE /users/123/` → `delete(int $id)` → returns 204 No Content
 
 **When to use controllers:**
 - Multiple related endpoints (CRUD operations)
-- Dependency injection needs
-- Method-level attributes/middleware
-- Reusable logic across routes
+- Type-safe URL parameters
+- Return value conversion (arrays → JSON)
+- Clean, declarative routing
+
+### Exception Handling
+
+**Mini uses transport-agnostic exceptions** that are mapped to appropriate responses by the dispatcher:
+
+```php
+// Throw domain exceptions - dispatcher handles HTTP mapping
+throw new \mini\Exceptions\ResourceNotFoundException('User not found');        // → 404
+throw new \mini\Exceptions\AccessDeniedException('Login required');           // → 401/403
+throw new \mini\Exceptions\BadRequestException('Invalid email format');       // → 400
+```
+
+**Debug mode shows detailed error pages** with stack traces. In production, clean error pages are shown.
+
+**Custom error pages:** Create `_errors/404.php`, `_errors/500.php`, etc. to override default error pages. The exception is available as `$exception`.
+
+**For complete coverage** of routing, error handling, converters, and web app patterns, see **[docs/web-apps.md](docs/web-apps.md)**.
 
 ### Dynamic Routes with `__DEFAULT__.php`
 

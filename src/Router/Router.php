@@ -98,17 +98,17 @@ class Router implements RequestHandlerInterface
                     }
                 }
 
-                throw new \mini\Http\NotFoundException("Not Found: $path");
+                throw new \mini\Exceptions\ResourceNotFoundException("Not Found: $path");
             }
 
             // Enforce trailing slash consistency:
-            // - index.php files should only handle paths WITH trailing slash
+            // - index.php and __DEFAULT__.php files should only handle paths WITH trailing slash
             // - non-index .php files should only handle paths WITHOUT trailing slash
-            $isIndexFile = str_ends_with($handlerFile, '/index.php');
+            $isIndexFile = str_ends_with($handlerFile, '/index.php') || str_ends_with($handlerFile, '/__DEFAULT__.php');
             $pathHasSlash = str_ends_with($path, '/');
 
             if ($isIndexFile && !$pathHasSlash) {
-                // index.php matched a path without trailing slash - redirect to add slash
+                // index.php or __DEFAULT__.php matched a path without trailing slash - redirect to add slash
                 return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
             } elseif (!$isIndexFile && $pathHasSlash && $path !== '/') {
                 // Regular .php file matched a path with trailing slash - redirect to remove slash
@@ -198,7 +198,24 @@ class Router implements RequestHandlerInterface
                 return $returnValue;
             }
 
-            // 7. Convert to response
+            // 7. Check if return value is a PSR-15 request handler
+            if ($returnValue instanceof RequestHandlerInterface) {
+                // Strip the resolved path from request target for scoped routing
+                // e.g., /tests/router/ with resolvedPath="tests/router/" becomes /
+                if ($resolvedPath !== null && $resolvedPath !== '') {
+                    $scopedPath = '/' . ltrim(substr($path, strlen('/' . rtrim($resolvedPath, '/'))), '/');
+                    $queryString = parse_url($requestTarget, PHP_URL_QUERY);
+                    $scopedRequestTarget = $scopedPath . ($queryString ? '?' . $queryString : '');
+                    $request = $request->withRequestTarget($scopedRequestTarget);
+
+                    // Update global request instance with scoped request target
+                    $this->replaceGlobalRequest($request);
+                }
+
+                return $returnValue->handle($request);
+            }
+
+            // 8. Convert to response
             $response = \mini\convert($returnValue, ResponseInterface::class);
 
             if ($response === null) {
@@ -461,7 +478,7 @@ class Router implements RequestHandlerInterface
             }
         }
 
-        throw new \mini\Http\NotFoundException("No route pattern matched: $currentPath");
+        throw new \mini\Exceptions\ResourceNotFoundException("No route pattern matched: $currentPath");
     }
 
     private function injectRunClosure(\Closure $target, array $vars): string {

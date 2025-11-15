@@ -32,12 +32,7 @@ class TestController extends AbstractController
     public function hello(): ResponseInterface
     {
         echo "✓ hello() called\n";
-
-        // Test request() function
-        $query = \mini\request()->getQueryParams();
-        echo "  Query params: " . json_encode($query) . "\n";
-
-        return $this->json(['message' => 'hello', 'query' => $query]);
+        return $this->json(['message' => 'hello']);
     }
 
     public function show(int $id): ResponseInterface
@@ -61,23 +56,28 @@ class TestController extends AbstractController
     public function create(): ResponseInterface
     {
         echo "✓ create() called\n";
-
-        $body = \mini\request()->getParsedBody();
-        echo "  Body: " . json_encode($body) . "\n";
-
-        return $this->json(['message' => 'created', 'data' => $body], 201);
+        return $this->json(['message' => 'created'], 201);
     }
 }
 
 // Helper to simulate PSR-7 request
 function createTestRequest(string $method, string $path, array $query = [], array $body = []): Psr\Http\Message\ServerRequestInterface
 {
-    $_SERVER['REQUEST_METHOD'] = $method;
-    $_SERVER['REQUEST_URI'] = $path . ($query ? '?' . http_build_query($query) : '');
-    $_GET = $query;
-    $_POST = $body;
+    $requestTarget = $path . ($query ? '?' . http_build_query($query) : '');
 
-    return \mini\Http\create_request_from_globals();
+    return new \mini\Http\Message\ServerRequest(
+        method: $method,
+        requestTarget: $requestTarget,
+        body: '', // body
+        headers: [], // headers
+        queryParams: $query, // query params
+        serverParams: [], // server params
+        cookieParams: [], // cookies
+        uploadedFiles: [], // uploaded files
+        parsedBody: $body, // parsed body
+        attributes: [], // attributes
+        protocolVersion: '1.1'
+    );
 }
 
 // Bootstrap Mini (transitions to Ready phase, enables Scoped services)

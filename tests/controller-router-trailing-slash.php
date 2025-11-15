@@ -15,38 +15,42 @@ if (!$autoloader) {
 
 require $autoloader;
 
-use mini\Controller\Router;
+use mini\Controller\AbstractController;
 use mini\Http\Message\Response;
-use Nyholm\Psr7\ServerRequest;
+use mini\Http\Message\ServerRequest;
+use Psr\Http\Message\ResponseInterface;
 
 echo "Testing Controller\\Router Trailing Slash Redirects\n";
 echo "===================================================\n\n";
 
-// Create a mock controller
-$controller = new class {
-    public function withSlash(): Response {
+// Create a test controller
+class TestSlashController extends AbstractController {
+    public function __construct() {
+        parent::__construct();
+        $this->router->get('/users/', $this->withSlash(...));
+        $this->router->get('/posts', $this->withoutSlash(...));
+    }
+
+    public function withSlash(): ResponseInterface {
         return new Response('Handler with slash', [], 200);
     }
 
-    public function withoutSlash(): Response {
+    public function withoutSlash(): ResponseInterface {
         return new Response('Handler without slash', [], 200);
     }
-};
+}
 
-// Create router and register routes
-$router = new Router($controller);
-$router->get('/users/', [$controller, 'withSlash']);
-$router->get('/posts', [$controller, 'withoutSlash']);
+$controller = new TestSlashController();
 
 // Test helper
-function testControllerRoute(Router $router, string $path, int $expectedStatus, ?string $expectedLocation = null): void {
+function testControllerRoute(TestSlashController $controller, string $path, int $expectedStatus, ?string $expectedLocation = null): void {
     global $testNum;
     $testNum = ($testNum ?? 0) + 1;
 
-    $request = new ServerRequest('GET', $path);
+    $request = new ServerRequest('GET', $path, '', [], null, [], [], [], null, [], '1.1');
 
     try {
-        $response = $router->dispatch($request);
+        $response = $controller->handle($request);
         $status = $response->getStatusCode();
         $location = $response->getHeaderLine('Location');
 
@@ -72,16 +76,16 @@ function testControllerRoute(Router $router, string $path, int $expectedStatus, 
 }
 
 // Test 1: Route with slash accessed without slash should redirect
-testControllerRoute($router, '/users', 301, '/users/');
+testControllerRoute($controller, '/users', 301, '/users/');
 
 // Test 2: Route with slash accessed with slash should work normally
-testControllerRoute($router, '/users/', 200);
+testControllerRoute($controller, '/users/', 200);
 
 // Test 3: Route without slash accessed with slash should redirect
-testControllerRoute($router, '/posts/', 301, '/posts');
+testControllerRoute($controller, '/posts/', 301, '/posts');
 
 // Test 4: Route without slash accessed without slash should work normally
-testControllerRoute($router, '/posts', 200);
+testControllerRoute($controller, '/posts', 200);
 
 echo "\n✅ All Controller\\Router trailing slash tests completed!\n";
 echo "\nTrailing slash behavior:\n";

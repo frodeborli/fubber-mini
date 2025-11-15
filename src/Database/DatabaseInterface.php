@@ -88,4 +88,34 @@ interface DatabaseInterface
      * @throws \Exception If the transaction fails or the closure throws
      */
     public function transaction(\Closure $task): mixed;
+
+    /**
+     * Insert a row into a table
+     *
+     * @param string $table Table name
+     * @param array $data Associative array of column => value pairs
+     * @return string|null The last insert ID, or null on failure
+     */
+    public function insert(string $table, array $data): ?string;
+
+    /**
+     * Update rows in a table
+     *
+     * @param string $table Table name
+     * @param array $data Associative array of column => value pairs to update
+     * @param string $where WHERE clause (without the WHERE keyword)
+     * @param array $whereParams Parameters for the WHERE clause
+     * @return int Number of affected rows
+     */
+    public function update(string $table, array $data, string $where = '', array $whereParams = []): int;
+
+    /**
+     * Delete rows from a table
+     *
+     * @param string $table Table name
+     * @param string $where WHERE clause (without the WHERE keyword)
+     * @param array $whereParams Parameters for the WHERE clause
+     * @return int Number of affected rows
+     */
+    public function delete(string $table, string $where = '', array $whereParams = []): int;
 }

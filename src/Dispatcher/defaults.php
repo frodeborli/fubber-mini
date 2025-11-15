@@ -44,45 +44,52 @@ $converters->register(function(ResponseInterface $response): ResponseInterface {
 
 $dispatcher = Mini::$mini->get(HttpDispatcher::class);
 
-// Handle HttpException (404, 400, 403, etc.)
-$dispatcher->registerExceptionConverter(function(\mini\Http\HttpException $e): ResponseInterface {
-    $statusCode = $e->getStatusCode();
-    $message = $e->getMessage() ?: $e->getStatusMessage();
+// Handle ResourceNotFoundException → 404
+$dispatcher->registerExceptionConverter(function(\mini\Exceptions\ResourceNotFoundException $e): ResponseInterface {
+    ob_start();
+    \mini\Http\ErrorHandler::handleException($e, 404, 'Not Found', Mini::$mini->root);
+    $body = ob_get_clean();
 
-    // In debug mode, show exception message
-    if (!Mini::$mini->debug && $statusCode === 500) {
-        $message = 'Internal Server Error';
+    return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], 404);
+});
+
+// Handle AccessDeniedException → 401/403
+$dispatcher->registerExceptionConverter(function(\mini\Exceptions\AccessDeniedException $e): ResponseInterface {
+    // Determine if user is authenticated to decide between 401 and 403
+    $statusCode = 401; // Default to 401 (Unauthorized)
+    $statusMessage = 'Unauthorized';
+
+    try {
+        $auth = \mini\auth();
+        if ($auth->isAuthenticated()) {
+            $statusCode = 403; // User is authenticated but lacks permission
+            $statusMessage = 'Forbidden';
+        }
+    } catch (\Throwable) {
+        // Auth not configured, default to 401
     }
 
-    $body = sprintf(
-        "<!DOCTYPE html><html><head><title>Error %d</title></head>" .
-        "<body><h1>Error %d - %s</h1><p>%s</p></body></html>",
-        $statusCode,
-        $statusCode,
-        htmlspecialchars($e->getStatusMessage()),
-        htmlspecialchars($message)
-    );
+    ob_start();
+    \mini\Http\ErrorHandler::handleException($e, $statusCode, $statusMessage, Mini::$mini->root);
+    $body = ob_get_clean();
 
     return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], $statusCode);
 });
 
+// Handle BadRequestException → 400
+$dispatcher->registerExceptionConverter(function(\mini\Exceptions\BadRequestException $e): ResponseInterface {
+    ob_start();
+    \mini\Http\ErrorHandler::handleException($e, 400, 'Bad Request', Mini::$mini->root);
+    $body = ob_get_clean();
+
+    return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], 400);
+});
+
 // Handle generic exceptions (500 Internal Server Error)
 $dispatcher->registerExceptionConverter(function(\Throwable $e): ResponseInterface {
-    $statusCode = 500;
-    $message = 'Internal Server Error';
+    ob_start();
+    \mini\Http\ErrorHandler::handleException($e, 500, 'Internal Server Error', Mini::$mini->root);
+    $body = ob_get_clean();
 
-    // Show exception message in debug mode
-    if (Mini::$mini->debug) {
-        $message = $e->getMessage() ?: $message;
-    }
-
-    $body = sprintf(
-        "<!DOCTYPE html><html><head><title>Error %d</title></head>" .
-        "<body><h1>Error %d</h1><p>%s</p></body></html>",
-        $statusCode,
-        $statusCode,
-        htmlspecialchars($message)
-    );
-
-    return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], $statusCode);
+    return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], 500);
 });

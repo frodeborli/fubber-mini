@@ -7,19 +7,21 @@ use Throwable;
 /**
  * HTTP Error Handler
  *
- * Handles HTTP exceptions and generic errors with appropriate error pages.
+ * Handles exceptions and renders appropriate error pages.
  * Only loaded when errors occur, not on every request.
  */
 class ErrorHandler
 {
     /**
-     * Handle HTTP exceptions with appropriate error pages
+     * Handle exception with appropriate error page
+     *
+     * @param Throwable $e The exception that was thrown
+     * @param int $statusCode HTTP status code to send
+     * @param string $statusMessage HTTP status message (e.g., "Not Found")
+     * @param string $projectRoot Project root directory
      */
-    public static function handleHttpException(HttpException $e, string $projectRoot): void
+    public static function handleException(Throwable $e, int $statusCode, string $statusMessage, string $projectRoot): void
     {
-        $statusCode = $e->getStatusCode();
-        $statusMessage = $e->getStatusMessage();
-
         // Clear any existing output buffer content
         if (ob_get_length()) {
             ob_clean();
@@ -33,40 +35,15 @@ class ErrorHandler
         if (file_exists($errorPagePath)) {
             // Custom error page exists - include it
             // Make exception available to error page
-            $httpException = $e;
-            require $errorPagePath;
-        } else {
-            // Fallback to generic error page
-            self::renderGenericErrorPage($statusCode, $statusMessage, $e->getMessage());
-        }
-    }
-
-    /**
-     * Handle generic exceptions as 500 errors
-     */
-    public static function handleGenericException(Throwable $e, string $projectRoot): void
-    {
-        // Clear any existing output buffer content
-        if (ob_get_length()) {
-            ob_clean();
-        }
-
-        http_response_code(500);
-
-        // Try to find custom 500 error page
-        $errorPagePath = $projectRoot . '/500.php';
-
-        if (file_exists($errorPagePath)) {
-            // Custom error page exists - include it
-            // Make exception available to error page
             $exception = $e;
             require $errorPagePath;
         } else {
-            // Fallback to generic error page with debug info if enabled
-            if (defined('mini\DEBUG') && \mini\DEBUG) {
+            // In debug mode, show detailed exception info
+            if (\mini\Mini::$mini->debug) {
                 self::renderDebugErrorPage($e);
             } else {
-                self::renderGenericErrorPage(500, 'Internal Server Error', 'An unexpected error occurred.');
+                // Production: show generic error page
+                self::renderGenericErrorPage($statusCode, $statusMessage, $e->getMessage());
             }
         }
     }
@@ -113,6 +90,7 @@ class ErrorHandler
     private static function renderDebugErrorPage(Throwable $e): void
     {
         $errorType = get_class($e);
+        $shortErrorType = substr($errorType, strrpos($errorType, '\\') + 1);
         $message = htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8');
         $file = htmlspecialchars($e->getFile(), ENT_QUOTES, 'UTF-8');
         $line = $e->getLine();
@@ -123,7 +101,7 @@ class ErrorHandler
 <head>
     <meta charset=\"UTF-8\">
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
-    <title>500 - Internal Server Error (Debug)</title>
+    <title>Unhandled Exception: $shortErrorType (Debug)</title>
     <style>
         body { font-family: 'Consolas', 'Monaco', monospace; margin: 0; padding: 1rem; background: #1e1e1e; color: #d4d4d4; font-size: 14px; line-height: 1.5; }
         .debug-container { max-width: none; background: #2d2d30; padding: 2rem; border-radius: 8px; border: 1px solid #404040; }
@@ -142,7 +120,7 @@ class ErrorHandler
 </head>
 <body>
     <div class=\"debug-container\">
-        <h1>🐛 Debug Mode - Internal Server Error</h1>
+        <h1>🐛 Unhandled Exception: $shortErrorType</h1>
 
         <div class=\"debug-info\">
             <h3>⚠️ Debug Mode Active</h3>
@@ -152,7 +130,7 @@ class ErrorHandler
         <h2>Exception Details</h2>
         <div class=\"error-type\">$errorType</div>
         <div class=\"error-message\">$message</div>
-        <div class=\"error-location\"><strong>File:</strong> $file<br><strong>Line:</strong> $line</div>
+        <div class=\"error-location\"><strong>File:</strong> $file:$line</div>
 
         <h2>Stack Trace</h2>
         <div class=\"stack-trace\">$trace</div>

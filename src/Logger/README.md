@@ -97,11 +97,11 @@ try {
 
 ## Custom Logger Configuration
 
-Override the default logger by creating `config/logger.php`:
+Override the default logger by creating `_config/Psr/Log/LoggerInterface.php`:
 
 ```php
 <?php
-// config/logger.php
+// _config/Psr/Log/LoggerInterface.php
 
 use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
@@ -109,7 +109,7 @@ use Monolog\Handler\FirePHPHandler;
 
 // Example: Monolog logger with multiple handlers
 $logger = new Logger('mini');
-$logger->pushHandler(new StreamHandler(__DIR__ . '/../storage/logs/app.log', Logger::DEBUG));
+$logger->pushHandler(new StreamHandler(__DIR__ . '/../../../storage/logs/app.log', Logger::DEBUG));
 $logger->pushHandler(new FirePHPHandler());
 
 return $logger;
@@ -119,7 +119,7 @@ Any PSR-3 compatible logger works:
 
 ```php
 <?php
-// config/logger.php
+// _config/Psr/Log/LoggerInterface.php
 
 // Example: Custom logger implementation
 class DatabaseLogger implements \Psr\Log\LoggerInterface

@@ -35,7 +35,7 @@ use Psr\Http\Server\RequestHandlerInterface;
  *     public function show(int $id): ResponseInterface
  *     {
  *         $user = table(User::class)->find($id);
- *         if (!$user) throw new \mini\Http\NotFoundException();
+ *         if (!$user) throw new \mini\Exceptions\ResourceNotFoundException();
  *         return $this->respond($user);
  *     }
  * }
@@ -64,19 +64,39 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     public readonly Router $router;
 
-    public function __construct()
+    final public function __construct()
     {
-        $this->router = new Router($this);
+        $this->router = new Router();
+        $this->router->importRoutesFromAttributes($this);
     }
 
     /**
      * PSR-15 entry point
      *
-     * Delegates to internal router for request handling.
+     * Flow:
+     * 1. Router::match() finds matching route and returns handler + params (or redirect)
+     * 2. Enrich request with type-cast parameters as attributes
+     * 3. Create ConverterHandler wrapping the matched controller method
+     * 4. ConverterHandler invokes method and converts return value to ResponseInterface
      */
     public function handle(ServerRequestInterface $request): ResponseInterface
     {
-        return $this->router->dispatch($request);
+        // Match route
+        $match = $this->router->match($request);
+
+        // Handle redirects (trailing slash normalization)
+        if ($match instanceof ResponseInterface) {
+            return $match;
+        }
+
+        // Enrich request with URL parameters as attributes
+        foreach ($match['params'] as $name => $value) {
+            $request = $request->withAttribute($name, $value);
+        }
+
+        // Create ConverterHandler and invoke controller method
+        $converterHandler = new ConverterHandler($match['handler']);
+        return $converterHandler->handle($request);
     }
 
     /**
@@ -124,7 +144,7 @@ abstract class AbstractController implements RequestHandlerInterface
     protected function json(mixed $data, int $status = 200, array $headers = []): ResponseInterface
     {
         $json = json_encode($data, JSON_THROW_ON_ERROR);
-        $response = new Response($json, ['Content-Type' => 'application/json'], $status);
+        $response = new \mini\Http\Message\Response($json, ['Content-Type' => 'application/json'], $status);
 
         foreach ($headers as $name => $value) {
             $response = $response->withHeader($name, $value);
@@ -143,7 +163,7 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     protected function html(string $body, int $status = 200, array $headers = []): ResponseInterface
     {
-        $response = new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], $status);
+        $response = new \mini\Http\Message\Response($body, ['Content-Type' => 'text/html; charset=utf-8'], $status);
 
         foreach ($headers as $name => $value) {
             $response = $response->withHeader($name, $value);
@@ -162,7 +182,7 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     protected function text(string $body, int $status = 200, array $headers = []): ResponseInterface
     {
-        $response = new Response($body, ['Content-Type' => 'text/plain; charset=utf-8'], $status);
+        $response = new \mini\Http\Message\Response($body, ['Content-Type' => 'text/plain; charset=utf-8'], $status);
 
         foreach ($headers as $name => $value) {
             $response = $response->withHeader($name, $value);
@@ -180,7 +200,7 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     protected function empty(int $status = 204, array $headers = []): ResponseInterface
     {
-        $response = new Response('', [], $status);
+        $response = new \mini\Http\Message\Response('', [], $status);
 
         foreach ($headers as $name => $value) {
             $response = $response->withHeader($name, $value);
@@ -198,7 +218,7 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     protected function redirect(string $url, int $status = 302): ResponseInterface
     {
-        return new Response('', ['Location' => $url], $status);
+        return new \mini\Http\Message\Response('', ['Location' => $url], $status);
     }
 
     /**

@@ -8,28 +8,35 @@ use Psr\Http\Message\ResponseInterface;
 /**
  * Controller-level router with type-aware route registration
  *
- * Analyzes method signatures to generate regex patterns automatically:
+ * Provides route matching and parameter extraction for controller methods.
+ * Not PSR-15 middleware - returns match information for AbstractController to handle.
+ *
+ * Type-aware pattern generation:
  * - int $id → {id} becomes (?<id>\d+)
  * - string $slug → {slug} becomes (?<slug>[^/]+)
  * - float $price → {price} becomes (?<price>\d+\.?\d*)
+ *
+ * Architecture:
+ * 1. Router::match() finds matching route and extracts URL parameters
+ * 2. Returns array with 'handler' callable and 'params' (type-cast)
+ * 3. AbstractController enriches request with params and creates ConverterHandler
+ * 4. ConverterHandler invokes controller method and converts return value
  */
 class Router
 {
     private array $routes = [];
-    private object $controller;
 
-    public function __construct(object $controller)
+    public function __construct()
     {
-        $this->controller = $controller;
     }
 
     /**
      * Register GET route
      *
      * @param string $path Route pattern (e.g., '/', '/{id}/', '/{postId}/comments/{commentId}/')
-     * @param callable $handler Controller method or closure
+     * @param \Closure $handler Controller method closure
      */
-    public function get(string $path, callable $handler): void
+    public function get(string $path, \Closure $handler): void
     {
         $this->addRoute('GET', $path, $handler);
     }
@@ -37,7 +44,7 @@ class Router
     /**
      * Register POST route
      */
-    public function post(string $path, callable $handler): void
+    public function post(string $path, \Closure $handler): void
     {
         $this->addRoute('POST', $path, $handler);
     }
@@ -45,7 +52,7 @@ class Router
     /**
      * Register PATCH route
      */
-    public function patch(string $path, callable $handler): void
+    public function patch(string $path, \Closure $handler): void
     {
         $this->addRoute('PATCH', $path, $handler);
     }
@@ -53,7 +60,7 @@ class Router
     /**
      * Register PUT route
      */
-    public function put(string $path, callable $handler): void
+    public function put(string $path, \Closure $handler): void
     {
         $this->addRoute('PUT', $path, $handler);
     }
@@ -61,7 +68,7 @@ class Router
     /**
      * Register DELETE route
      */
-    public function delete(string $path, callable $handler): void
+    public function delete(string $path, \Closure $handler): void
     {
         $this->addRoute('DELETE', $path, $handler);
     }
@@ -69,15 +76,71 @@ class Router
     /**
      * Register route for any method
      */
-    public function any(string $path, callable $handler): void
+    public function any(string $path, \Closure $handler): void
     {
         $this->addRoute('*', $path, $handler);
     }
 
     /**
+     * Import routes from controller method attributes
+     *
+     * Scans the provided object for methods with Route attributes
+     * (#[GET], #[POST], #[Route], etc.) and automatically registers them.
+     *
+     * Example:
+     * ```php
+     * class UserController extends AbstractController {
+     *     public function __construct() {
+     *         parent::__construct();
+     *         $this->router->importRoutesFromAttributes($this);
+     *     }
+     *
+     *     #[GET('/')]
+     *     public function index(): ResponseInterface { ... }
+     *
+     *     #[POST('/')]
+     *     public function create(): ResponseInterface { ... }
+     * }
+     * ```
+     *
+     * @param object $controller Controller instance to scan for route attributes
+     */
+    public function importRoutesFromAttributes(object $controller): void
+    {
+        $reflection = new \ReflectionClass($controller);
+
+        foreach ($reflection->getMethods(\ReflectionMethod::IS_PUBLIC) as $method) {
+            // Skip constructor and other special methods
+            if ($method->isConstructor() || $method->isDestructor() || $method->isStatic()) {
+                continue;
+            }
+
+            // Get Route attributes (includes GET, POST, etc. since they extend Route)
+            $attributes = $method->getAttributes(
+                Attributes\Route::class,
+                \ReflectionAttribute::IS_INSTANCEOF
+            );
+
+            foreach ($attributes as $attribute) {
+                /** @var Attributes\Route $route */
+                $route = $attribute->newInstance();
+
+                // Create closure for this method
+                $closure = $method->getClosure($controller);
+
+                // Determine HTTP method
+                $httpMethod = $route->method ?? '*';
+
+                // Register the route
+                $this->addRoute($httpMethod, $route->path, $closure);
+            }
+        }
+    }
+
+    /**
      * Add route to registry
      */
-    private function addRoute(string $method, string $path, callable $handler): void
+    private function addRoute(string $method, string $path, \Closure $handler): void
     {
         // Analyze handler to determine parameter types
         $reflection = $this->reflectHandler($handler);
@@ -97,15 +160,9 @@ class Router
     /**
      * Reflect on handler to extract parameter information
      */
-    private function reflectHandler(callable $handler): array
+    private function reflectHandler(\Closure $handler): array
     {
-        if ($handler instanceof \Closure) {
-            $reflection = new \ReflectionFunction($handler);
-        } elseif (is_array($handler)) {
-            $reflection = new \ReflectionMethod($handler[0], $handler[1]);
-        } else {
-            $reflection = new \ReflectionMethod($handler);
-        }
+        $reflection = new \ReflectionFunction($handler);
 
         $params = [];
         foreach ($reflection->getParameters() as $param) {
@@ -167,9 +224,16 @@ class Router
     }
 
     /**
-     * Dispatch request to matching route
+     * Match request to a registered route
+     *
+     * Returns route match information including handler callable and type-cast parameters.
+     * Handles trailing slash redirects by returning ResponseInterface for redirects.
+     *
+     * @param ServerRequestInterface $request
+     * @return array|ResponseInterface Array with 'handler' and 'params', or redirect Response
+     * @throws \mini\Exceptions\ResourceNotFoundException If no route matches
      */
-    public function dispatch(ServerRequestInterface $request): ResponseInterface
+    public function match(ServerRequestInterface $request): array|ResponseInterface
     {
         $method = $request->getMethod();
         $path = parse_url($request->getRequestTarget(), PHP_URL_PATH) ?? '/';
@@ -184,7 +248,7 @@ class Router
             // Check path pattern
             if (preg_match($route['pattern'], $path, $matches)) {
                 // Extract named parameters
-                $params = array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY);
+                $rawParams = array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY);
 
                 // Enforce trailing slash consistency
                 $routeEndsWithSlash = str_ends_with($route['path'], '/');
@@ -198,8 +262,14 @@ class Router
                     return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/')], 301);
                 }
 
-                // Invoke handler
-                return $this->invokeHandler($route, $request, $params);
+                // Type-cast parameters
+                $params = $this->typeCastParams($route, $rawParams);
+
+                // Return match information
+                return [
+                    'handler' => $route['handler'],
+                    'params' => $params,
+                ];
             }
         }
 
@@ -230,84 +300,39 @@ class Router
         }
 
         // No route matched - 404
-        return $this->notFound($request);
+        throw new \mini\Exceptions\ResourceNotFoundException('Route not found');
     }
 
+
     /**
-     * Invoke route handler with dependency injection
+     * Type-cast URL parameters based on route reflection info
+     *
+     * @param array $route Matched route information
+     * @param array $rawParams Raw URL parameters from regex match
+     * @return array Type-cast parameters
      */
-    private function invokeHandler(array $route, ServerRequestInterface $request, array $urlParams): ResponseInterface
+    private function typeCastParams(array $route, array $rawParams): array
     {
-        $handler = $route['handler'];
+        $params = [];
 
-        $args = [];
-
-        // Build arguments array in parameter order
-        if ($handler instanceof \Closure) {
-            $reflectionObj = new \ReflectionFunction($handler);
-        } elseif (is_array($handler)) {
-            $reflectionObj = new \ReflectionMethod($handler[0], $handler[1]);
-        } else {
-            $reflectionObj = new \ReflectionMethod($handler);
-        }
-
-        foreach ($reflectionObj->getParameters() as $param) {
-            $name = $param->getName();
-            $type = $param->getType();
-
-            // Inject URL parameter
-            if (isset($urlParams[$name])) {
-                $value = $urlParams[$name];
-
-                // Type cast based on parameter type hint
-                if ($type && $type->isBuiltin()) {
-                    $value = match($type->getName()) {
-                        'int' => (int)$value,
-                        'float' => (float)$value,
-                        'bool' => filter_var($value, FILTER_VALIDATE_BOOLEAN),
-                        default => $value
-                    };
-                }
-
-                $args[] = $value;
+        // Type-cast parameters based on reflection info
+        foreach ($route['reflection'] as $paramName => $paramInfo) {
+            if (!isset($rawParams[$paramName])) {
                 continue;
             }
 
-            // Inject request attribute (set by Router/middleware)
-            $attrValue = $request->getAttribute($name);
-            if ($attrValue !== null) {
-                $args[] = $attrValue;
-                continue;
-            }
+            $value = $rawParams[$paramName];
 
-            // Use default value or null
-            if ($param->isDefaultValueAvailable()) {
-                $args[] = $param->getDefaultValue();
-            } elseif ($param->allowsNull()) {
-                $args[] = null;
-            } else {
-                throw new \InvalidArgumentException("Missing required parameter: $name");
-            }
+            // Type cast based on parameter type
+            $params[$paramName] = match($paramInfo['type']) {
+                'int' => (int)$value,
+                'float' => (float)$value,
+                'bool' => filter_var($value, FILTER_VALIDATE_BOOLEAN),
+                default => $value
+            };
         }
 
-        // Invoke handler
-        $result = call_user_func_array($handler, $args);
-
-        // MUST return ResponseInterface
-        if (!$result instanceof ResponseInterface) {
-            throw new \RuntimeException(
-                "Controller method must return ResponseInterface, got " . get_debug_type($result)
-            );
-        }
-
-        return $result;
+        return $params;
     }
 
-    /**
-     * Default 404 handler
-     */
-    private function notFound(ServerRequestInterface $request): ResponseInterface
-    {
-        throw new \mini\Http\NotFoundException('Route not found');
-    }
 }

@@ -83,24 +83,22 @@ $ids = db()->queryColumn("SELECT id FROM users WHERE role = ?", ['admin']);
 ### Insert, Update, Delete
 
 ```php
-// Insert
+// Insert (returns last insert ID)
+$userId = db()->insert('users', [
+    'name' => 'John Doe',
+    'email' => 'john@example.com'
+]);
+
+// Update (returns number of affected rows)
+$affected = db()->update('users', ['active' => 0], 'id = ?', [123]);
+
+// Delete (returns number of affected rows)
+$affected = db()->delete('users', 'id = ?', [123]);
+
+// Raw SQL with exec() if you prefer
 db()->exec(
     "INSERT INTO users (name, email) VALUES (?, ?)",
     ['John Doe', 'john@example.com']
-);
-
-$userId = db()->getPdo()->lastInsertId();
-
-// Update
-db()->exec(
-    "UPDATE users SET active = ? WHERE id = ?",
-    [0, 123]
-);
-
-// Delete
-db()->exec(
-    "DELETE FROM users WHERE id = ?",
-    [123]
 );
 ```
 

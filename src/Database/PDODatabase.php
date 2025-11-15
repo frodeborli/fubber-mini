@@ -203,4 +203,75 @@ class PDODatabase implements DatabaseInterface
         return $this->lazyPdo();
     }
 
+    /**
+     * Insert a row into a table
+     */
+    public function insert(string $table, array $data): ?string
+    {
+        if (empty($data)) {
+            throw new \InvalidArgumentException("Cannot insert empty data");
+        }
+
+        $columns = array_keys($data);
+        $placeholders = array_fill(0, count($columns), '?');
+
+        $sql = sprintf(
+            "INSERT INTO %s (%s) VALUES (%s)",
+            $table,
+            implode(', ', $columns),
+            implode(', ', $placeholders)
+        );
+
+        $this->exec($sql, array_values($data));
+        return $this->lastInsertId();
+    }
+
+    /**
+     * Update rows in a table
+     */
+    public function update(string $table, array $data, string $where = '', array $whereParams = []): int
+    {
+        if (empty($data)) {
+            throw new \InvalidArgumentException("Cannot update with empty data");
+        }
+
+        $setParts = array_map(fn($col) => "$col = ?", array_keys($data));
+        $sql = sprintf("UPDATE %s SET %s", $table, implode(', ', $setParts));
+
+        $params = array_values($data);
+
+        if ($where !== '') {
+            $sql .= " WHERE $where";
+            $params = array_merge($params, $whereParams);
+        }
+
+        try {
+            $stmt = $this->lazyPdo()->prepare($sql);
+            $stmt->execute($params);
+            return $stmt->rowCount();
+        } catch (PDOException $e) {
+            throw new Exception("Update failed: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Delete rows from a table
+     */
+    public function delete(string $table, string $where = '', array $whereParams = []): int
+    {
+        $sql = "DELETE FROM $table";
+
+        if ($where !== '') {
+            $sql .= " WHERE $where";
+        }
+
+        try {
+            $stmt = $this->lazyPdo()->prepare($sql);
+            $stmt->execute($whereParams);
+            return $stmt->rowCount();
+        } catch (PDOException $e) {
+            throw new Exception("Delete failed: " . $e->getMessage());
+        }
+    }
+
 }

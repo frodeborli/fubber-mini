@@ -70,28 +70,73 @@ foreach ($_GET as $k => $v)  // ✓ Works
 
 ## Exception Handling
 
-Register exception converters to transform exceptions into HTTP responses:
+**Mini uses transport-agnostic exceptions** that are mapped to HTTP responses by the dispatcher.
+
+### Built-In Exception Converters
+
+Default exception converters are registered in `src/Dispatcher/defaults.php`:
+
+```php
+// ResourceNotFoundException → 404 Not Found
+$dispatcher->registerExceptionConverter(
+    function(\mini\Exceptions\ResourceNotFoundException $e): ResponseInterface {
+        // Shows debug page in debug mode, clean 404 page in production
+        $html = /* ErrorHandler renders page */;
+        return new Response($html, ['Content-Type' => 'text/html'], 404);
+    }
+);
+
+// AccessDeniedException → 401/403 (smart detection)
+$dispatcher->registerExceptionConverter(
+    function(\mini\Exceptions\AccessDeniedException $e): ResponseInterface {
+        // 401 if not authenticated, 403 if authenticated but no permission
+        $statusCode = \mini\auth()->isAuthenticated() ? 403 : 401;
+        return new Response($html, ['Content-Type' => 'text/html'], $statusCode);
+    }
+);
+
+// BadRequestException → 400 Bad Request
+$dispatcher->registerExceptionConverter(
+    function(\mini\Exceptions\BadRequestException $e): ResponseInterface {
+        return new Response($html, ['Content-Type' => 'text/html'], 400);
+    }
+);
+
+// Generic exceptions → 500 Internal Server Error
+$dispatcher->registerExceptionConverter(
+    function(\Throwable $e): ResponseInterface {
+        return new Response($html, ['Content-Type' => 'text/html'], 500);
+    }
+);
+```
+
+### Custom Exception Converters
+
+Register custom exception converters for domain-specific exceptions:
 
 ```php
 <?php
-// bootstrap.php (run before dispatch)
+// _config/mini/Dispatcher/HttpDispatcher.php
 
-$dispatcher = Mini::$mini->get(\mini\Dispatcher\HttpDispatcher::class);
+use mini\Dispatcher\HttpDispatcher;
+use Psr\Http\Message\ResponseInterface;
 
-// Handle 404 errors
+$dispatcher = new HttpDispatcher(/* ... */);
+
+// Handle payment exceptions
 $dispatcher->registerExceptionConverter(
-    function(\mini\Http\NotFoundException $e): \Psr\Http\Message\ResponseInterface {
+    function(PaymentException $e): ResponseInterface {
         return new \mini\Http\Message\Response(
-            render('errors/404'),
-            ['Content-Type' => 'text/html'],
-            404
+            json_encode(['error' => 'Payment failed', 'message' => $e->getMessage()]),
+            ['Content-Type' => 'application/json'],
+            402  // Payment Required
         );
     }
 );
 
 // Handle validation errors
 $dispatcher->registerExceptionConverter(
-    function(\mini\Validator\ValidationException $e): \Psr\Http\Message\ResponseInterface {
+    function(\mini\Validator\ValidationException $e): ResponseInterface {
         $json = json_encode(['errors' => $e->errors]);
         return new \mini\Http\Message\Response(
             $json,
@@ -101,24 +146,30 @@ $dispatcher->registerExceptionConverter(
     }
 );
 
-// Generic error handler (fallback)
-$dispatcher->registerExceptionConverter(
-    function(\Throwable $e): \Psr\Http\Message\ResponseInterface {
-        $statusCode = 500;
-        $message = Mini::$mini->debug ? $e->getMessage() : 'Internal Server Error';
-        return new \mini\Http\Message\Response(
-            render('errors/500', compact('message')),
-            ['Content-Type' => 'text/html'],
-            $statusCode
-        );
-    }
-);
+return $dispatcher;
 ```
 
-**Exception converter precedence:**
-- More specific exceptions are tried first (e.g., `ValidationException`)
-- Falls back to broader exceptions (e.g., `\Throwable`)
-- If no converter matches, exception is rethrown and handled by `handleFatalError()`
+### Exception Converter Precedence
+
+Exception converters are tried in order from **most specific to most generic**:
+
+1. **Exact type match** - `PaymentException` converter for `PaymentException`
+2. **Parent class match** - `\RuntimeException` converter for exceptions extending it
+3. **Interface match** - Converters for implemented interfaces
+4. **Generic fallback** - `\Throwable` converter catches everything
+
+**If no converter returns a Response**, the exception propagates and is handled by the fatal error handler.
+
+### Debug Mode
+
+In debug mode (`Mini::$mini->debug = true`), exception pages show:
+- Exception class name
+- Error message
+- File and line number
+- Full stack trace
+- Beautiful dark-themed display
+
+In production, clean minimal error pages are shown instead.
 
 ## Accessing the Current Request
 
@@ -233,6 +284,7 @@ HttpDispatcher is **Singleton** - one instance manages all requests. However, `$
 
 ## See Also
 
-- **docs/dispatchers.md** - Framework internals and architecture
-- **src/Router/README.md** - Routing documentation
-- **docs/routing.md** - Routing internals
+- **[docs/web-apps.md](../../docs/web-apps.md)** - Complete web app guide (routing, error handling, converters)
+- **[docs/dispatchers.md](../../docs/dispatchers.md)** - Framework internals and architecture
+- **[src/Router/README.md](../Router/README.md)** - Routing documentation
+- **[src/Controller/README.md](../Controller/README.md)** - Controller patterns and best practices
