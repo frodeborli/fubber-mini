@@ -81,7 +81,63 @@ class Router implements RequestHandlerInterface
             $handlerFile = $this->resolveHandlerFile($path, $internalRequest, $resolvedPath);
 
             if ($handlerFile === null) {
+                // Before throwing 404, check if alternate path (with/without trailing slash) would match
+                if (!str_ends_with($path, '/')) {
+                    // Try with trailing slash
+                    $altFile = $this->resolveHandlerFile($path . '/', $internalRequest);
+                    if ($altFile !== null) {
+                        // Return 301 redirect to path with trailing slash
+                        return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
+                    }
+                } elseif ($path !== '/') {
+                    // Try without trailing slash
+                    $altFile = $this->resolveHandlerFile(rtrim($path, '/'), $internalRequest);
+                    if ($altFile !== null) {
+                        // Return 301 redirect to path without trailing slash
+                        return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/')], 301);
+                    }
+                }
+
                 throw new \mini\Http\NotFoundException("Not Found: $path");
+            }
+
+            // Enforce trailing slash consistency:
+            // - index.php files should only handle paths WITH trailing slash
+            // - non-index .php files should only handle paths WITHOUT trailing slash
+            $isIndexFile = str_ends_with($handlerFile, '/index.php');
+            $pathHasSlash = str_ends_with($path, '/');
+
+            if ($isIndexFile && !$pathHasSlash) {
+                // index.php matched a path without trailing slash - redirect to add slash
+                return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
+            } elseif (!$isIndexFile && $pathHasSlash && $path !== '/') {
+                // Regular .php file matched a path with trailing slash - redirect to remove slash
+                return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/')], 301);
+            }
+
+            // Additional check: if we found a handler via wildcard, check if alternate path has exact match
+            // This handles cases like: /users/john/ matches users/_/index.php BUT users/john.php exists
+            // In this case, redirect to /users/john (the more specific handler)
+            $pathSegments = explode('/', trim($path, '/'));
+            $lastSegment = end($pathSegments);
+            $isWildcardMatch = $lastSegment !== '' && !str_contains($handlerFile, '/' . $lastSegment . '.php') && !str_contains($handlerFile, '/' . $lastSegment . '/');
+
+            if ($isWildcardMatch) {
+                if ($pathHasSlash && $path !== '/') {
+                    // Current is wildcard with slash - check if non-slash version has exact match
+                    $altFile = $this->resolveHandlerFile(rtrim($path, '/'), $internalRequest);
+                    if ($altFile !== null && str_contains($altFile, '/' . $lastSegment . '.php')) {
+                        // Alternate has exact match - redirect to it
+                        return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/')], 301);
+                    }
+                } elseif (!$pathHasSlash) {
+                    // Current is wildcard without slash - check if slash version has exact match
+                    $altFile = $this->resolveHandlerFile($path . '/', $internalRequest);
+                    if ($altFile !== null && str_contains($altFile, '/' . $lastSegment . '/')) {
+                        // Alternate has exact match - redirect to it
+                        return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
+                    }
+                }
             }
 
             // 2. Annotate request with route info
@@ -164,9 +220,18 @@ class Router implements RequestHandlerInterface
      * - /path/ → ["_routes/path/index.php", "_routes/path/__DEFAULT__.php", "_routes/__DEFAULT__.php"]
      * - /users/123/ → ["_routes/users/123/index.php", "_routes/users/123/__DEFAULT__.php", "_routes/users/__DEFAULT__.php", "_routes/__DEFAULT__.php"]
      *
+     * Filesystem Wildcards:
+     * - Use "_" as directory or file name to match any single path segment
+     * - Exact matches take precedence over wildcard matches
+     * - Captured values stored in $_GET[0], $_GET[1], etc. (left to right order)
+     * - Examples:
+     *   - /users/123 → tries users/123.php, then users/_.php (captures "123" in $_GET[0])
+     *   - /users/100/friendship/200 → tries exact path, then users/_/friendship/_.php (captures "100", "200")
+     *
      * Security:
      * - Client requests: Path components starting with underscore are blocked (except via __DEFAULT__.php)
      * - Internal redirects: Underscore paths allowed (developer-controlled)
+     * - Wildcard files (_/*.php) are internal-only (underscore prefix protection applies)
      *
      * @param string $path Request path (without query string)
      * @param bool $internalRequest Whether to allow underscore-prefixed paths
@@ -195,15 +260,102 @@ class Router implements RequestHandlerInterface
         // Route file registry:
         $routes = Mini::$mini->paths->routes;
 
-        // First try direct match
-        if (null !== ($match = $routes->findFirst($resolvedPath = implode("/", $parts) . ($isDir ? 'index.php' : '.php')))) {
-            // Set resolvedPath to parent directory for redirect resolution
-            // e.g., "mini/_page.php" -> "mini/", "mini/index.php" -> "mini/"
-            $resolvedPath = dirname($resolvedPath) . '/';
-            if ($resolvedPath === './') {
-                $resolvedPath = '';
+        // Try to match path with wildcards (filesystem-based wildcards using "_")
+        // Build path segment by segment, trying exact match first, then "_" wildcard
+        $matchedParts = [];
+        $wildcardValues = [];
+
+        // Get all possible base paths (primary + fallbacks)
+        $basePaths = $routes->getPaths();
+
+        // Match directory segments
+        for ($i = 0; $i < $partCount - 1; $i++) {
+            $segment = $parts[$i];
+            $currentPath = implode("/", $matchedParts);
+
+            $foundMatch = false;
+
+            // Try exact match for this directory segment
+            $candidateDir = ($currentPath !== '' ? $currentPath . '/' : '') . $segment;
+            foreach ($basePaths as $basePath) {
+                if (is_dir($basePath . '/' . $candidateDir)) {
+                    $matchedParts[] = $segment;
+                    $foundMatch = true;
+                    break;
+                }
             }
-            return $match;
+
+            if (!$foundMatch) {
+                // Try wildcard directory "_"
+                $wildcardDir = ($currentPath !== '' ? $currentPath . '/' : '') . '_';
+                foreach ($basePaths as $basePath) {
+                    if (is_dir($basePath . '/' . $wildcardDir)) {
+                        $matchedParts[] = '_';
+                        $wildcardValues[] = $segment;
+                        $foundMatch = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!$foundMatch) {
+                // No match found, stop trying file-based matching
+                break;
+            }
+        }
+
+        // If we successfully matched all directory segments, try to match the file
+        if (count($matchedParts) === $partCount - 1) {
+            $finalSegment = $parts[$partCount - 1];
+            $basePath = implode("/", $matchedParts);
+
+            if ($isDir) {
+                // Request ends with /, look for index.php
+                $exactFile = ($basePath !== '' ? $basePath . '/' : '') . $finalSegment . '/index.php';
+                if (null !== ($match = $routes->findFirst($exactFile))) {
+                    $resolvedPath = dirname($exactFile) . '/';
+                    if ($resolvedPath === './') {
+                        $resolvedPath = '';
+                    }
+                    $this->populateWildcardParams($wildcardValues);
+                    return $match;
+                }
+
+                // Try wildcard directory with index.php
+                $wildcardFile = ($basePath !== '' ? $basePath . '/' : '') . '_/index.php';
+                if (null !== ($match = $routes->findFirst($wildcardFile))) {
+                    $resolvedPath = dirname($wildcardFile) . '/';
+                    if ($resolvedPath === './') {
+                        $resolvedPath = '';
+                    }
+                    $wildcardValues[] = $finalSegment;
+                    $this->populateWildcardParams($wildcardValues);
+                    return $match;
+                }
+            } else {
+                // Request without trailing slash, look for .php file
+                $exactFile = ($basePath !== '' ? $basePath . '/' : '') . $finalSegment . '.php';
+                if (null !== ($match = $routes->findFirst($exactFile))) {
+                    $resolvedPath = dirname($exactFile) . '/';
+                    if ($resolvedPath === './') {
+                        $resolvedPath = '';
+                    }
+                    $this->populateWildcardParams($wildcardValues);
+                    return $match;
+                }
+
+                // Try wildcard file _.php
+                $wildcardFile = ($basePath !== '' ? $basePath . '/' : '') . '_.php';
+                if (null !== ($match = $routes->findFirst($wildcardFile))) {
+                    $resolvedPath = dirname($wildcardFile) . '/';
+                    if ($resolvedPath === './') {
+                        $resolvedPath = '';
+                    }
+                    $wildcardValues[] = $finalSegment;
+                    $this->populateWildcardParams($wildcardValues);
+                    return $match;
+                }
+            }
         }
 
         // no direct match, so we must look for __DEFAULT__.php files
@@ -218,6 +370,21 @@ class Router implements RequestHandlerInterface
         $resolvedPath = null;
 
         return null;
+    }
+
+    /**
+     * Populate $_GET with wildcard parameter values
+     *
+     * Assigns numeric indices (0, 1, 2, ...) to wildcard values captured from filesystem-based
+     * wildcard routing using "_" directories and files.
+     *
+     * @param array<int, string> $values Wildcard values in left-to-right order
+     */
+    private function populateWildcardParams(array $values): void
+    {
+        foreach ($values as $index => $value) {
+            $_GET[$index] = $value;
+        }
     }
 
     /**

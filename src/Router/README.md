@@ -37,6 +37,48 @@ URL: /admin/
 File: _routes/admin/index.php
 ```
 
+**Filesystem Wildcards:**
+
+Use `_` as a directory or file name to match any single path segment:
+
+```
+URL: /users/123
+File: _routes/users/_.php
+Captured: $_GET[0] = '123'
+
+URL: /users/456/
+File: _routes/users/_/index.php
+Captured: $_GET[0] = '456'
+
+URL: /users/100/friendship/200
+File: _routes/users/_/friendship/_.php
+Captured: $_GET[0] = '100', $_GET[1] = '200'
+```
+
+**How it works:**
+- Router tries exact match first, then falls back to `_` wildcard
+- Wildcards match single segments only (won't match across `/`)
+- Captured values stored in `$_GET[0]`, `$_GET[1]`, etc. (left to right)
+- Works for both files (`_.php`) and directories (`_/index.php`)
+- If no wildcard match, falls back to `__DEFAULT__.php`
+
+**Example:**
+```php
+<?php
+// _routes/users/_.php - handles /users/{anything}
+
+$userId = $_GET[0];  // Captured from URL
+$user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$userId]);
+
+if (!$user) {
+    http_response_code(404);
+    echo json_encode(['error' => 'User not found']);
+    exit;
+}
+
+echo json_encode($user);
+```
+
 **Security:**
 ```
 URL: /api/_helpers
@@ -266,7 +308,9 @@ echo json_encode($data);  // No return
 |------|---------|
 | `index.php` | Handles directory root (e.g., `/api/`) |
 | `users.php` | Handles specific path (e.g., `/users`) |
-| `__DEFAULT__.php` | Dynamic routing configuration |
+| `_.php` | Wildcard file - matches any single segment, captured in `$_GET[0]` |
+| `_/index.php` | Wildcard directory - matches any single segment with trailing slash |
+| `__DEFAULT__.php` | Dynamic routing configuration with pattern matching |
 | `_helpers.php` | Internal helpers (NOT publicly routable) |
 | `_shared.php` | Shared code (NOT publicly routable) |
 

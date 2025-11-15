@@ -186,8 +186,46 @@ class Router
                 // Extract named parameters
                 $params = array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY);
 
+                // Enforce trailing slash consistency
+                $routeEndsWithSlash = str_ends_with($route['path'], '/');
+                $pathEndsWithSlash = str_ends_with($path, '/');
+
+                if ($routeEndsWithSlash && !$pathEndsWithSlash) {
+                    // Route expects trailing slash but path doesn't have it - redirect
+                    return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
+                } elseif (!$routeEndsWithSlash && $pathEndsWithSlash && $path !== '/') {
+                    // Route doesn't expect trailing slash but path has it - redirect
+                    return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/')], 301);
+                }
+
                 // Invoke handler
                 return $this->invokeHandler($route, $request, $params);
+            }
+        }
+
+        // No route matched - check if alternate path (with/without trailing slash) would match
+        if (!str_ends_with($path, '/')) {
+            // Try with trailing slash
+            foreach ($this->routes as $route) {
+                if ($route['method'] !== '*' && $route['method'] !== $method) {
+                    continue;
+                }
+                if (preg_match($route['pattern'], $path . '/', $matches)) {
+                    // Alternate path matches - redirect to it
+                    return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
+                }
+            }
+        } elseif ($path !== '/') {
+            // Try without trailing slash
+            $pathWithoutSlash = rtrim($path, '/');
+            foreach ($this->routes as $route) {
+                if ($route['method'] !== '*' && $route['method'] !== $method) {
+                    continue;
+                }
+                if (preg_match($route['pattern'], $pathWithoutSlash, $matches)) {
+                    // Alternate path matches - redirect to it
+                    return new \mini\Http\Message\Response('', ['Location' => $pathWithoutSlash], 301);
+                }
             }
         }
 
