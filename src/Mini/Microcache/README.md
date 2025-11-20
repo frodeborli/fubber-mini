@@ -56,23 +56,17 @@ $schema = Mini::$mini->fastCache->fetch('db.schema', function() {
 
 ### ApcuMicrocache (Default when APCu available)
 
-Two-tier caching strategy:
+Single-tier caching using APCu shared memory:
 
-1. **L1: Process Memory** (static array)
-   - Fastest tier - no syscalls
-   - Cleared when PHP process restarts
-   - Unique per PHP-FPM worker process
-
-2. **L2: APCu Shared Memory**
-   - Fast tier - shared memory syscall
-   - Shared across all PHP-FPM workers on same server
-   - Survives process restarts
-   - Respects TTL
+- **APCu Shared Memory**
+  - Sub-millisecond access (~0.001ms)
+  - Shared across all PHP-FPM workers on same server
+  - Survives process restarts
+  - Respects TTL (time-to-live)
 
 **Lookup order:**
-1. Check process memory → instant return if hit
-2. Check APCu → promote to process memory if hit
-3. Call generator function → store in both tiers
+1. Check APCu → return if hit
+2. Call generator function → store in APCu
 
 ### VoidMicrocache (Fallback when APCu unavailable)
 
@@ -147,20 +141,18 @@ Mini::$mini->fastCache->fetch('data', fn() => ...);
 
 ## TTL Behavior
 
-- **ApcuMicrocache**: TTL applies to APCu tier only. Process memory never expires (cleared on process restart).
-- **VoidMicrocache**: TTL parameter is ignored (nothing cached).
+- **ApcuMicrocache**: TTL applies to APCu cache entries
+- **VoidMicrocache**: TTL parameter is ignored (nothing cached)
 
 ```php
-// TTL of 0 = cache forever (until process restart or APCu eviction)
+// TTL of 0 = cache forever (until APCu eviction or manual clear)
 Mini::$mini->fastCache->fetch('key', fn() => ..., ttl: 0);
 
-// TTL of 300 = cache for 5 minutes in APCu
+// TTL of 300 = cache for 5 minutes
 Mini::$mini->fastCache->fetch('key', fn() => ..., ttl: 300);
 ```
 
 ## Cache Invalidation
-
-### APCu
 
 ```php
 // Clear specific key
@@ -169,16 +161,6 @@ apcu_delete('app.config');
 // Clear all APCu cache
 apcu_clear_cache();
 ```
-
-### Process Memory
-
-Process memory is automatically cleared when PHP-FPM restarts:
-
-```bash
-sudo systemctl restart php8.3-fpm
-```
-
-Or wait for process recycling (configured in PHP-FPM pool settings).
 
 ## Monitoring APCu
 

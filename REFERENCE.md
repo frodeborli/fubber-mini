@@ -172,7 +172,7 @@ $routes = Mini::$mini->fastCache->fetch('app.routes', function() {
 ```
 
 **Implementations:**
-- `ApcuMicrocache` - Two-tier (process memory + APCu shared memory)
+- `ApcuMicrocache` - APCu shared memory caching
 - `VoidMicrocache` - No-op fallback (when APCu unavailable)
 
 See [src/Mini/Microcache/README.md](src/Mini/Microcache/README.md) for full documentation.
