@@ -121,6 +121,48 @@ class PDOSqlite3ApcuDriver implements ApcuDriverInterface
     }
 
     /* --------------------------------------------------------------------
+     * GARBAGE COLLECTION
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Probabilistic GC: 1 in 10,000 chance to clean expired entries.
+     *
+     * SQLite has no native TTL, so we need to periodically scan for expired
+     * entries based on the logical expiry stored in the payload.
+     */
+    protected function maybeGarbageCollect(): void
+    {
+        if (mt_rand(0, 9999) !== 0) {
+            return;
+        }
+
+        // Scan all entries and delete expired ones
+        // This is expensive but runs rarely (0.01% of writes)
+        try {
+            $stmt = $this->pdo->query('SELECT key, payload FROM cache');
+            $toDelete = [];
+
+            while ($row = $stmt->fetch()) {
+                $expired = false;
+                $expiresAt = null;
+                $this->unpackValue($row['payload'], $expired, $expiresAt);
+
+                if ($expired) {
+                    $toDelete[] = $row['key'];
+                }
+            }
+
+            if (!empty($toDelete)) {
+                $placeholders = implode(',', array_fill(0, count($toDelete), '?'));
+                $deleteStmt = $this->pdo->prepare("DELETE FROM cache WHERE key IN ($placeholders)");
+                $deleteStmt->execute($toDelete);
+            }
+        } catch (\PDOException $e) {
+            // GC failure is not critical - ignore
+        }
+    }
+
+    /* --------------------------------------------------------------------
      * ApcuDriverInterface methods not provided by the trait
      * ------------------------------------------------------------------ */
 

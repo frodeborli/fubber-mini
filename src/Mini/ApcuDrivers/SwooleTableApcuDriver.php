@@ -86,6 +86,33 @@ class SwooleTableApcuDriver implements ApcuDriverInterface
     }
 
     /* --------------------------------------------------------------------
+     * GARBAGE COLLECTION
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Probabilistic GC: 1 in 10,000 chance to clean expired entries.
+     *
+     * Swoole\Table has no native TTL, so we scan for logically expired entries.
+     */
+    protected function maybeGarbageCollect(): void
+    {
+        if (mt_rand(0, 9999) !== 0) {
+            return;
+        }
+
+        // Scan table and delete expired entries
+        foreach ($this->table as $key => $row) {
+            $expired = false;
+            $expiresAt = null;
+            $this->unpackValue($row['payload'], $expired, $expiresAt);
+
+            if ($expired) {
+                $this->table->del($key);
+            }
+        }
+    }
+
+    /* --------------------------------------------------------------------
      * REQUIRED ApcuDriverInterface METHODS NOT PROVIDED BY THE TRAIT
      * ------------------------------------------------------------------ */
 
@@ -96,8 +123,6 @@ class SwooleTableApcuDriver implements ApcuDriverInterface
     {
         $entries = 0;
         foreach ($this->table as $k => $row) {
-            // The trait enforces TTL on access; some entries may be logically
-            // expired but still present. We don’t try to GC here.
             $entries++;
         }
 

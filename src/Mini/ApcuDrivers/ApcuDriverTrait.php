@@ -166,6 +166,21 @@ trait ApcuDriverTrait
     }
 
     /* --------------------------------------------------------------------
+     * PROBABILISTIC GARBAGE COLLECTION
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Probabilistic garbage collection - randomly triggers on write operations.
+     *
+     * Probability: 1 in 10,000 (0.01%)
+     * Override in concrete drivers if they need different GC behavior.
+     */
+    protected function maybeGarbageCollect(): void
+    {
+        // Disabled by default - drivers should implement if needed
+    }
+
+    /* --------------------------------------------------------------------
      * PUBLIC APCU-LIKE OPERATIONS
      * ------------------------------------------------------------------ */
 
@@ -242,7 +257,12 @@ trait ApcuDriverTrait
         $payload    = $this->packValue($var, $expiresAt);
         $backendTtl = $this->backendTtl($expiresAt);
 
-        return $this->_store($keys, $payload, $backendTtl);
+        $result = $this->_store($keys, $payload, $backendTtl);
+
+        // Probabilistic GC on writes
+        $this->maybeGarbageCollect();
+
+        return $result;
     }
 
     /** apcu_delete */
