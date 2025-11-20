@@ -141,6 +141,42 @@ setMultiple(iterable $values, null|int $ttl = null): bool
 deleteMultiple(iterable $keys): bool
 ```
 
+### Microcache (Ultra-Fast Local Cache)
+
+```php
+Mini::$mini->fastCache->fetch(string $key, Closure $generator, float $ttl = 0): mixed
+```
+
+Ultra-fast local caching for data where network round-trip (Redis/Memcached) would be slower than local fetch.
+
+**When to use:**
+- Parsed config files, route tables, translations
+- Database schema metadata, compiled templates
+- Frequently accessed small datasets
+
+**Performance:** ~0.001ms (APCu) vs ~0.5-1ms (Redis/Memcached)
+
+**Example:**
+```php
+use mini\Mini;
+
+// Cache parsed config (only parsed once)
+$config = Mini::$mini->fastCache->fetch('app.config', function() {
+    return parse_ini_file(__DIR__ . '/config.ini', true);
+});
+
+// Cache with TTL (APCu only)
+$routes = Mini::$mini->fastCache->fetch('app.routes', function() {
+    return require __DIR__ . '/_routes.php';
+}, ttl: 300);
+```
+
+**Implementations:**
+- `ApcuMicrocache` - Two-tier (process memory + APCu shared memory)
+- `VoidMicrocache` - No-op fallback (when APCu unavailable)
+
+See [src/Mini/Microcache/README.md](src/Mini/Microcache/README.md) for full documentation.
+
 ### Logging
 
 ```php
@@ -275,6 +311,7 @@ class Mini implements ContainerInterface {
     public readonly string $timezone;          # Default timezone
     public readonly string $defaultLanguage;   # Default language
     public readonly string $salt;              # Cryptographic salt (auto-generated or MINI_SALT)
+    public readonly MicrocacheInterface $fastCache;  # Ultra-fast local cache (APCu/VoidMicrocache)
 
     public function addService(string $id, Lifetime $lifetime, Closure $factory): void
     public function has(string $id): bool
