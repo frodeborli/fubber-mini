@@ -6,7 +6,7 @@ use mini\Mini;
 use mini\Converter\ConverterRegistryInterface;
 use mini\Http\ResponseAlreadySentException;
 use Psr\Http\Message\{ServerRequestInterface, ResponseInterface, UploadedFileInterface};
-use Psr\Http\Server\RequestHandlerInterface;
+use Psr\Http\Server\{RequestHandlerInterface, MiddlewareInterface};
 use mini\Http\Message\{ServerRequest, Stream, UploadedFile};
 
 /**
@@ -47,11 +47,48 @@ class HttpDispatcher
     private ConverterRegistryInterface $exceptionConverters;
     private ?ServerRequestInterface $currentServerRequest = null;
 
+    /** @var array<MiddlewareInterface> Middleware stack (FIFO order) */
+    private array $middlewares = [];
+
     public function __construct()
     {
         // Create separate converter registry for exceptions
         // This keeps exception handling separate from content conversion
         $this->exceptionConverters = new \mini\Converter\ConverterRegistry();
+    }
+
+    /**
+     * Add middleware to the request pipeline
+     *
+     * Middleware is executed in the order added (FIFO).
+     * Can only be called during Bootstrap phase - throws exception if called after Ready phase.
+     *
+     * Examples:
+     * ```php
+     * // In bootstrap.php or module functions.php
+     * $dispatcher = Mini::$mini->get(HttpDispatcher::class);
+     * $dispatcher->addMiddleware(Mini::$mini->get(StaticFiles::class));
+     * $dispatcher->addMiddleware(new CorsMiddleware());
+     * $dispatcher->addMiddleware(new AuthMiddleware());
+     * ```
+     *
+     * @param MiddlewareInterface $middleware PSR-15 middleware instance
+     * @return self For method chaining
+     * @throws \RuntimeException If called after Bootstrap phase
+     */
+    public function addMiddleware(MiddlewareInterface $middleware): self
+    {
+        // Only allow middleware registration during Bootstrap phase
+        $currentPhase = Mini::$mini->phase->getCurrentState();
+        if ($currentPhase === \mini\Phase::Ready || $currentPhase === \mini\Phase::Shutdown) {
+            throw new \RuntimeException(
+                'Cannot add middleware after Bootstrap phase. ' .
+                'Middleware must be registered during application bootstrap.'
+            );
+        }
+
+        $this->middlewares[] = $middleware;
+        return $this;
     }
 
     /**
@@ -100,8 +137,8 @@ class HttpDispatcher
      * 4. Replace $_GET, $_POST, $_COOKIE with proxies (fiber-safe)
      * 5. Declare Ready phase (locks down service registration)
      * 6. Add request replacement callback for Router
-     * 7. Get RequestHandlerInterface from container (Router)
-     * 8. Handle request and get response
+     * 7. Build middleware chain and get RequestHandlerInterface (Router)
+     * 8. Process request through middleware chain → router → handlers
      * 9. Catch exceptions and convert to responses
      * 10. Emit response to browser
      *
@@ -140,9 +177,15 @@ class HttpDispatcher
                 }
             );
 
-            // 7. Dispatch into the framework
+            // 7. Build middleware chain and dispatch into the framework
             try {
+                // Get the final handler (Router)
                 $handler = Mini::$mini->get(RequestHandlerInterface::class);
+
+                // Wrap handler with middleware stack (reverse order for FIFO execution)
+                $handler = $this->buildMiddlewareChain($handler);
+
+                // Process request through middleware chain
                 $response = $handler->handle($serverRequest);
 
             } catch (ResponseAlreadySentException $e) {
@@ -167,6 +210,41 @@ class HttpDispatcher
             // Last resort error handling
             $this->handleFatalError($e);
         }
+    }
+
+    /**
+     * Build middleware chain wrapper around the final handler
+     *
+     * Wraps the handler (Router) with all registered middleware in reverse order
+     * to ensure FIFO execution (first added middleware executes first).
+     *
+     * @param RequestHandlerInterface $handler Final handler (typically Router)
+     * @return RequestHandlerInterface Wrapped handler with middleware chain
+     */
+    private function buildMiddlewareChain(RequestHandlerInterface $handler): RequestHandlerInterface
+    {
+        // If no middleware registered, return handler as-is
+        if (empty($this->middlewares)) {
+            return $handler;
+        }
+
+        // Wrap handler with middleware in reverse order (FIFO execution)
+        // Last middleware in array wraps the handler first
+        for ($i = count($this->middlewares) - 1; $i >= 0; $i--) {
+            $middleware = $this->middlewares[$i];
+            $handler = new class($middleware, $handler) implements RequestHandlerInterface {
+                public function __construct(
+                    private MiddlewareInterface $middleware,
+                    private RequestHandlerInterface $next
+                ) {}
+
+                public function handle(ServerRequestInterface $request): ResponseInterface {
+                    return $this->middleware->process($request, $this->next);
+                }
+            };
+        }
+
+        return $handler;
     }
 
     /**
