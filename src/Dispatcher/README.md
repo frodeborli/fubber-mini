@@ -77,9 +77,9 @@ foreach ($_GET as $k => $v)  // ✓ Works
 Default exception converters are registered in `src/Dispatcher/defaults.php`:
 
 ```php
-// ResourceNotFoundException → 404 Not Found
+// NotFoundException → 404 Not Found
 $dispatcher->registerExceptionConverter(
-    function(\mini\Exceptions\ResourceNotFoundException $e): ResponseInterface {
+    function(\mini\Exceptions\NotFoundException $e): ResponseInterface {
         // Shows debug page in debug mode, clean 404 page in production
         $html = /* ErrorHandler renders page */;
         return new Response($html, ['Content-Type' => 'text/html'], 404);

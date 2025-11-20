@@ -109,7 +109,7 @@ return new class extends AbstractController {
     public function show(int $id): array
     {
         $user = db()->query("SELECT * FROM users WHERE id = ?", [$id])->fetch();
-        if (!$user) throw new \mini\Exceptions\ResourceNotFoundException();
+        if (!$user) throw new \mini\Exceptions\NotFoundException();
         return $user;
     }
 
@@ -186,7 +186,7 @@ Use file-based routing when you have:
 
 ```php
 // Throw domain exceptions - dispatcher handles HTTP mapping
-throw new \mini\Exceptions\ResourceNotFoundException('User not found');     // → 404
+throw new \mini\Exceptions\NotFoundException('User not found');     // → 404
 throw new \mini\Exceptions\AccessDeniedException('Login required');         // → 401/403
 throw new \mini\Exceptions\BadRequestException('Invalid email format');     // → 400
 
@@ -199,8 +199,8 @@ throw new \RuntimeException('Database connection failed');                  // �
 Exception converters live in `src/Dispatcher/defaults.php` and map exceptions to HTTP responses:
 
 ```php
-// ResourceNotFoundException → 404
-$dispatcher->registerExceptionConverter(function(\mini\Exceptions\ResourceNotFoundException $e): ResponseInterface {
+// NotFoundException → 404
+$dispatcher->registerExceptionConverter(function(\mini\Exceptions\NotFoundException $e): ResponseInterface {
     return new Response($html, ['Content-Type' => 'text/html; charset=utf-8'], 404);
 });
 

@@ -10,7 +10,14 @@ use PDO;
 Mini::$mini->addService(PDO::class, Lifetime::Scoped, fn() => Mini::$mini->loadServiceConfig(PDO::class));
 Mini::$mini->addService(DatabaseInterface::class, Lifetime::Scoped, fn() => Mini::$mini->loadServiceConfig(DatabaseInterface::class));
 
-// Declare the mini\db(): DatabaseInterface accessor function
+/**
+ * Get the database service instance
+ *
+ * Returns a lazy-loaded DatabaseInterface for executing queries.
+ * Configuration is loaded from _config/database.php on first use.
+ *
+ * @return DatabaseInterface The database service
+ */
 function db(): DatabaseInterface {
     return Mini::$mini->get(DatabaseInterface::class);
 }

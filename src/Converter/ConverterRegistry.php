@@ -46,6 +46,29 @@ class ConverterRegistry implements ConverterRegistryInterface
      */
     public function register(ConverterInterface|\Closure $converter): void
     {
+        $this->doRegister($converter, false);
+    }
+
+    /**
+     * Replace an existing converter
+     *
+     * @param ConverterInterface|\Closure $converter Converter instance or typed closure
+     * @throws \InvalidArgumentException If closure signature is invalid
+     */
+    public function replace(ConverterInterface|\Closure $converter): void
+    {
+        $this->doRegister($converter, true);
+    }
+
+    /**
+     * Internal registration logic
+     *
+     * @param ConverterInterface|\Closure $converter Converter instance or typed closure
+     * @param bool $allowReplace Whether to allow replacing existing converters
+     * @throws \InvalidArgumentException If converter conflicts with existing registration
+     */
+    private function doRegister(ConverterInterface|\Closure $converter, bool $allowReplace): void
+    {
         if ($converter instanceof \Closure) {
             $converter = new ClosureConverter($converter);
         }
@@ -65,10 +88,13 @@ class ConverterRegistry implements ConverterRegistryInterface
 
             // Exact key (single or union key) already registered
             if (isset($byInput[$single]) && $byInput[$single] instanceof ConverterInterface) {
-                // direct converter already exists for this type → conflict
-                throw new \InvalidArgumentException(
-                    sprintf('Converter already exists from %s to %s', $single, $targetType)
-                );
+                if (!$allowReplace) {
+                    // direct converter already exists for this type → conflict
+                    throw new \InvalidArgumentException(
+                        sprintf('Converter already exists from %s to %s', $single, $targetType)
+                    );
+                }
+                // replace mode: just overwrite
             }
 
             // If this type currently aliases to a union, we are more specific → override allowed
@@ -80,9 +106,12 @@ class ConverterRegistry implements ConverterRegistryInterface
         // Union converter
         // Prevent exact same union key duplicate
         if (isset($byInput[$inputKey]) && $byInput[$inputKey] instanceof ConverterInterface) {
-            throw new \InvalidArgumentException(
-                sprintf('Converter already exists from %s to %s', $inputKey, $targetType)
-            );
+            if (!$allowReplace) {
+                throw new \InvalidArgumentException(
+                    sprintf('Converter already exists from %s to %s', $inputKey, $targetType)
+                );
+            }
+            // replace mode: just overwrite below
         }
 
         // For each member type, ensure no conflicting converter/alias exists.
@@ -94,8 +123,8 @@ class ConverterRegistry implements ConverterRegistryInterface
             $existing = $byInput[$single];
 
             // If there's already a direct converter for this single type,
-            // union is less specific → conflict.
-            if ($existing instanceof ConverterInterface) {
+            // union is less specific → conflict (even in replace mode).
+            if ($existing instanceof ConverterInterface && !$allowReplace) {
                 throw new \InvalidArgumentException(
                     sprintf(
                         'Cannot register union converter %s→%s: single-type converter for %s already exists',
@@ -107,8 +136,8 @@ class ConverterRegistry implements ConverterRegistryInterface
             }
 
             // If there is already an alias for this single type, it points to another union.
-            // Two overlapping unions for the same single type → conflict.
-            if (is_string($existing)) {
+            // Two overlapping unions for the same single type → conflict (even in replace mode).
+            if (is_string($existing) && !$allowReplace) {
                 throw new \InvalidArgumentException(
                     sprintf(
                         'Cannot register union converter %s→%s: %s already part of union %s',
@@ -121,7 +150,7 @@ class ConverterRegistry implements ConverterRegistryInterface
             }
         }
 
-        // No conflicts: register union converter and alias each member type to it
+        // No conflicts (or replace mode): register union converter and alias each member type to it
         $byInput[$inputKey] = $converter;
 
         foreach ($inputTypes as $single) {

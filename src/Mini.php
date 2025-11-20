@@ -322,8 +322,9 @@ final class Mini implements ContainerInterface {
      * - Scoped: One instance per request stored in instanceCache[getRequestScope()]
      * - Transient: New instance every time
      *
-     * @param string $id Service identifier
-     * @return mixed The service instance
+     * @template T
+     * @param class-string<T> $id Service identifier (typically a class or interface name)
+     * @return T The service instance
      * @throws Exceptions\NotFoundException If service is not registered
      */
     public function get(string $id): mixed {

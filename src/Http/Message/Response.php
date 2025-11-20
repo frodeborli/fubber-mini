@@ -3,6 +3,11 @@ namespace mini\Http\Message;
 
 use Psr\Http\Message\ResponseInterface;
 
+/**
+ * Representation of a response from the application to the client
+ *
+ * Immutable PSR-7 value object for outgoing HTTP responses.
+ */
 class Response implements ResponseInterface {
     use ResponseTrait;
 

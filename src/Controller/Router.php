@@ -231,7 +231,7 @@ class Router
      *
      * @param ServerRequestInterface $request
      * @return array|ResponseInterface Array with 'handler' and 'params', or redirect Response
-     * @throws \mini\Exceptions\ResourceNotFoundException If no route matches
+     * @throws \mini\Exceptions\NotFoundException If no route matches
      */
     public function match(ServerRequestInterface $request): array|ResponseInterface
     {
@@ -300,7 +300,7 @@ class Router
         }
 
         // No route matched - 404
-        throw new \mini\Exceptions\ResourceNotFoundException('Route not found');
+        throw new \mini\Exceptions\NotFoundException('Route not found');
     }
 
 

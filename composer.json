@@ -40,6 +40,7 @@
             "src/Router/functions.php",
             "src/Http/functions.php",
             "src/I18n/functions.php",
+            "src/Static/functions.php",
             "src/Template/functions.php",
             "src/Tables/functions.php",
             "src/Logger/functions.php",

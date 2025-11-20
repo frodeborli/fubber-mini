@@ -4,7 +4,7 @@
 /**
  * Translation Management Tool
  *
- * Manages translation files for the WCAG project:
+ * Manages translation files for Mini applications:
  * - Scans PHP files for t() function calls
  * - Validates translation files
  * - Adds missing translations
@@ -192,12 +192,25 @@ class TranslationManager
     {
         foreach ($tokens as $token) {
             if (is_array($token) && in_array($token[0], [T_CONSTANT_ENCAPSED_STRING, T_ENCAPSED_AND_WHITESPACE])) {
-                // Remove quotes and decode escape sequences
                 $string = $token[1];
-                if ((str_starts_with($string, '"') && str_ends_with($string, '"')) ||
-                    (str_starts_with($string, "'") && str_ends_with($string, "'"))) {
-                    return substr($string, 1, -1);
+
+                // Double-quoted string - process escape sequences
+                if (str_starts_with($string, '"') && str_ends_with($string, '"')) {
+                    $inner = substr($string, 1, -1);
+                    // Decode common escape sequences
+                    return str_replace(
+                        ['\\\\', '\\"', '\\n', '\\r', '\\t', '\\$'],
+                        ['\\', '"', "\n", "\r", "\t", '$'],
+                        $inner
+                    );
                 }
+
+                // Single-quoted string - only \\ and \' are escape sequences
+                if (str_starts_with($string, "'") && str_ends_with($string, "'")) {
+                    $inner = substr($string, 1, -1);
+                    return str_replace(['\\\\', "\\'"], ['\\', "'"], $inner);
+                }
+
                 return $string;
             }
         }
@@ -626,7 +639,7 @@ function showUsage(): void
 {
     echo "Translation Management Tool\n";
     echo "\n";
-    echo "Usage: php bin/translations.php [action] [options]\n";
+    echo "Usage: vendor/bin/mini translations [action] [options]\n";
     echo "\n";
     echo "Actions:\n";
     echo "  (none)                    Show current translation status (default)\n";
@@ -644,12 +657,12 @@ function showUsage(): void
     echo "  --help                   Show this help message\n";
     echo "\n";
     echo "Examples:\n";
-    echo "  php bin/translations.php                         # Show translation status\n";
-    echo "  php bin/translations.php add-missing             # Add missing strings\n";
-    echo "  php bin/translations.php remove-orphans          # Remove orphaned strings\n";
-    echo "  php bin/translations.php --exclude=vendor,tests  # Custom exclusions\n";
-    echo "  php bin/translations.php add-language es         # Create Spanish translations\n";
-    echo "  php bin/translations.php update-language no      # Update Norwegian translations\n";
+    echo "  vendor/bin/mini translations                         # Show translation status\n";
+    echo "  vendor/bin/mini translations add-missing             # Add missing strings\n";
+    echo "  vendor/bin/mini translations remove-orphans          # Remove orphaned strings\n";
+    echo "  vendor/bin/mini translations --exclude=vendor,tests  # Custom exclusions\n";
+    echo "  vendor/bin/mini translations add-language es         # Create Spanish translations\n";
+    echo "  vendor/bin/mini translations update-language nb      # Update Norwegian translations\n";
 }
 
 // Parse command line arguments

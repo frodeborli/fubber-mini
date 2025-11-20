@@ -74,6 +74,31 @@ interface ConverterRegistryInterface
     public function register(ConverterInterface|\Closure $converter): void;
 
     /**
+     * Replace an existing converter
+     *
+     * Similar to register() but allows overriding existing converters without
+     * throwing conflicts. Useful for customizing default framework converters.
+     *
+     * If no converter exists for the given input→output type combination,
+     * behaves identically to register().
+     *
+     * When replacing a union converter, all member type aliases are updated
+     * to point to the new converter.
+     *
+     * Example:
+     * ```php
+     * // Override the default string→Response converter
+     * $registry->replace(function(string $text): ResponseInterface {
+     *     return new Response(200, ['Content-Type' => 'text/html'], "<p>$text</p>");
+     * });
+     * ```
+     *
+     * @param ConverterInterface|\Closure $converter Converter instance or typed closure
+     * @throws \InvalidArgumentException If closure signature is invalid
+     */
+    public function replace(ConverterInterface|\Closure $converter): void;
+
+    /**
      * Check if a converter exists for input to target type
      *
      * @param mixed $input The value to convert

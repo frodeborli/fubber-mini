@@ -7,6 +7,7 @@ use mini\Http\ResponseAlreadySentException;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Server\RequestHandlerInterface;
+use RuntimeException;
 
 /**
  * Simple file-based router for Mini framework
@@ -98,19 +99,21 @@ class Router implements RequestHandlerInterface
                     }
                 }
 
-                throw new \mini\Exceptions\ResourceNotFoundException("Not Found: $path");
+                throw new \mini\Exceptions\NotFoundException("Not Found: $path");
             }
 
             // Enforce trailing slash consistency:
-            // - index.php and __DEFAULT__.php files should only handle paths WITH trailing slash
+            // - index.php files should only handle paths WITH trailing slash
             // - non-index .php files should only handle paths WITHOUT trailing slash
-            $isIndexFile = str_ends_with($handlerFile, '/index.php') || str_ends_with($handlerFile, '/__DEFAULT__.php');
+            // - __DEFAULT__.php handles its own routing logic (no automatic redirects)
+            $isIndexFile = str_ends_with($handlerFile, '/index.php');
+            $isDefaultFile = str_ends_with($handlerFile, '/__DEFAULT__.php');
             $pathHasSlash = str_ends_with($path, '/');
 
             if ($isIndexFile && !$pathHasSlash) {
-                // index.php or __DEFAULT__.php matched a path without trailing slash - redirect to add slash
+                // index.php matched a path without trailing slash - redirect to add slash
                 return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
-            } elseif (!$isIndexFile && $pathHasSlash && $path !== '/') {
+            } elseif (!$isIndexFile && !$isDefaultFile && $pathHasSlash && $path !== '/') {
                 // Regular .php file matched a path with trailing slash - redirect to remove slash
                 return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/')], 301);
             }
@@ -160,7 +163,7 @@ class Router implements RequestHandlerInterface
 
             // 4. Include controller file and get return value
             try {
-                $returnValue = (static function() use ($handlerFile) { return require $handlerFile; })();
+                $returnValue = self::runControllerFile($handlerFile);
             } catch (Redirect $redirect) {
                 if ($redirectCount > self::MAX_REDIRECTS) {
                     throw new \RuntimeException(
@@ -226,6 +229,26 @@ class Router implements RequestHandlerInterface
             }
 
             return $response;
+        }
+    }
+
+    private static function runControllerFile(string $filePath)
+    {
+        // TODO: We should detect if the controller uses \header() etc - and trigger an error
+        ob_start();
+        $result = (static function() use ($filePath) { return require $filePath; })();
+        $output = ob_get_clean();
+        if ($result === 1 && ($output !== '' || headers_sent() || headers_list() !== [])) {
+            // In the case that the controller returns 1 explicitly, we want to avoid treating the
+            // response as HTML, so we must check that either there is output, or headers were set or sent
+            echo $output;
+            return null;
+        } else {
+            // return value takes precedence over output buffer
+            if ($output !== '') {
+                throw new RuntimeException("Controller file '$filePath' produced unexpected output. Controllers must either use classical PHP output (echo/header) and return nothing, or return a value (which will be converted to a response). Mixing both is not allowed.");
+            }
+            return $result;
         }
     }
 
@@ -478,7 +501,7 @@ class Router implements RequestHandlerInterface
             }
         }
 
-        throw new \mini\Exceptions\ResourceNotFoundException("No route pattern matched: $currentPath");
+        throw new \mini\Exceptions\NotFoundException("No route pattern matched: $partialRequestTarget");
     }
 
     private function injectRunClosure(\Closure $target, array $vars): string {

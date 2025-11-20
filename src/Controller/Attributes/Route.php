@@ -20,7 +20,7 @@ namespace mini\Controller\Attributes;
  * public function show(int $id): ResponseInterface
  * {
  *     $user = table(User::class)->find($id);
- *     if (!$user) throw new \mini\Exceptions\ResourceNotFoundException();
+ *     if (!$user) throw new \mini\Exceptions\NotFoundException();
  *     return $this->respond($user);
  * }
  * ```

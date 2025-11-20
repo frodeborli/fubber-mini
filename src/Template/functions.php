@@ -17,6 +17,10 @@ use mini\Util\PathsRegistry;
 $primaryViewsPath = $_ENV['MINI_VIEWS_ROOT'] ?? (Mini::$mini->root . '/_views');
 Mini::$mini->paths->views = new PathsRegistry($primaryViewsPath);
 
+// Add framework's _views path as fallback
+$frameworkViewsPath = \dirname((new \ReflectionClass(Mini::class))->getFileName(), 2) . '/_views';
+Mini::$mini->paths->views->addPath($frameworkViewsPath);
+
 // Register Template service
 Mini::$mini->addService(RendererInterface::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(RendererInterface::class));
 

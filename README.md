@@ -1,4 +1,4 @@
-# Mini - Zero-Dependency PHP Framework
+# Mini Framework
 
 **Get started in 4 commands:**
 
@@ -268,7 +268,7 @@ return new class extends AbstractController {
     public function show(int $id): array
     {
         $user = db()->query("SELECT * FROM users WHERE id = ?", [$id])->fetch();
-        if (!$user) throw new \mini\Exceptions\ResourceNotFoundException();
+        if (!$user) throw new \mini\Exceptions\NotFoundException();
         return $user;
     }
 
@@ -319,7 +319,7 @@ return new class extends AbstractController {
 
 ```php
 // Throw domain exceptions - dispatcher handles HTTP mapping
-throw new \mini\Exceptions\ResourceNotFoundException('User not found');        // → 404
+throw new \mini\Exceptions\NotFoundException('User not found');        // → 404
 throw new \mini\Exceptions\AccessDeniedException('Login required');           // → 401/403
 throw new \mini\Exceptions\BadRequestException('Invalid email format');       // → 400
 ```
@@ -514,18 +514,17 @@ Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
 });
 ```
 
-Translation files in `_translations/`:
+Translation files mirror your source code structure in `_translations/`. For example, strings in `_routes/index.php` go to `_translations/de/_routes/index.php.json`:
 
-```php
-// _translations/de_DE.php
-return [
-    'Hello, {name}!' => 'Hallo, {name}!',
-    'You have {count, plural, =0{no messages} one{# message} other{# messages}}' =>
-        'Sie haben {count, plural, =0{keine Nachrichten} one{# Nachricht} other{# Nachrichten}}',
-];
+```json
+{
+    "Hello, {name}!": "Hallo, {name}!",
+    "You have {count, plural, =0{no messages} one{# message} other{# messages}}":
+        "Sie haben {count, plural, =0{keine Nachrichten} one{# Nachricht} other{# Nachrichten}}"
+}
 ```
 
-**See [src/I18n/README.md](src/I18n/README.md) for complete documentation.**
+**See [src/I18n/README.md](src/I18n/README.md) for complete documentation**, including the `vendor/bin/mini translations` tool for managing translation files.
 
 ## Authentication
 

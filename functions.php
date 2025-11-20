@@ -131,7 +131,15 @@ function flash_set($type, $message) {
     $_SESSION['flash'][] = ['type' => $type, 'message' => $message];
 }
 
-function flash_get() {
+/**
+ * Retrieve and clear all flash messages from the session
+ *
+ * Returns an array of flash messages and removes them from the session,
+ * ensuring each message is only displayed once.
+ *
+ * @return array<array{type: string, message: string}> Array of flash messages
+ */
+function flash_get(): array {
     if (!isset($_SESSION['flash'])) {
         return [];
     }
@@ -278,6 +286,11 @@ function bootstrap(): void
 // dispatch() function moved to src/Dispatcher/functions.php
 
 /**
+ * Main entry point for file-based routing
+ *
+ * Bootstraps the application and routes the current request to
+ * the appropriate handler in the _routes/ directory.
+ *
  * @deprecated Use dispatch() instead. Will be removed in future version.
  */
 function router(): void
