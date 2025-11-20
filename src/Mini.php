@@ -125,19 +125,6 @@ final class Mini implements ContainerInterface {
     public readonly string $salt;
 
     /**
-     * Ultra-fast local cache for data where network round-trip would be slower than local fetch.
-     *
-     * Uses APCu shared memory if available, falls back to VoidMicrocache if not.
-     * Ideal for caching parsed config files, route tables, translations, schema metadata, etc.
-     *
-     * Performance: ~0.001ms (APCu) vs ~0.5-1ms (Redis/Memcached network RTT)
-     *
-     * @var Mini\Microcache\MicrocacheInterface
-     */
-    public readonly Mini\Microcache\MicrocacheInterface $fastCache;
-
-
-    /**
      * Caches instances using a scope object; each request will
      * have a scope object which is garbage collected when the
      * request ends.
@@ -170,12 +157,6 @@ final class Mini implements ContainerInterface {
         }
         self::$mini = $this;
         $this->instanceCache = new WeakMap();
-
-        // Initialize ultra-fast local cache (zero config, zero dependencies)
-        // APCu shared memory if available, VoidMicrocache otherwise
-        $this->fastCache = (extension_loaded('apcu') && apcu_enabled())
-            ? new Mini\Microcache\ApcuMicrocache()
-            : new Mini\Microcache\VoidMicrocache();
 
         // Initialize lifecycle state machine
         // The phase tracks application state, not individual request state
