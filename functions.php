@@ -327,9 +327,3 @@ function csrf(string $action, string $fieldName = '__nonce__'): CSRF {
     return new CSRF($action, $fieldName);
 }
 
-/**
- * Include APCu polyfill if APCu extension is not available or if certain 
- */
-if (version_compare(phpversion('apcu') ?: '0.0.0', '5.1.0', '<')) {
-    require __DIR__ . '/src/apcu-polyfill.php';
-}

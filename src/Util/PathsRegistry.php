@@ -76,35 +76,41 @@ class PathsRegistry
      * recently added to earliest. Returns the full path to the first match found,
      * or null if the file doesn't exist in any path.
      *
-     * Results are cached until addPath() is called.
+     * Results are cached in-memory (per-request) and in APCu (across requests).
      *
      * @param string $filename Relative filename to search for
      * @return string|null Full path to first match, or null if not found
      */
     public function findFirst(string $filename): ?string
     {
+        // L1: In-memory cache (fastest)
         if (isset($this->cacheFirst[$filename]) || \array_key_exists($filename, $this->cacheFirst)) {
             return $this->cacheFirst[$filename];
         }
 
-        // Check primary path first
-        $fullPath = $this->primaryPath . '/' . ltrim($filename, '/');
-        if (file_exists($fullPath)) {
-            $this->cacheFirst[$filename] = $fullPath;
-            return $fullPath;
-        }
+        // L2: APCu cache (survives across requests)
+        $cacheKey = 'path_registry:' . md5($this->primaryPath . ':' . implode(':', $this->fallbackPaths)) . ':' . $filename;
 
-        // Then check fallback paths (most recent first)
-        foreach ($this->fallbackPaths as $path) {
-            $fullPath = $path . '/' . ltrim($filename, '/');
+        $result = apcu_entry($cacheKey, function() use ($filename) {
+            // Check primary path first
+            $fullPath = $this->primaryPath . '/' . ltrim($filename, '/');
             if (file_exists($fullPath)) {
-                $this->cacheFirst[$filename] = $fullPath;
                 return $fullPath;
             }
-        }
 
-        $this->cacheFirst[$filename] = null;
-        return null;
+            // Then check fallback paths (most recent first)
+            foreach ($this->fallbackPaths as $path) {
+                $fullPath = $path . '/' . ltrim($filename, '/');
+                if (file_exists($fullPath)) {
+                    return $fullPath;
+                }
+            }
+
+            return null;
+        });
+
+        $this->cacheFirst[$filename] = $result;
+        return $result;
     }
 
     /**
@@ -114,34 +120,43 @@ class PathsRegistry
      * recently added to earliest. Returns an array of all full paths where the file
      * exists, in priority order.
      *
-     * Results are cached until addPath() is called.
+     * Results are cached in-memory (per-request) and in APCu (across requests).
      *
      * @param string $filename Relative filename to search for
      * @return list<string> All matching file paths in priority order
      */
     public function findAll(string $filename): array
     {
+        // L1: In-memory cache (fastest)
         if (isset($this->cacheAll[$filename])) {
             return $this->cacheAll[$filename];
         }
-        $found = [];
 
-        // Check primary path first
-        $fullPath = $this->primaryPath . '/' . ltrim($filename, '/');
-        if (file_exists($fullPath)) {
-            $found[] = $fullPath;
-        }
+        // L2: APCu cache (survives across requests)
+        $cacheKey = 'path_registry_all:' . md5($this->primaryPath . ':' . implode(':', $this->fallbackPaths)) . ':' . $filename;
 
-        // Then check fallback paths (most recent first)
-        foreach ($this->fallbackPaths as $path) {
-            $fullPath = $path . '/' . ltrim($filename, '/');
+        $result = apcu_entry($cacheKey, function() use ($filename) {
+            $found = [];
+
+            // Check primary path first
+            $fullPath = $this->primaryPath . '/' . ltrim($filename, '/');
             if (file_exists($fullPath)) {
                 $found[] = $fullPath;
             }
-        }
 
-        $this->cacheAll[$filename] = $found;
-        return $found;
+            // Then check fallback paths (most recent first)
+            foreach ($this->fallbackPaths as $path) {
+                $fullPath = $path . '/' . ltrim($filename, '/');
+                if (file_exists($fullPath)) {
+                    $found[] = $fullPath;
+                }
+            }
+
+            return $found;
+        });
+
+        $this->cacheAll[$filename] = $result;
+        return $result;
     }
 
     /**
