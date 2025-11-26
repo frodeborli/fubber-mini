@@ -17,6 +17,8 @@ use Exception;
  */
 class PDODatabase implements DatabaseInterface
 {
+    use PartialQueryableTrait;
+
     private ?PDO $pdo = null;
     private int $transactionDepth = 0;
 
@@ -32,14 +34,20 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Execute query and return all results as associative arrays
+     * Execute query and return results as iterable
+     *
+     * Yields rows one at a time for memory efficiency.
+     * Use iterator_to_array() if you need an actual array.
      */
-    public function query(string $sql, array $params = []): array
+    public function query(string $sql, array $params = []): iterable
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
             $stmt->execute($params);
-            return $stmt->fetchAll();
+
+            while ($row = $stmt->fetch()) {
+                yield $row;
+            }
         } catch (PDOException $e) {
             throw new Exception("Query failed: " . $e->getMessage());
         }
@@ -92,11 +100,12 @@ class PDODatabase implements DatabaseInterface
     /**
      * Execute a statement (INSERT, UPDATE, DELETE)
      */
-    public function exec(string $sql, array $params = []): bool
+    public function exec(string $sql, array $params = []): int
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            return $stmt->execute($params);
+            $stmt->execute($params);
+            return $stmt->rowCount();
         } catch (PDOException $e) {
             throw new Exception("Exec failed: " . $e->getMessage());
         }
@@ -163,8 +172,8 @@ class PDODatabase implements DatabaseInterface
         }
 
         try {
-            // Execute the task
-            $result = $task();
+            // Execute the task with $this as parameter
+            $result = $task($this);
 
             // Only commit on the outermost transaction
             if ($this->transactionDepth === 1) {
@@ -204,46 +213,91 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Insert a row into a table
+     * Get the SQL dialect for this database connection
      */
-    public function insert(string $table, array $data): ?string
+    public function getDialect(): SqlDialect
     {
-        if (empty($data)) {
-            throw new \InvalidArgumentException("Cannot insert empty data");
-        }
+        $driver = $this->lazyPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
 
-        $columns = array_keys($data);
-        $placeholders = array_fill(0, count($columns), '?');
-
-        $sql = sprintf(
-            "INSERT INTO %s (%s) VALUES (%s)",
-            $table,
-            implode(', ', $columns),
-            implode(', ', $placeholders)
-        );
-
-        $this->exec($sql, array_values($data));
-        return $this->lastInsertId();
+        return match($driver) {
+            'mysql' => SqlDialect::MySQL,
+            'pgsql' => SqlDialect::Postgres,
+            'sqlite' => SqlDialect::Sqlite,
+            'sqlsrv', 'mssql', 'dblib' => SqlDialect::SqlServer,
+            'oci' => SqlDialect::Oracle,
+            default => SqlDialect::Generic,
+        };
     }
 
     /**
-     * Update rows in a table
+     * Quotes a value for safe use in SQL query strings
      */
-    public function update(string $table, array $data, string $where = '', array $whereParams = []): int
+    public function quote(mixed $value): string
     {
-        if (empty($data)) {
-            throw new \InvalidArgumentException("Cannot update with empty data");
+        if ($value === null) return 'NULL';
+        if (is_int($value)) return $this->lazyPdo()->quote($value, \PDO::PARAM_INT);
+        if (is_bool($value)) return $this->lazyPdo()->quote($value, \PDO::PARAM_BOOL);
+        return $this->lazyPdo()->quote($value, \PDO::PARAM_STR);
+    }
+
+    /**
+     * Delete rows matching a partial query
+     */
+    public function delete(PartialQuery $query): int
+    {
+        $where = $query->getWhere();
+
+        // Require WHERE clause for safety
+        // Use db()->exec('DELETE FROM table') or TRUNCATE for mass deletes
+        if (empty($where['sql'])) {
+            throw new \InvalidArgumentException(
+                "DELETE requires a WHERE clause. Use db()->exec('DELETE FROM {$query->getTable()}') for mass deletes."
+            );
         }
 
-        $setParts = array_map(fn($col) => "$col = ?", array_keys($data));
-        $sql = sprintf("UPDATE %s SET %s", $table, implode(', ', $setParts));
+        $sql = "DELETE FROM {$query->getTable()}";
+        $sql .= " WHERE {$where['sql']}";
+        $sql .= " LIMIT {$query->getLimit()}";
 
-        $params = array_values($data);
-
-        if ($where !== '') {
-            $sql .= " WHERE $where";
-            $params = array_merge($params, $whereParams);
+        try {
+            $stmt = $this->lazyPdo()->prepare($sql);
+            $stmt->execute($where['params']);
+            return $stmt->rowCount();
+        } catch (PDOException $e) {
+            throw new Exception("Delete failed: " . $e->getMessage());
         }
+    }
+
+    /**
+     * Update rows matching a partial query
+     */
+    public function update(PartialQuery $query, string|array $set): int
+    {
+        $where = $query->getWhere();
+
+        if (is_string($set)) {
+            // Raw SQL expression
+            $sql = "UPDATE {$query->getTable()} SET {$set}";
+            $params = $where['params'];
+        } else {
+            // Array of column => value assignments
+            $setParts = [];
+            $setParams = [];
+
+            foreach ($set as $column => $value) {
+                $setParts[] = "$column = ?";
+                $setParams[] = $value;
+            }
+
+            $sql = "UPDATE {$query->getTable()} SET " . implode(', ', $setParts);
+            $params = array_merge($setParams, $where['params']);
+        }
+
+        if ($where['sql']) {
+            $sql .= " WHERE {$where['sql']}";
+        }
+
+        $sql .= " LIMIT {$query->getLimit()}";
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
@@ -255,23 +309,163 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Delete rows from a table
+     * Insert a new row into a table
      */
-    public function delete(string $table, string $where = '', array $whereParams = []): int
+    public function insert(string $table, array $data): string
     {
-        $sql = "DELETE FROM $table";
-
-        if ($where !== '') {
-            $sql .= " WHERE $where";
+        if (empty($data)) {
+            throw new \InvalidArgumentException("Data array cannot be empty for insert");
         }
+
+        $columns = array_keys($data);
+        $values = array_values($data);
+        $placeholders = implode(', ', array_fill(0, count($data), '?'));
+
+        $columnList = implode(', ', $columns);
+        $sql = "INSERT INTO $table ($columnList) VALUES ($placeholders)";
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute($whereParams);
+            $stmt->execute($values);
+            return $this->lastInsertId() ?? '';
+        } catch (PDOException $e) {
+            throw new Exception("Insert failed: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Insert a row, or update if conflict on unique columns
+     */
+    public function upsert(string $table, array $data, string ...$conflictColumns): int
+    {
+        if (empty($data)) {
+            throw new \InvalidArgumentException("Data array cannot be empty for upsert");
+        }
+
+        if (empty($conflictColumns)) {
+            throw new \InvalidArgumentException("At least one conflict column must be specified for upsert");
+        }
+
+        $columns = array_keys($data);
+        $values = array_values($data);
+        $placeholders = implode(', ', array_fill(0, count($data), '?'));
+
+        $dialect = $this->getDialect();
+
+        // Build dialect-specific UPSERT SQL
+        $sql = match($dialect) {
+            SqlDialect::MySQL => $this->buildMySQLUpsert($table, $columns, $placeholders, $conflictColumns),
+            SqlDialect::Postgres => $this->buildPostgresUpsert($table, $columns, $placeholders, $conflictColumns),
+            SqlDialect::Sqlite => $this->buildSqliteUpsert($table, $columns, $placeholders, $conflictColumns),
+            SqlDialect::SqlServer => $this->buildSqlServerUpsert($table, $columns, $values, $conflictColumns),
+            SqlDialect::Oracle => $this->buildOracleUpsert($table, $columns, $values, $conflictColumns),
+            SqlDialect::Generic => $this->buildPostgresUpsert($table, $columns, $placeholders, $conflictColumns), // Use Postgres syntax as generic
+        };
+
+        try {
+            // SQL Server and Oracle MERGE use values directly in SQL, others use placeholders
+            if ($dialect === SqlDialect::SqlServer || $dialect === SqlDialect::Oracle) {
+                $stmt = $this->lazyPdo()->prepare($sql);
+                $stmt->execute();
+            } else {
+                // MySQL, Postgres, Sqlite use placeholders only for INSERT
+                // UPDATE uses VALUES() for MySQL or EXCLUDED for Postgres/Sqlite
+                $stmt = $this->lazyPdo()->prepare($sql);
+                $stmt->execute($values);
+            }
+
             return $stmt->rowCount();
         } catch (PDOException $e) {
-            throw new Exception("Delete failed: " . $e->getMessage());
+            throw new Exception("Upsert failed: " . $e->getMessage());
         }
+    }
+
+    private function buildMySQLUpsert(string $table, array $columns, string $placeholders, array $conflictColumns): string
+    {
+        $columnList = implode(', ', $columns);
+
+        // Build UPDATE clause for all columns except conflict columns
+        $updateParts = [];
+        foreach ($columns as $column) {
+            $updateParts[] = "$column = VALUES($column)";
+        }
+        $updateClause = implode(', ', $updateParts);
+
+        return "INSERT INTO $table ($columnList) VALUES ($placeholders) ON DUPLICATE KEY UPDATE $updateClause";
+    }
+
+    private function buildPostgresUpsert(string $table, array $columns, string $placeholders, array $conflictColumns): string
+    {
+        $columnList = implode(', ', $columns);
+        $conflictList = implode(', ', $conflictColumns);
+
+        // Build UPDATE clause using EXCLUDED
+        $updateParts = [];
+        foreach ($columns as $column) {
+            // Don't update conflict columns
+            if (!in_array($column, $conflictColumns)) {
+                $updateParts[] = "$column = EXCLUDED.$column";
+            }
+        }
+
+        if (empty($updateParts)) {
+            // If all columns are conflict columns, use DO NOTHING
+            return "INSERT INTO $table ($columnList) VALUES ($placeholders) ON CONFLICT ($conflictList) DO NOTHING";
+        }
+
+        $updateClause = implode(', ', $updateParts);
+        return "INSERT INTO $table ($columnList) VALUES ($placeholders) ON CONFLICT ($conflictList) DO UPDATE SET $updateClause";
+    }
+
+    private function buildSqliteUpsert(string $table, array $columns, string $placeholders, array $conflictColumns): string
+    {
+        // SQLite 3.24.0+ uses same syntax as PostgreSQL
+        return $this->buildPostgresUpsert($table, $columns, $placeholders, $conflictColumns);
+    }
+
+    private function buildSqlServerUpsert(string $table, array $columns, array $values, array $conflictColumns): string
+    {
+        // SQL Server uses MERGE statement - more complex
+        // Build quoted values for SQL
+        $quotedValues = array_map(fn($v) => $this->quote($v), $values);
+
+        $columnList = implode(', ', $columns);
+        $valuesList = implode(', ', $quotedValues);
+
+        // Build source values
+        $sourceValues = [];
+        foreach ($columns as $i => $column) {
+            $sourceValues[] = "{$quotedValues[$i]} AS $column";
+        }
+        $sourceClause = implode(', ', $sourceValues);
+
+        // Build match condition
+        $matchConditions = [];
+        foreach ($conflictColumns as $column) {
+            $matchConditions[] = "target.$column = source.$column";
+        }
+        $matchClause = implode(' AND ', $matchConditions);
+
+        // Build update SET clause
+        $updateParts = [];
+        foreach ($columns as $column) {
+            if (!in_array($column, $conflictColumns)) {
+                $updateParts[] = "$column = source.$column";
+            }
+        }
+        $updateClause = empty($updateParts) ? '' : 'UPDATE SET ' . implode(', ', $updateParts);
+
+        $insertClause = "INSERT ($columnList) VALUES ($valuesList)";
+
+        return "MERGE INTO $table AS target USING (SELECT $sourceClause) AS source ON $matchClause " .
+               "WHEN MATCHED THEN $updateClause " .
+               "WHEN NOT MATCHED THEN $insertClause;";
+    }
+
+    private function buildOracleUpsert(string $table, array $columns, array $values, array $conflictColumns): string
+    {
+        // Oracle uses same MERGE syntax as SQL Server
+        return $this->buildSqlServerUpsert($table, $columns, $values, $conflictColumns);
     }
 
 }

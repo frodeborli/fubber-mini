@@ -152,7 +152,7 @@ echo $winPath->join('file.txt'); // C:/Users/John/Documents/file.txt (internal)
 
 ## PathsRegistry
 
-Priority-based file resolution across multiple paths with caching.
+Priority-based file resolution across multiple paths with two-level caching (in-memory + APCu).
 
 **Use case:** Template/view discovery, plugin systems, theme overrides.
 
@@ -187,10 +187,18 @@ $paths = $views->getPaths(); // ['/app/views', '/vendor/some-bundle/views', ...]
 ```
 
 **Features:**
+- **L1 cache** - In-memory per-request caching (fastest)
+- **L2 cache** - APCu cross-request caching with 1-second TTL (avoids repeated filesystem checks)
 - Results cached per filename until paths change
 - Duplicates silently ignored
 - Natural override cascading (app → bundle → framework)
 - Works with Composer autoload order
+
+**Performance:**
+- First lookup: Checks filesystem across all paths (~microseconds with OS cache)
+- Subsequent lookups (same request): Instant (in-memory)
+- Subsequent lookups (different requests): ~1-2 microseconds (APCu)
+- Cache automatically invalidated when `addPath()` is called
 
 ## QueryParser
 

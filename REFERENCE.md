@@ -479,13 +479,87 @@ return new \mini\UUID\UUID4Factory();  // Use v4 instead of v7
 
 See `PATTERNS.md` for detailed examples.
 
+## APCu Functions
+
+Mini provides automatic APCu polyfills when the native extension is unavailable. All standard APCu functions work regardless of whether APCu is installed.
+
+### Basic Operations
+
+```php
+apcu_store(string $key, mixed $value, int $ttl = 0): bool
+apcu_fetch(string $key, bool &$success = null): mixed
+apcu_exists(string|array $keys): bool|array
+apcu_delete(string|array $key): bool|array
+apcu_clear_cache(): bool
+```
+
+### Atomic Operations
+
+```php
+apcu_entry(string $key, callable $generator, int $ttl = 0): mixed  # Fetch-or-compute
+apcu_add(string $key, mixed $value, int $ttl = 0): bool            # Store if not exists
+apcu_cas(string $key, int $old, int $new): bool                    # Compare-and-swap
+apcu_inc(string $key, int $step = 1, bool &$success = null, int $ttl = 0): int|false
+apcu_dec(string $key, int $step = 1, bool &$success = null, int $ttl = 0): int|false
+```
+
+### Information
+
+```php
+apcu_cache_info(bool $limited = false): array|false  # Cache statistics
+apcu_sma_info(bool $limited = false): array|false    # Shared memory info
+apcu_key_info(string $key): ?array                   # Key metadata
+apcu_enabled(): bool                                 # Check availability
+```
+
+### Usage Examples
+
+```php
+// Simple caching
+apcu_store('config', $config, ttl: 300);
+$config = apcu_fetch('config', $found);
+
+// Fetch-or-compute pattern (atomic)
+$data = apcu_entry('expensive:calculation', function() {
+    return performExpensiveCalculation();
+}, ttl: 60);
+
+// Atomic counter
+apcu_inc('page:views', 1);
+$views = apcu_fetch('page:views');
+
+// Conditional update
+if (apcu_cas('counter', 5, 10)) {
+    echo "Updated counter from 5 to 10";
+}
+```
+
+### Driver Selection
+
+When native APCu is not installed, Mini automatically selects the best available driver:
+
+1. **Swoole\Table** - Coroutine-safe shared memory (requires Swoole)
+2. **SQLite** - Persistent storage in `/dev/shm` (requires pdo_sqlite)
+3. **Array** - Process-scoped fallback (no persistence)
+
+**Configuration (optional):**
+```bash
+# .env
+MINI_APCU_SQLITE_PATH=/custom/path.sqlite         # Custom SQLite path
+MINI_APCU_SWOOLE_SIZE=4096                        # Swoole table size
+MINI_APCU_SWOOLE_VALUE_SIZE=4096                  # Max value size
+```
+
+See `README.md` (APCu Polyfill section) for complete documentation.
+
 ## Performance Tips
 
-1. **Use direct SQL for simple queries** - Skip the query builder when not needed
-2. **Cache expensive operations** - Use `cache()` for computed results
-3. **Lazy initialization** - Services only load when used
-4. **File-based routing** - No route compilation needed
-5. **Request-scoped caching** - Database, cache, logger instances reused within request
+1. **Use APCu for L1 caching** - Sub-millisecond operations via `apcu_entry()`
+2. **Use direct SQL for simple queries** - Skip the query builder when not needed
+3. **Cache expensive operations** - Use `cache()` for computed results
+4. **Lazy initialization** - Services only load when used
+5. **File-based routing** - No route compilation needed
+6. **Request-scoped caching** - Database, cache, logger instances reused within request
 
 ## Common Patterns
 

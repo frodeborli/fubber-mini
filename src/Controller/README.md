@@ -35,8 +35,10 @@ class UserController extends AbstractController
     #[POST('/')]
     public function create(): array
     {
-        $data = $_POST;
-        db()->insert('users', $data);
+        db()->exec(
+            "INSERT INTO users (name, email) VALUES (?, ?)",
+            [$_POST['name'], $_POST['email']]
+        );
         return ['message' => 'Created', 'id' => db()->lastInsertId()];
     }
 }
@@ -213,8 +215,11 @@ protected function respond(mixed $data, int $status = 200, array $headers = []):
 #[POST('/')]
 public function create(): ResponseInterface
 {
-    $id = db()->insert('users', $_POST);
-    return $this->json(['id' => $id], 201);
+    db()->exec(
+        "INSERT INTO users (name, email) VALUES (?, ?)",
+        [$_POST['name'], $_POST['email']]
+    );
+    return $this->json(['id' => db()->lastInsertId()], 201);
 }
 
 #[GET('/download/')]
@@ -424,11 +429,11 @@ class CommentController extends AbstractController
     #[POST('/posts/{postId}/comments/')]
     public function create(int $postId): array
     {
-        $id = db()->insert('comments', [
-            'post_id' => $postId,
-            'content' => $_POST['content']
-        ]);
-        return ['id' => $id];
+        db()->exec(
+            "INSERT INTO comments (post_id, content) VALUES (?, ?)",
+            [$postId, $_POST['content']]
+        );
+        return ['id' => db()->lastInsertId()];
     }
 }
 ```

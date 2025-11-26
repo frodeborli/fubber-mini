@@ -35,6 +35,7 @@ class PathsRegistry
     private array $fallbackPaths = [];
     private array $cacheFirst = [];
     private array $cacheAll = [];
+    private string $cachePrefix;
 
     /**
      * Create a new paths registry with a primary path
@@ -44,6 +45,15 @@ class PathsRegistry
     public function __construct(string $primaryPath)
     {
         $this->primaryPath = rtrim($primaryPath, '/');
+        $this->updateCachePrefix();
+    }
+
+    /**
+     * Update cache prefix after paths change
+     */
+    private function updateCachePrefix(): void
+    {
+        $this->cachePrefix = 'path:' . md5($this->primaryPath . ':' . implode(':', $this->fallbackPaths)) . ':';
     }
 
     /**
@@ -67,6 +77,7 @@ class PathsRegistry
         }
         // Prepend to fallback paths so most recent additions are checked first
         array_unshift($this->fallbackPaths, $path);
+        $this->updateCachePrefix();
     }
 
     /**
@@ -88,10 +99,8 @@ class PathsRegistry
             return $this->cacheFirst[$filename];
         }
 
-        // L2: APCu cache (survives across requests)
-        $cacheKey = 'path_registry:' . md5($this->primaryPath . ':' . implode(':', $this->fallbackPaths)) . ':' . $filename;
-
-        $result = apcu_entry($cacheKey, function() use ($filename) {
+        // L2: APCu cache (survives across requests, 1s TTL for hot paths)
+        $result = apcu_entry($this->cachePrefix . $filename, function() use ($filename) {
             // Check primary path first
             $fullPath = $this->primaryPath . '/' . ltrim($filename, '/');
             if (file_exists($fullPath)) {
@@ -107,7 +116,7 @@ class PathsRegistry
             }
 
             return null;
-        });
+        }, ttl: 1);
 
         $this->cacheFirst[$filename] = $result;
         return $result;
@@ -132,10 +141,8 @@ class PathsRegistry
             return $this->cacheAll[$filename];
         }
 
-        // L2: APCu cache (survives across requests)
-        $cacheKey = 'path_registry_all:' . md5($this->primaryPath . ':' . implode(':', $this->fallbackPaths)) . ':' . $filename;
-
-        $result = apcu_entry($cacheKey, function() use ($filename) {
+        // L2: APCu cache (survives across requests, 1s TTL for hot paths)
+        $result = apcu_entry($this->cachePrefix . 'all:' . $filename, function() use ($filename) {
             $found = [];
 
             // Check primary path first
@@ -153,7 +160,7 @@ class PathsRegistry
             }
 
             return $found;
-        });
+        }, ttl: 1);
 
         $this->cacheAll[$filename] = $result;
         return $result;

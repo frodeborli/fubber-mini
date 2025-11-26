@@ -4,6 +4,308 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Database: PartialQuery API - Separated withEntityClass() from withHydrator() (2025-01-24)
+
+**BREAKING CHANGE**
+
+Split `withHydrator()` into two separate methods for better API clarity:
+- `withEntityClass(string $class, array|false $constructorArgs = false)` - Framework-managed hydration
+- `withHydrator(\Closure $hydrator)` - Custom closure hydration only
+
+### What Changed
+
+**Before:**
+```php
+// Class string with constructor args
+$users = db()->table('users')->withHydrator(User::class, [db()->getPdo()]);
+
+// Class string without constructor
+$users = db()->table('users')->withHydrator(User::class, false);
+
+// Closure
+$users = db()->table('users')->withHydrator(
+    fn($id, $name, $email) => new User($id, $name, $email)
+);
+```
+
+**After:**
+```php
+// Use withEntityClass() for class-based hydration
+$users = db()->table('users')->withEntityClass(User::class, [db()->getPdo()]);
+
+// Skip constructor with false
+$users = db()->table('users')->withEntityClass(User::class, false);
+
+// Use withHydrator() for closures ONLY
+$users = db()->table('users')->withHydrator(
+    fn($id, $name, $email) => new User($id, $name, $email)
+);
+```
+
+### Migration
+
+**Search and replace:**
+1. Find: `->withHydrator(SomeClass::class, false)` → Replace: `->withEntityClass(SomeClass::class, false)`
+2. Find: `->withHydrator(SomeClass::class, [` → Replace: `->withEntityClass(SomeClass::class, [`
+3. Find: `->withHydrator(SomeClass::class)` → Replace: `->withEntityClass(SomeClass::class)`
+4. Closures still use `->withHydrator(fn(...) => ...)`
+
+**Why this change:**
+- Cleaner API - entity class handling vs custom hydration are fundamentally different
+- Better type safety - `withHydrator()` now only accepts `\Closure`
+- No more reserved values (`true` is no longer reserved)
+- Paves the way for future attribute-based hydration on entity classes
+
+## Database: Added insert() and upsert() + ModelTrait (2025-01-21)
+
+**NEW FEATURES**
+
+Added convenient methods for inserting and upserting rows, plus an Eloquent-style ModelTrait for Active Record pattern support.
+
+### What's New
+- **DatabaseInterface::insert()**: Simple INSERT operation returning last insert ID
+  - `db()->insert('users', ['name' => 'John', 'email' => 'john@example.com'])`
+  - Returns the new row's ID (string)
+  - Throws exception on failure (unique constraint violation, etc.)
+- **DatabaseInterface::upsert()**: INSERT or UPDATE on conflict
+  - `db()->upsert('users', ['email' => 'john@example.com', 'name' => 'John'], 'email')`
+  - Supports composite unique keys: `db()->upsert('prefs', $data, 'user_id', 'key')`
+  - Dialect-specific SQL generation (MySQL, Postgres, SQLite, SQL Server, Oracle)
+  - Returns affected rows (1 for insert/update, 0 for no change)
+- **ModelTrait**: Eloquent-style Active Record pattern with generic template support
+  - **Entity pattern**: `$user->save()`, `$user->delete()` - instance methods
+  - **Repository pattern**: `Users::persist($user)`, `Users::remove($user)` - static methods on POPO
+  - `User::find($id)` - Find by primary key with typed return (`User|null`)
+  - `User::query()` - Returns typed `PartialQuery<User>` for composable scopes
+  - `@template T of object` - Full PHPDoc generic support for type safety
+  - Automatic hydration via reflection (no constructor calls needed)
+  - Requires: `getTableName()`, `getPrimaryKey()`, `getEntityClass()`, `dehydrate(object $entity)` methods
+
+### Migration
+
+No breaking changes - these are pure additions.
+
+**Using insert():**
+```php
+// Before
+db()->exec(
+    "INSERT INTO users (name, email) VALUES (?, ?)",
+    ['John', 'john@example.com']
+);
+$id = db()->lastInsertId();
+
+// After
+$id = db()->insert('users', ['name' => 'John', 'email' => 'john@example.com']);
+```
+
+**Using upsert():**
+```php
+// Insert or update based on email uniqueness
+db()->upsert('users', [
+    'email' => 'john@example.com',
+    'name' => 'John Doe'
+], 'email');
+```
+
+**Using ModelTrait (Entity pattern):**
+```php
+class User {
+    use ModelTrait;
+
+    public ?int $id = null;
+    public string $name;
+    public string $email;
+
+    protected static function getTableName(): string { return 'users'; }
+    protected static function getPrimaryKey(): string { return 'id'; }
+    protected static function getEntityClass(): string { return self::class; }
+    protected static function dehydrate(object $entity): array {
+        return ['id' => $entity->id, 'name' => $entity->name, 'email' => $entity->email];
+    }
+}
+
+$user = new User();
+$user->name = 'John';
+$user->save(); // INSERT
+
+$user->name = 'Updated';
+$user->save(); // UPDATE
+
+$user->delete();
+```
+
+**Using ModelTrait (Repository pattern with POPO):**
+```php
+class User {
+    public ?int $id = null;
+    public string $name;
+}
+
+/**
+ * @use ModelTrait<User>
+ */
+class Users {
+    use ModelTrait;
+
+    protected static function getTableName(): string { return 'users'; }
+    protected static function getPrimaryKey(): string { return 'id'; }
+    protected static function getEntityClass(): string { return User::class; }
+    protected static function dehydrate(object $entity): array {
+        return ['id' => $entity->id, 'name' => $entity->name];
+    }
+}
+
+$user = new User();
+$user->name = 'John';
+Users::persist($user); // INSERT
+
+$found = Users::find(1);
+$found->name = 'Updated';
+Users::persist($found); // UPDATE
+
+Users::remove($found);
+```
+
+See `examples/upsert.php`, `examples/model-trait.php`, and `examples/model-trait-repository.php` for complete examples.
+
+## Database: Simplified query() + Object Hydration + SQL Dialects (2025-01-21)
+
+**BREAKING CHANGE + NEW FEATURES**
+
+Simplified database interface by making `query()` return `iterable` and removing `queryStream()`. Added object hydration with full PHPDoc generic support. Added SQL dialect system for database-specific SQL generation.
+
+### Breaking Changes
+- **query()** now returns `iterable` (yields rows) instead of `array`
+  - Use `iterator_to_array($db->query(...))` if you need an actual array
+  - More memory efficient - streams by default instead of buffering
+- **queryStream()** removed - no longer needed since `query()` streams
+  - Replace `$db->queryStream(...)` with `$db->query(...)`
+
+### What's New
+- **PartialQuery::withHydrator()**: Convert rows to typed objects
+  - Class name: `->withHydrator(User::class, $constructorArgs)`
+  - Skip constructor: `->withHydrator(User::class, false)` - uses `newInstanceWithoutConstructor()`
+  - Uses `ReflectionClass::newInstanceArgs()` for efficiency
+  - Uses reflection to set private/protected/public properties
+  - Reflection properties cached per iteration (thread-safe, no static state)
+  - Catches `ReflectionException` and throws `RuntimeException` with context
+  - Closure: `->withHydrator(fn(...$row) => new User(...$row))`
+  - Reserved: `->withHydrator(User::class, true)` throws `InvalidArgumentException` (future use)
+- **Generic template support**: `@template T` for type-safe IDE support
+  - `PartialQuery<User>` - IDE knows iteration yields User objects
+  - `one()` returns `T|null` - type-safe single row fetch
+  - `getIterator()` returns `\Generator<int, T, mixed, void>` - proper generator typing
+- **Composable with scopes**: `User::all()` can return `PartialQuery<User>`
+- **Works with mutations**: Hydration doesn't prevent `delete()` or `update()`
+- **Cleared by select()**: Selecting specific columns clears hydrator and returns `PartialQuery<array>`
+
+### Migration
+```php
+// Before
+$users = $db->query("SELECT * FROM users");
+foreach ($users as $user) { ... }
+
+// After - same usage! Iteration works identically
+$users = $db->query("SELECT * FROM users");
+foreach ($users as $user) { ... }
+
+// If you actually need an array
+$users = iterator_to_array($db->query("SELECT * FROM users"));
+
+// queryStream() removed
+$stream = $db->queryStream("SELECT * FROM users");  // Remove this
+$stream = $db->query("SELECT * FROM users");        // Use this
+```
+
+See `examples/partial-query-hydrator.php` for hydration examples.
+
+## Database: Added PartialQuery + Major Improvements (2025-01-20)
+
+**NEW FEATURES + BREAKING CHANGES**
+
+Added immutable query builder for **expert-level composition architecture**, plus composable DELETE/UPDATE operations. Also includes several critical improvements based on expert review.
+
+### What's New
+- **PartialQuery class**: Immutable query builder (marked `final`)
+- **PartialQueryableTrait**: Adds `table()` method to DatabaseInterface implementations
+- **New DatabaseInterface methods**:
+  - `quote(mixed $value): string` - Quote values for SQL (auto-detects type)
+  - `table(string $table): PartialQuery` - Create query builder
+  - `delete(PartialQuery $query): int` - Delete rows matching query (requires WHERE)
+  - `update(PartialQuery $query, string|array $set): int` - Update rows matching query
+
+### Breaking Changes
+- **exec()** now returns `int` (affected rows) instead of `bool`
+- **transaction()** closure now receives `DatabaseInterface` as parameter
+- **delete()** requires WHERE clause - throws exception if missing
+- **PartialQuery** iterator now streams instead of buffering (removed `fetchAll()`)
+- **PartialQuery** marked as `final` - cannot be extended
+- **count()** now respects SELECT columns (uses subquery for DISTINCT etc)
+- **LIMIT/OFFSET** syntax changed to MySQL-compatible `LIMIT offset, count`
+
+### Primary Value: Architectural Composition
+- **Reusable fragments**: Define base queries once, reuse without side effects
+- **Safe branching**: Branch query logic without mutation or defensive copying
+- **Encapsulated security**: Parameter binding at architectural level
+- **Expert tool**: Not a "beginner ORM" but a composition primitive
+
+### Secondary Value: Beginner Safety
+- **Safe-by-default**: SQL injection protection built-in
+- **IDE autocomplete**: Discoverable API via IDE suggestions
+
+### Key Features
+- **Immutable**: Each method returns NEW instance (no side effects)
+- **Composable**: Build reusable, non-mutating query fragments
+- **Safe defaults**: 1000 row limit prevents accidental full table scans
+- **SQL-transparent**: Raw SQL always available via `where()`
+- **Iterable**: Use directly in `foreach`
+- **Not an ORM**: For complex queries, use `db()->query()` directly
+
+### Usage
+
+**SELECT queries:**
+```php
+// Basic usage
+$users = db()->table('users')
+    ->eq('active', 1)
+    ->order('created_at DESC')
+    ->limit(50);
+
+foreach ($users as $user) {
+    echo $user['name'];
+}
+
+// Composable scopes
+class User {
+    public static function spam(): PartialQuery {
+        return db()->table('users')->eq('status', 'spam');
+    }
+}
+
+$recentSpam = User::spam()
+    ->where('created_at > ?', [date('Y-m-d', strtotime('-7 days'))]);
+```
+
+**DELETE/UPDATE with composable queries:**
+```php
+// Delete using scopes
+$deleted = db()->delete(User::spam());
+
+// Update with array
+db()->update(
+    db()->table('users')->eq('status', 'inactive'),
+    ['status' => 'archived', 'archived_at' => date('Y-m-d H:i:s')]
+);
+
+// Update with SQL expression
+db()->update(
+    db()->table('users')->eq('status', 'active'),
+    'login_count = login_count + 1'
+);
+```
+
+See `src/Database/README.md` for complete documentation.
+
 ## PSR-7 Improvements: HTTP Protocol Alignment + Simplifications (2025-01-12)
 
 Multiple PSR-7 improvements: Request/ServerRequest now use request targets (HTTP protocol alignment), PSR-17 factories removed (unnecessary abstraction), and Stream simplified (no serialization).

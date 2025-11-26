@@ -1,5 +1,7 @@
 # Mini Framework
 
+> **Designed for decades, not release cycles.** [Why choose Mini?](docs/WHY-MINI.md)
+
 **Get started in 4 commands:**
 
 ```bash
@@ -275,21 +277,27 @@ return new class extends AbstractController {
     #[POST('/')]
     public function create(): array
     {
-        $id = db()->insert('users', $_POST);
-        return ['id' => $id, 'message' => 'Created'];
+        db()->exec(
+            "INSERT INTO users (name, email) VALUES (?, ?)",
+            [$_POST['name'], $_POST['email']]
+        );
+        return ['id' => db()->lastInsertId(), 'message' => 'Created'];
     }
 
     #[PUT('/{id}/')]
     public function update(int $id): array
     {
-        db()->update('users', $_POST, 'id = ?', [$id]);
+        db()->exec(
+            "UPDATE users SET name = ?, email = ? WHERE id = ?",
+            [$_POST['name'], $_POST['email'], $id]
+        );
         return ['message' => 'Updated'];
     }
 
     #[DELETE('/{id}/')]
     public function delete(int $id): ResponseInterface
     {
-        db()->delete('users', 'id = ?', [$id]);
+        db()->exec("DELETE FROM users WHERE id = ?", [$id]);
         return $this->empty(204);
     }
 };
@@ -423,24 +431,49 @@ Any framework/application that:
 
 ## Database
 
-Mini provides a thin wrapper over PDO with convenience methods:
+Mini implements `DatabaseInterface` with two backends:
 
+**PDODatabase** - Thin wrapper over PDO:
 ```php
-// Query methods
 $users = db()->query("SELECT * FROM users WHERE active = ?", [1]);
 $user = db()->queryOne("SELECT * FROM users WHERE id = ?", [123]);
-$count = db()->queryField("SELECT COUNT(*) FROM users");
 
-// Convenience methods
-$userId = db()->insert('users', ['name' => 'John', 'email' => 'john@example.com']);
-$affected = db()->update('users', ['active' => 1], 'id = ?', [123]);
-$affected = db()->delete('users', 'id = ?', [123]);
-
-// Transactions
+db()->exec("INSERT INTO users (name, email) VALUES (?, ?)", ['John', 'john@example.com']);
 db()->transaction(function() {
-    db()->insert('users', ['name' => 'John']);
-    db()->insert('activity_log', ['action' => 'user_created']);
+    db()->exec("INSERT INTO users (name) VALUES (?)", ['John']);
 });
+```
+
+**VirtualDatabase** - SQL interface to non-SQL data (CSV, JSON, APIs):
+```php
+$vdb = new VirtualDatabase();
+$vdb->registerTable('countries', CsvTable::fromFile('data/countries.csv'));
+
+// Query CSV files with SQL
+foreach ($vdb->query("SELECT * FROM countries WHERE continent = ?", ['Europe']) as $row) {
+    echo $row['name'];
+}
+```
+
+**Security Pattern: `::mine()` as Authorization Boundary**
+
+Prevent accidental data leaks by making authorization the default:
+
+```php
+class User {
+    public static function mine(): PartialQuery {
+        $userId = auth()->getUserId();
+        // Only return users accessible to current user
+        return self::query()->where('id = ? OR EXISTS (...)', [$userId]);
+    }
+}
+
+// Secure by default - always use ::mine()
+$user = User::mine()->eq('id', 123)->one();  // Returns null if not authorized
+$friends = User::mine()->limit(50);          // Only authorized users
+db()->update(User::mine()->eq('id', 123), ['bio' => 'New']);  // Authorization enforced
+
+// Key insight: ::mine() is shorter than ::query(), so developers naturally use the secure method!
 ```
 
 **See [src/Database/README.md](src/Database/README.md) for complete documentation.**
@@ -713,6 +746,133 @@ return new PDO($dsn, $user, $pass, [
 
 **Don't forget to run `composer dump-autoload`** after modifying composer.json!
 
+## APCu Polyfill
+
+Mini provides **zero-configuration APCu polyfills** enabling you to use `apcu_*` functions even when the APCu extension isn't installed. This is particularly useful for:
+
+- **L1 caching** - Sub-millisecond cache operations faster than filesystem or network I/O
+- **Shared memory** - Data shared across requests/workers (where supported)
+- **Framework internals** - Mini uses APCu for hot-path optimizations (e.g., PathsRegistry file resolution)
+
+### How It Works
+
+Mini automatically provides APCu functionality through the best available driver:
+
+1. **Native APCu** (when `apcu` extension is installed) - Uses real shared memory
+2. **Swoole\Table** (when Swoole extension is installed) - Coroutine-safe shared memory
+3. **PDO SQLite** (when `pdo_sqlite` extension available) - Persistent storage in `/dev/shm` (tmpfs)
+4. **Array fallback** - Process-scoped only (no cross-request persistence)
+
+**No configuration required** - the polyfill loads automatically and selects the best driver.
+
+### Usage
+
+Use APCu functions as if the extension were installed:
+
+```php
+// Store value with 60-second TTL
+apcu_store('user:123', $userData, 60);
+
+// Fetch value
+$user = apcu_fetch('user:123', $success);
+if ($success) {
+    echo "Cache hit!";
+}
+
+// Atomic entry (fetch-or-compute pattern)
+$config = apcu_entry('app:config', function() {
+    return loadHeavyConfiguration();
+}, ttl: 300);
+
+// Check existence
+if (apcu_exists('session:abc123')) {
+    echo "Session exists";
+}
+
+// Delete
+apcu_delete('user:123');
+
+// Clear all
+apcu_clear_cache();
+```
+
+### Driver Configuration
+
+**Swoole Table Driver:**
+```bash
+# .env
+MINI_APCU_SWOOLE_SIZE=4096          # Number of rows (default: 4096)
+MINI_APCU_SWOOLE_VALUE_SIZE=4096    # Max value size in bytes (default: 4096)
+```
+
+**SQLite Driver:**
+```bash
+# .env
+MINI_APCU_SQLITE_PATH=/dev/shm/my_custom_cache.sqlite  # Custom path (optional)
+```
+
+By default, SQLite uses `/dev/shm/apcu_mini_{hash}.sqlite` on Linux (tmpfs-backed, RAM speed with persistence) or `sys_get_temp_dir()` otherwise.
+
+### Performance Characteristics
+
+| Driver | Speed | Persistence | Cross-Request | Cross-Process |
+|--------|-------|-------------|---------------|---------------|
+| Native APCu | Fastest | RAM only | ✓ | ✓ |
+| Swoole\Table | Very Fast | RAM only | ✓ | ✓ (workers) |
+| SQLite (/dev/shm) | Fast | ✓ | ✓ | ✓ |
+| Array | Instant | None | ✗ | ✗ |
+
+### When Mini Uses APCu
+
+Mini uses APCu internally for L1 caching in performance-critical paths:
+
+- **PathsRegistry** (`src/Util/PathsRegistry.php`) - Caches file resolution results (views, routes, translations, config) with 1-second TTL
+- Future: Translation file loading, metadata caching (opt-in)
+
+### Garbage Collection
+
+APCu polyfill drivers implement **probabilistic garbage collection** (similar to PHP sessions):
+
+- 1% chance of GC on each `apcu_store()` or `apcu_entry()` call
+- Automatically removes expired entries
+- No manual cleanup required
+
+### Complete API
+
+All standard APCu functions are polyfilled:
+
+- `apcu_add()` - Store if key doesn't exist
+- `apcu_cache_info()` - Get cache statistics
+- `apcu_cas()` - Compare-and-swap (atomic update)
+- `apcu_clear_cache()` - Clear all entries
+- `apcu_dec()` - Decrement numeric value
+- `apcu_delete()` - Delete one or more keys
+- `apcu_enabled()` - Check if APCu is available
+- `apcu_entry()` - Atomic fetch-or-compute
+- `apcu_exists()` - Check if key(s) exist
+- `apcu_fetch()` - Fetch value(s)
+- `apcu_inc()` - Increment numeric value
+- `apcu_key_info()` - Get key metadata
+- `apcu_sma_info()` - Get shared memory info
+- `apcu_store()` - Store value(s)
+
+### Installation for Production
+
+For best performance in production, install the native APCu extension:
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install php-apcu
+
+# Alpine Linux (Docker)
+apk add php83-apcu
+
+# PECL
+pecl install apcu
+```
+
+The polyfill automatically detects and uses native APCu when available.
+
 ## Directory Structure
 
 Directories starting with `_` are not web-accessible:
@@ -744,6 +904,7 @@ vendor/bin/mini serve --host 0.0.0.0     # Bind to all interfaces
 
 ### Essential Guides
 
+- **[docs/WHY-MINI.md](docs/WHY-MINI.md) - Why choose Mini? Honest discussion of trade-offs vs. Laravel/Symfony**
 - [PATTERNS.md](PATTERNS.md) - Service overrides, middleware patterns, output buffering
 - [REFERENCE.md](REFERENCE.md) - Complete API reference
 - [CHANGE-LOG.md](CHANGE-LOG.md) - Breaking changes (Mini is in active development)

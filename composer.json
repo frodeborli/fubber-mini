@@ -36,6 +36,7 @@
             "src/Cache/functions.php",
             "src/Converter/functions.php",
             "src/Database/functions.php",
+            "src/Database/Virtual/functions.php",
             "src/Dispatcher/functions.php",
             "src/Router/functions.php",
             "src/Http/functions.php",
@@ -48,6 +49,7 @@
             "src/Mailer/functions.php",
             "src/CLI/functions.php",
             "src/UUID/functions.php",
+            "src/Async/functions.php",
             "src/Validator/functions.php",
             "src/Metadata/functions.php",
             "src/Dispatcher/defaults.php"

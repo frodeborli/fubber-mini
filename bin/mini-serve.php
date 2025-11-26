@@ -54,7 +54,7 @@ if (!$docRoot || !is_dir($docRoot)) {
 }
 
 // Parse command line options using ArgManager
-$args = \mini\args()->nextCommand(); // Skip 'mini' to get 'serve'
+$args = \mini\args();
 $args = $args->withSupportedArgs('h', ['host:', 'port:', 'help']);
 
 if (isset($args->opts['help']) || isset($args->opts['h'])) {

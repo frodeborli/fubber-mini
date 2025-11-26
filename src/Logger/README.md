@@ -129,12 +129,10 @@ class DatabaseLogger implements \Psr\Log\LoggerInterface
     public function log($level, $message, array $context = []): void
     {
         // Log to database
-        db()->insert('logs', [
-            'level' => $level,
-            'message' => $message,
-            'context' => json_encode($context),
-            'created_at' => date('Y-m-d H:i:s')
-        ]);
+        db()->exec(
+            "INSERT INTO logs (level, message, context, created_at) VALUES (?, ?, ?, ?)",
+            [$level, $message, json_encode($context), date('Y-m-d H:i:s')]
+        );
     }
 }
 

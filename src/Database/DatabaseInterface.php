@@ -11,13 +11,18 @@ namespace mini\Database;
 interface DatabaseInterface
 {
     /**
-     * Execute query and return all results as associative arrays
+     * Execute query and return results as iterable
+     *
+     * Returns an iterable that yields associative arrays row by row.
+     * Implementations should use generators for memory efficiency.
+     *
+     * To get an actual array, use: iterator_to_array($db->query(...))
      *
      * @param string $sql SQL query with parameter placeholders
      * @param array $params Parameters to bind to the query
-     * @return array Array of associative arrays (rows)
+     * @return iterable<array> Iterable yielding associative arrays (rows)
      */
-    public function query(string $sql, array $params = []): array;
+    public function query(string $sql, array $params = []): iterable;
 
     /**
      * Execute query and return first row only as associative array
@@ -55,9 +60,9 @@ interface DatabaseInterface
      *
      * @param string $sql SQL statement with parameter placeholders
      * @param array $params Parameters to bind to the statement
-     * @return bool True on success, false on failure
+     * @return int Number of affected rows
      */
-    public function exec(string $sql, array $params = []): bool;
+    public function exec(string $sql, array $params = []): int;
 
     /**
      * Get the last inserted row ID
@@ -83,6 +88,16 @@ interface DatabaseInterface
      * If the closure throws an exception, the transaction is rolled back.
      * Supports nested transactions by maintaining a transaction depth counter.
      *
+     * The closure receives the DatabaseInterface as its first parameter.
+     *
+     * Example:
+     * ```php
+     * db()->transaction(function(DatabaseInterface $db) {
+     *     $db->exec("INSERT INTO users (name) VALUES (?)", ['John']);
+     *     $db->exec("INSERT INTO logs (action) VALUES (?)", ['user_created']);
+     * });
+     * ```
+     *
      * @param \Closure $task The task to execute within the transaction
      * @return mixed The return value of the closure
      * @throws \Exception If the transaction fails or the closure throws
@@ -90,32 +105,133 @@ interface DatabaseInterface
     public function transaction(\Closure $task): mixed;
 
     /**
-     * Insert a row into a table
+     * Get the SQL dialect for this database connection
+     *
+     * Used by PartialQuery to generate dialect-specific SQL.
+     * Implementations should detect the dialect from the connection.
+     *
+     * @return SqlDialect SQL dialect enum
+     */
+    public function getDialect(): SqlDialect;
+
+    /**
+     * Quotes a value for safe use in SQL query strings
+     *
+     * WARNING: Quoting parameters this way is prone to vulnerabilities
+     * if done incorrectly - especially if the database connection has
+     * a different character set than expected. Prefer using parameterized
+     * queries via the query() and exec() methods whenever possible. This
+     * function is provided for edge cases, debugging and dynamic SQL generation.
+     *
+     * @param mixed $value Value to quote
+     * @return string Quoted value safe for SQL
+     */
+    public function quote(mixed $value): string;
+
+    /**
+     * Create a partial query builder for the specified table
+     *
+     * Returns an immutable query builder that allows composable,
+     * fluent query construction. Each method returns a new instance.
+     *
+     * @param string $table Table name
+     * @return PartialQuery Immutable query builder
+     */
+    public function table(string $table): PartialQuery;
+
+    /**
+     * Delete rows matching a partial query
+     *
+     * Respects WHERE clauses and LIMIT from the query.
+     * Ignores SELECT, ORDER BY, and OFFSET.
+     *
+     * Example:
+     * ```php
+     * $deleted = db()->delete(User::inactive());
+     * ```
+     *
+     * @param PartialQuery $query Query defining which rows to delete
+     * @return int Number of affected rows
+     */
+    public function delete(PartialQuery $query): int;
+
+    /**
+     * Update rows matching a partial query
+     *
+     * Respects WHERE clauses and LIMIT from the query.
+     * Ignores SELECT, ORDER BY, and OFFSET.
+     *
+     * Use string for raw SQL expressions:
+     * ```php
+     * db()->update($query, 'login_count = login_count + 1')
+     * ```
+     *
+     * Use array for simple assignments (values passed as-is):
+     * ```php
+     * db()->update($query, ['status' => 'archived', 'updated_at' => date('Y-m-d H:i:s')])
+     * ```
+     *
+     * WARNING: Values are NOT converted automatically. You must handle
+     * conversion yourself (dates to strings, objects to JSON, etc).
+     *
+     * @param PartialQuery $query Query defining which rows to update
+     * @param string|array $set Either raw SQL expression or ['column' => 'value'] array
+     * @return int Number of affected rows
+     */
+    public function update(PartialQuery $query, string|array $set): int;
+
+    /**
+     * Insert a new row into a table
+     *
+     * Performs a simple INSERT operation. Use this when you know the row doesn't exist.
+     * For INSERT or UPDATE behavior, use upsert() instead.
+     *
+     * Example:
+     * ```php
+     * db()->insert('users', ['name' => 'John', 'email' => 'john@example.com']);
+     * $userId = db()->lastInsertId();
+     * ```
+     *
+     * WARNING: Values are NOT converted automatically. You must handle
+     * conversion yourself (dates to strings, JSON encoding, etc).
      *
      * @param string $table Table name
      * @param array $data Associative array of column => value pairs
-     * @return string|null The last insert ID, or null on failure
+     * @return string The last insert ID (for auto-increment columns)
+     * @throws \InvalidArgumentException If data is empty
      */
-    public function insert(string $table, array $data): ?string;
+    public function insert(string $table, array $data): string;
 
     /**
-     * Update rows in a table
+     * Insert a row, or update if conflict on unique columns
+     *
+     * Performs an "UPSERT" operation (INSERT or UPDATE). If a row with the
+     * specified unique column values already exists, updates that row instead
+     * of inserting a new one.
+     *
+     * The conflict columns should be columns with UNIQUE constraints or
+     * PRIMARY KEY. Multiple columns can be specified for composite keys.
+     *
+     * Example:
+     * ```php
+     * // Insert new user or update if email exists
+     * db()->upsert('users', ['email' => 'john@example.com', 'name' => 'John'], 'email');
+     *
+     * // Composite unique key
+     * db()->upsert('user_prefs', ['user_id' => 1, 'key' => 'theme', 'value' => 'dark'], 'user_id', 'key');
+     * ```
+     *
+     * After calling upsert(), use lastInsertId() to get the ID if a new row was inserted.
+     * Note: lastInsertId() behavior on UPDATE varies by database (some return 0, some return existing ID).
+     *
+     * WARNING: Values are NOT converted automatically. You must handle
+     * conversion yourself (dates to strings, JSON encoding, etc).
      *
      * @param string $table Table name
-     * @param array $data Associative array of column => value pairs to update
-     * @param string $where WHERE clause (without the WHERE keyword)
-     * @param array $whereParams Parameters for the WHERE clause
-     * @return int Number of affected rows
+     * @param array $data Associative array of column => value pairs
+     * @param string ...$conflictColumns Column(s) that define uniqueness (PRIMARY KEY or UNIQUE constraint)
+     * @return int Number of affected rows (1 for insert, 1 for update, 0 for no change)
+     * @throws \InvalidArgumentException If data is empty or no conflict columns specified
      */
-    public function update(string $table, array $data, string $where = '', array $whereParams = []): int;
-
-    /**
-     * Delete rows from a table
-     *
-     * @param string $table Table name
-     * @param string $where WHERE clause (without the WHERE keyword)
-     * @param array $whereParams Parameters for the WHERE clause
-     * @return int Number of affected rows
-     */
-    public function delete(string $table, string $where = '', array $whereParams = []): int;
+    public function upsert(string $table, array $data, string ...$conflictColumns): int;
 }
