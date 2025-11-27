@@ -28,13 +28,13 @@ use Psr\Http\Server\RequestHandlerInterface;
  *
  *     public function index(): ResponseInterface
  *     {
- *         $users = table(User::class)->all();
- *         return $this->respond($users);
+ *         $users = User::query()->limit(100);
+ *         return $this->respond(iterator_to_array($users));
  *     }
  *
  *     public function show(int $id): ResponseInterface
  *     {
- *         $user = table(User::class)->find($id);
+ *         $user = User::find($id);
  *         if (!$user) throw new \mini\Exceptions\NotFoundException();
  *         return $this->respond($user);
  *     }

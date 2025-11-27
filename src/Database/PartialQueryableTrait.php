@@ -27,6 +27,6 @@ trait PartialQueryableTrait
      */
     public function table(string $table): PartialQuery
     {
-        return new PartialQuery($this, $table);
+        return PartialQuery::fromTable($this, $table);
     }
 }

@@ -943,6 +943,377 @@ $users = db()->table('users')->withHydrator(
 - `one()` respects hydration and returns a single object
 - Hydration works with all query composition methods
 
+### Relationships with ActiveRecordTrait
+
+PartialQuery enables composable relationships by accepting any SELECT query as its base. Combined with `ActiveRecordTrait`, you can build expressive model classes with type-safe relationship methods.
+
+**Blog Example Schema:**
+```sql
+CREATE TABLE authors (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR(255),
+    email VARCHAR(255),
+    bio TEXT,
+    created_at DATETIME
+);
+
+CREATE TABLE posts (
+    id INTEGER PRIMARY KEY,
+    author_id INTEGER REFERENCES authors(id),
+    title VARCHAR(255),
+    body TEXT,
+    published_at DATETIME,
+    created_at DATETIME
+);
+
+CREATE TABLE comments (
+    id INTEGER PRIMARY KEY,
+    post_id INTEGER REFERENCES posts(id),
+    author_id INTEGER REFERENCES authors(id),
+    body TEXT,
+    created_at DATETIME
+);
+
+CREATE TABLE friendships (
+    user_id INTEGER REFERENCES authors(id),
+    friend_id INTEGER REFERENCES authors(id),
+    created_at DATETIME,
+    PRIMARY KEY (user_id, friend_id)
+);
+```
+
+**Author Model with Relationships:**
+```php
+<?php
+use mini\Database\{ActiveRecordTrait, PartialQuery};
+
+class Author
+{
+    use ActiveRecordTrait;
+
+    public int $id;
+    public string $name;
+    public string $email;
+    public ?string $bio;
+    public string $created_at;
+
+    /**
+     * Get all posts by this author
+     * @return PartialQuery<Post>
+     */
+    public function getPosts(): PartialQuery
+    {
+        return Post::query()->eq('author_id', $this->id);
+    }
+
+    /**
+     * Get published posts only
+     * @return PartialQuery<Post>
+     */
+    public function getPublishedPosts(): PartialQuery
+    {
+        return $this->getPosts()->where('published_at IS NOT NULL');
+    }
+
+    /**
+     * Get friends of this author (bidirectional friendship)
+     * Uses JOIN to find all users connected via friendships table
+     * @return PartialQuery<Author>
+     */
+    public function getFriends(): PartialQuery
+    {
+        return (new PartialQuery(db(), '
+            SELECT a.* FROM authors a
+            INNER JOIN friendships f ON (
+                (f.friend_id = a.id AND f.user_id = ?)
+                OR (f.user_id = a.id AND f.friend_id = ?)
+            )
+        ', [$this->id, $this->id]))->withEntityClass(Author::class, false);
+    }
+
+    /**
+     * Get authors this user is following (one-way)
+     * @return PartialQuery<Author>
+     */
+    public function getFollowing(): PartialQuery
+    {
+        return (new PartialQuery(db(), '
+            SELECT a.* FROM authors a
+            INNER JOIN friendships f ON f.friend_id = a.id AND f.user_id = ?
+        ', [$this->id]))->withEntityClass(Author::class, false);
+    }
+
+    /**
+     * Get authors following this user (one-way)
+     * @return PartialQuery<Author>
+     */
+    public function getFollowers(): PartialQuery
+    {
+        return (new PartialQuery(db(), '
+            SELECT a.* FROM authors a
+            INNER JOIN friendships f ON f.user_id = a.id AND f.friend_id = ?
+        ', [$this->id]))->withEntityClass(Author::class, false);
+    }
+
+    /**
+     * Get all comments by this author across all posts
+     * @return PartialQuery<Comment>
+     */
+    public function getComments(): PartialQuery
+    {
+        return Comment::query()->eq('author_id', $this->id);
+    }
+
+    /**
+     * Get feed: posts from friends, ordered by date
+     * @return PartialQuery<Post>
+     */
+    public function getFeed(): PartialQuery
+    {
+        return (new PartialQuery(db(), '
+            SELECT p.* FROM posts p
+            INNER JOIN friendships f ON (
+                (f.friend_id = p.author_id AND f.user_id = ?)
+                OR (f.user_id = p.author_id AND f.friend_id = ?)
+            )
+        ', [$this->id, $this->id]))
+            ->withEntityClass(Post::class, false)
+            ->where('p.published_at IS NOT NULL')
+            ->order('p.published_at DESC');
+    }
+}
+```
+
+**Post Model with Relationships:**
+```php
+<?php
+use mini\Database\{ActiveRecordTrait, PartialQuery};
+
+class Post
+{
+    use ActiveRecordTrait;
+
+    public int $id;
+    public int $author_id;
+    public string $title;
+    public string $body;
+    public ?string $published_at;
+    public string $created_at;
+
+    /**
+     * Get the author of this post
+     */
+    public function getAuthor(): ?Author
+    {
+        return Author::find($this->author_id);
+    }
+
+    /**
+     * Get all comments on this post
+     * @return PartialQuery<Comment>
+     */
+    public function getComments(): PartialQuery
+    {
+        return Comment::query()->eq('post_id', $this->id);
+    }
+
+    /**
+     * Get recent comments (last 7 days)
+     * @return PartialQuery<Comment>
+     */
+    public function getRecentComments(): PartialQuery
+    {
+        return $this->getComments()
+            ->where('created_at > ?', [date('Y-m-d', strtotime('-7 days'))])
+            ->order('created_at DESC');
+    }
+
+    /**
+     * Get comments with author info via JOIN
+     * Returns arrays with both comment and author data
+     */
+    public function getCommentsWithAuthors(): PartialQuery
+    {
+        return new PartialQuery(db(), '
+            SELECT c.*, a.name as author_name, a.email as author_email
+            FROM comments c
+            INNER JOIN authors a ON a.id = c.author_id
+        ', []);
+    }
+
+    /**
+     * Published posts scope
+     * @return PartialQuery<Post>
+     */
+    public static function published(): PartialQuery
+    {
+        return self::query()->where('published_at IS NOT NULL');
+    }
+
+    /**
+     * Drafts scope
+     * @return PartialQuery<Post>
+     */
+    public static function drafts(): PartialQuery
+    {
+        return self::query()->eq('published_at', null);
+    }
+}
+```
+
+**Comment Model with Relationships:**
+```php
+<?php
+use mini\Database\{ActiveRecordTrait, PartialQuery};
+
+class Comment
+{
+    use ActiveRecordTrait;
+
+    public int $id;
+    public int $post_id;
+    public int $author_id;
+    public string $body;
+    public string $created_at;
+
+    /**
+     * Get the post this comment belongs to
+     */
+    public function getPost(): ?Post
+    {
+        return Post::find($this->post_id);
+    }
+
+    /**
+     * Get the author of this comment
+     */
+    public function getAuthor(): ?Author
+    {
+        return Author::find($this->author_id);
+    }
+
+    /**
+     * Get other comments on the same post
+     * @return PartialQuery<Comment>
+     */
+    public function getSiblingComments(): PartialQuery
+    {
+        return Comment::query()
+            ->eq('post_id', $this->post_id)
+            ->where('id != ?', [$this->id]);
+    }
+}
+```
+
+**Usage Examples:**
+
+```php
+// Find an author and explore relationships
+$author = Author::find(512);
+
+// Get friends - returns PartialQuery, composable
+$friends = $author->getFriends();
+echo "Total friends: " . $friends->count();
+
+// Filter friends further
+$activeFriends = $author->getFriends()
+    ->where('created_at > ?', [date('Y-m-d', strtotime('-1 year'))])
+    ->order('name')
+    ->limit(10);
+
+foreach ($activeFriends as $friend) {
+    echo $friend->name . "\n";
+}
+
+// Chain through relationships
+$post = $author->getPosts()->one();
+if ($post) {
+    $comments = $post->getComments();
+    echo "Post '{$post->title}' has {$comments->count()} comments\n";
+
+    // Get recent comments
+    foreach ($post->getRecentComments()->limit(5) as $comment) {
+        echo "- " . $comment->body . "\n";
+    }
+}
+
+// Get author's feed (posts from friends)
+foreach ($author->getFeed()->limit(20) as $post) {
+    echo "{$post->title} by author #{$post->author_id}\n";
+}
+
+// Navigate: Author -> Post -> Comments
+$firstPost = Author::find(1)->getPosts()->one();
+$firstComment = $firstPost?->getComments()->one();
+$commentAuthor = $firstComment?->getAuthor();
+
+// Aggregate queries still work
+$totalComments = $author->getComments()->count();
+$recentPostCount = $author->getPublishedPosts()
+    ->where('published_at > ?', [date('Y-m-d', strtotime('-30 days'))])
+    ->count();
+
+// Get all post IDs by this author
+$postIds = $author->getPosts()->select('id')->column();
+
+// Complex: Get friends who have commented on my posts
+$friendsWhoCommented = (new PartialQuery(db(), '
+    SELECT DISTINCT a.* FROM authors a
+    INNER JOIN friendships f ON (
+        (f.friend_id = a.id AND f.user_id = ?)
+        OR (f.user_id = a.id AND f.friend_id = ?)
+    )
+    INNER JOIN comments c ON c.author_id = a.id
+    INNER JOIN posts p ON p.id = c.post_id AND p.author_id = ?
+', [$author->id, $author->id, $author->id]))
+    ->withEntityClass(Author::class, false);
+
+foreach ($friendsWhoCommented as $friend) {
+    echo "{$friend->name} commented on your posts\n";
+}
+```
+
+**Key Patterns:**
+
+1. **Simple foreign key (belongs-to):** Return single entity via `::find()`
+   ```php
+   public function getAuthor(): ?Author {
+       return Author::find($this->author_id);
+   }
+   ```
+
+2. **Has-many:** Return PartialQuery filtered by foreign key
+   ```php
+   public function getPosts(): PartialQuery {
+       return Post::query()->eq('author_id', $this->id);
+   }
+   ```
+
+3. **Many-to-many via JOIN:** Use `new PartialQuery()` with JOIN SQL
+   ```php
+   public function getFriends(): PartialQuery {
+       return (new PartialQuery(db(), '
+           SELECT a.* FROM authors a
+           INNER JOIN friendships f ON f.friend_id = a.id AND f.user_id = ?
+       ', [$this->id]))->withEntityClass(Author::class, false);
+   }
+   ```
+
+4. **Composable chains:** All relationship methods return PartialQuery
+   ```php
+   $author->getFriends()->eq('active', 1)->order('name')->limit(10);
+   ```
+
+5. **Eager-load alternative:** Use JOIN to fetch related data in one query
+   ```php
+   public function getCommentsWithAuthors(): PartialQuery {
+       return new PartialQuery(db(), '
+           SELECT c.*, a.name as author_name FROM comments c
+           INNER JOIN authors a ON a.id = c.author_id
+       ', []);
+   }
+   ```
+
 ### SQL Dialect Support
 
 PartialQuery automatically generates database-specific SQL by detecting the dialect from your database connection. This ensures correct LIMIT/OFFSET syntax across different databases.

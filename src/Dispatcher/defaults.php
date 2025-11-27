@@ -22,13 +22,20 @@ use mini\Http\Message\Response;
 
 $converters = Mini::$mini->get(ConverterRegistryInterface::class);
 
-// string → ResponseInterface (text/plain responses)
-$converters->register(function(string $content): ResponseInterface {
-    return new Response($content, ['Content-Type' => 'text/plain; charset=utf-8'], 200);
+// string|int|float|bool → ResponseInterface (JSON scalar responses)
+$converters->register(function(string|int|float|bool $value): ResponseInterface {
+    $json = json_encode($value, JSON_THROW_ON_ERROR);
+    return new Response($json, ['Content-Type' => 'application/json; charset=utf-8'], 200);
 });
 
-// array → ResponseInterface (JSON responses)
-$converters->register(function(array $data): ResponseInterface {
+// array|stdClass → ResponseInterface (JSON responses)
+$converters->register(function(array|\stdClass $data): ResponseInterface {
+    $json = json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    return new Response($json, ['Content-Type' => 'application/json; charset=utf-8'], 200);
+});
+
+// JsonSerializable → ResponseInterface (JSON responses)
+$converters->register(function(\JsonSerializable $data): ResponseInterface {
     $json = json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     return new Response($json, ['Content-Type' => 'application/json; charset=utf-8'], 200);
 });

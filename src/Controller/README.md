@@ -348,34 +348,37 @@ class PostController extends AbstractController
     #[GET('/')]
     public function index(): array
     {
-        return table(Post::class)->all();
+        return iterator_to_array(Post::query()->limit(100));
     }
 
     #[GET('/{id}/')]
     public function show(int $id): Post
     {
-        return table(Post::class)->findOrFail($id);
+        return Post::find($id) ?? throw new \mini\Exceptions\NotFoundException();
     }
 
     #[POST('/')]
     public function create(): array
     {
-        $post = table(Post::class)->create($_POST);
+        $post = new Post($_POST);
+        $post->save();
         return ['id' => $post->id];
     }
 
     #[PUT('/{id}/')]
     public function update(int $id): Post
     {
-        $post = table(Post::class)->findOrFail($id);
-        $post->update($_POST);
+        $post = Post::find($id) ?? throw new \mini\Exceptions\NotFoundException();
+        $post->fill($_POST);
+        $post->save();
         return $post;
     }
 
     #[DELETE('/{id}/')]
     public function delete(int $id): ResponseInterface
     {
-        table(Post::class)->delete($id);
+        $post = Post::find($id) ?? throw new \mini\Exceptions\NotFoundException();
+        $post->delete();
         return $this->empty(204);
     }
 }
