@@ -17,8 +17,6 @@ use Exception;
  */
 class PDODatabase implements DatabaseInterface
 {
-    use PartialQueryableTrait;
-
     private ?PDO $pdo = null;
     private int $transactionDepth = 0;
 
@@ -34,12 +32,37 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Execute query and return results as iterable
+     * Create a PartialQuery from any SELECT query
      *
-     * Yields rows one at a time for memory efficiency.
-     * Use iterator_to_array() if you need an actual array.
+     * Returns an immutable, composable query builder. The query can include
+     * JOINs, WHERE clauses, subqueries - anything. Additional WHERE/ORDER/LIMIT
+     * can be added via fluent methods.
+     *
+     * For simple table queries, just pass the table name.
+     *
+     * @param string $sql SELECT query or table name
+     * @param array $params Parameters to bind
+     * @return PartialQuery Composable query builder
      */
-    public function query(string $sql, array $params = []): iterable
+    public function query(string $sql, array $params = []): PartialQuery
+    {
+        // Simple table name? Use convenience method
+        if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $sql)) {
+            return PartialQuery::table($this, $sql);
+        }
+
+        return new PartialQuery($this, $sql, $params);
+    }
+
+    /**
+     * Execute raw SQL and return results as iterable
+     *
+     * Internal method for executing final SQL. Used by PartialQuery.
+     * For public API, use query() which returns a composable PartialQuery.
+     *
+     * @internal
+     */
+    public function rawQuery(string $sql, array $params = []): iterable
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);

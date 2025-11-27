@@ -11,18 +11,36 @@ namespace mini\Database;
 interface DatabaseInterface
 {
     /**
-     * Execute query and return results as iterable
+     * Create a PartialQuery from any SELECT query or table name
      *
-     * Returns an iterable that yields associative arrays row by row.
-     * Implementations should use generators for memory efficiency.
+     * Returns an immutable, composable query builder. The query can include
+     * JOINs, WHERE clauses, subqueries - anything valid SQL. Additional
+     * WHERE/ORDER/LIMIT can be added via fluent methods.
      *
-     * To get an actual array, use: iterator_to_array($db->query(...))
+     * For simple table queries, just pass the table name:
+     *   db()->query('users')->eq('active', 1)
+     *
+     * For complex queries:
+     *   db()->query('SELECT u.* FROM users u JOIN roles r ON r.id = u.role_id')
+     *
+     * @param string $sql SELECT query or simple table name
+     * @param array $params Parameters to bind to the query
+     * @return PartialQuery<array> Immutable partial query that can be iterated or further composed
+     */
+    public function query(string $sql, array $params = []): PartialQuery;
+
+    /**
+     * Execute raw SQL and return results as iterable
+     *
+     * Low-level method that executes SQL directly without PartialQuery wrapping.
+     * Used internally by PartialQuery. For most use cases, prefer query().
      *
      * @param string $sql SQL query with parameter placeholders
      * @param array $params Parameters to bind to the query
-     * @return iterable<array> Iterable yielding associative arrays (rows)
+     * @return iterable<array> Yields associative arrays row by row
+     * @internal
      */
-    public function query(string $sql, array $params = []): iterable;
+    public function rawQuery(string $sql, array $params = []): iterable;
 
     /**
      * Execute query and return first row only as associative array
@@ -127,17 +145,6 @@ interface DatabaseInterface
      * @return string Quoted value safe for SQL
      */
     public function quote(mixed $value): string;
-
-    /**
-     * Create a partial query builder for the specified table
-     *
-     * Returns an immutable query builder that allows composable,
-     * fluent query construction. Each method returns a new instance.
-     *
-     * @param string $table Table name
-     * @return PartialQuery Immutable query builder
-     */
-    public function table(string $table): PartialQuery;
 
     /**
      * Delete rows matching a partial query

@@ -1,6 +1,8 @@
 <?php
 namespace mini\Database;
 
+use function mini\db;
+
 /**
  * Shared Active Record functionality
  *
@@ -18,6 +20,17 @@ trait ActiveRecordTrait {
     abstract protected static function getEntityClass(): string;
 
     /**
+     * Get the database connection for this entity
+     *
+     * Override to use vdb() or other DatabaseInterface implementations.
+     *
+     * @return DatabaseInterface
+     */
+    protected static function getDatabase(): DatabaseInterface {
+        return db();
+    }
+
+    /**
      * Convert entity to array for database operations
      *
      * @param object $entity The entity to dehydrate
@@ -29,7 +42,7 @@ trait ActiveRecordTrait {
      * @return PartialQuery<T>
      */
     public static function query(): PartialQuery {
-        return db()->table(static::getTableName())
+        return static::getDatabase()->query(static::getTableName())
             ->withEntityClass(static::getEntityClass(), false);
     }
 
@@ -59,7 +72,7 @@ trait ActiveRecordTrait {
             $id = $entity->{$pk};
             unset($data[$pk]); // Don't update the PK itself
 
-            $affected = db()->update(
+            $affected = static::getDatabase()->update(
                 static::query()->eq($pk, $id)->limit(1),
                 $data
             );
@@ -67,7 +80,7 @@ trait ActiveRecordTrait {
             // This is an INSERT
             unset($data[$pk]); // Don't try to insert null/empty PK
 
-            $entity->{$pk} = db()->insert(
+            $entity->{$pk} = static::getDatabase()->insert(
                 static::getTableName(),
                 $data
             );
@@ -90,7 +103,7 @@ trait ActiveRecordTrait {
             throw new \RuntimeException("Cannot delete entity without primary key set");
         }
 
-        return db()->delete(
+        return static::getDatabase()->delete(
             static::query()->eq($pk, $entity->{$pk})->limit(1)
         );
     }

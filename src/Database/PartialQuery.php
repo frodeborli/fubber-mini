@@ -27,7 +27,7 @@ namespace mini\Database;
  * Example - simple table queries:
  * ```php
  * // Define reusable base query
- * $active = db()->table('users')->eq('is_deleted', 0);
+ * $active = db()->query('users')->eq('is_deleted', 0);
  *
  * // Branch without mutation
  * $verified = $active->eq('email_verified', 1);
@@ -38,41 +38,36 @@ namespace mini\Database;
  * foreach ($verified as $user) { }
  * ```
  *
- * Example - JOIN queries:
+ * Example - complex queries with JOINs:
+ * ```php
+ * // Any SELECT query works - JOINs, subqueries, existing WHERE clauses
+ * $query = db()->query('
+ *     SELECT u.*, r.name as role_name
+ *     FROM users u
+ *     JOIN roles r ON r.id = u.role_id
+ *     WHERE u.active = 1
+ * ');
+ *
+ * // Still composable! Uses CTE to wrap base query safely
+ * $admins = $query->eq('r.name', 'admin')->order('u.name')->limit(10);
+ * ```
+ *
+ * Example - relationships:
  * ```php
  * class User {
  *     use ActiveRecordTrait;
  *
  *     /** @return PartialQuery<User> Friends of this user *\/
  *     public function friends(): PartialQuery {
- *         return (new PartialQuery(db(), '
+ *         return db()->query('
  *             SELECT u.* FROM users u
  *             INNER JOIN friendships f ON f.friend_id = u.id AND f.user_id = ?
- *         ', [$this->id]))->withEntityClass(User::class, false);
+ *         ', [$this->id])->withEntityClass(User::class, false);
  *     }
  * }
  *
  * // Composable - add WHERE/ORDER/LIMIT
  * $onlineFriends = $user->friends()->eq('online', 1)->limit(10);
- * ```
- *
- * Example - model with static query methods:
- * ```php
- * class User {
- *     use ActiveRecordTrait;
- *
- *     /** @return PartialQuery<User> *\/
- *     public static function active(): PartialQuery {
- *         return self::query()->eq('is_deleted', 0);
- *     }
- * }
- *
- * // Compose and iterate
- * foreach (User::active()->eq('role', 'admin') as $admin) { }
- *
- * // UPDATE/DELETE work with db()->table() queries
- * db()->update(db()->table('users')->eq('role', 'admin'), ['notified' => 1]);
- * db()->delete(db()->table('users')->where('created_at < ?', ['2020-01-01']));
  * ```
  *
  * See also: mini\validator($user::class)->isInvalid($user) for validation,
@@ -98,27 +93,34 @@ final class PartialQuery implements \IteratorAggregate
     /**
      * Create a PartialQuery from a base SELECT query
      *
-     * The base SQL is used verbatim. WHERE/ORDER/LIMIT are appended directly.
-     * Parameters are bound in order: base params first, then WHERE params.
+     * Accepts any valid SELECT query. The query is wrapped in a CTE (Common Table
+     * Expression) when building the final SQL, allowing WHERE/ORDER/LIMIT to be
+     * safely appended to any query - even those with existing WHERE clauses.
      *
      * Examples:
      * ```php
-     * // Simple table query (use db()->table() for this)
+     * // Simple query
      * new PartialQuery(db(), 'SELECT * FROM users');
      *
-     * // With JOIN - note: no trailing WHERE, that's added via ->where()/->eq()
+     * // Complex query with JOINs
      * new PartialQuery(db(), '
-     *     SELECT u.* FROM users u
-     *     INNER JOIN friendships f ON f.friend_id = u.id AND f.user_id = ?
-     * ', [$userId]);
+     *     SELECT u.*, c.name as class_name
+     *     FROM users u
+     *     JOIN classes c ON c.id = u.class_id
+     * ');
      *
-     * // Then compose further - appends WHERE/ORDER/LIMIT
-     * $query->eq('u.active', 1)->order('u.name')->limit(10);
+     * // Query with existing WHERE - still composable!
+     * new PartialQuery(db(), '
+     *     SELECT * FROM users WHERE role = ?
+     * ', ['admin']);
+     *
+     * // All can be further composed
+     * $query->eq('active', 1)->order('name')->limit(10);
      * ```
      *
      * @param DatabaseInterface $db Database connection
-     * @param string $sql Base SELECT query (without trailing WHERE/ORDER/LIMIT)
-     * @param array $params Parameters for placeholders in base query
+     * @param string $sql Any valid SELECT query
+     * @param array $params Parameters for placeholders in the query
      */
     public function __construct(DatabaseInterface $db, string $sql, array $params = [])
     {
@@ -126,11 +128,6 @@ final class PartialQuery implements \IteratorAggregate
         if (stripos($trimmed, 'SELECT') !== 0) {
             throw new \InvalidArgumentException(
                 'PartialQuery SQL must start with SELECT'
-            );
-        }
-        if (preg_match('/\bWHERE\b/i', $sql)) {
-            throw new \InvalidArgumentException(
-                'PartialQuery SQL must not contain WHERE clause. Add conditions using ->where() or ->eq()'
             );
         }
 
@@ -142,15 +139,22 @@ final class PartialQuery implements \IteratorAggregate
     /**
      * Create a PartialQuery for a simple table
      *
-     * This is the preferred way to create queries for single tables.
-     * Supports UPDATE/DELETE operations via db()->update() and db()->delete().
+     * Convenience method for simple table queries. Supports UPDATE/DELETE
+     * operations via db()->update() and db()->delete().
      *
      * @param DatabaseInterface $db Database connection
-     * @param string $table Table name
+     * @param string $table Table name (must be a valid identifier, no spaces or special chars)
      * @return self
      */
-    public static function fromTable(DatabaseInterface $db, string $table): self
+    public static function table(DatabaseInterface $db, string $table): self
     {
+        // Validate table name - simple identifier only
+        if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $table)) {
+            throw new \InvalidArgumentException(
+                "Invalid table name '{$table}'. Use the constructor for complex queries."
+            );
+        }
+
         $query = new self($db, "SELECT * FROM {$table}");
         $query->table = $table;
         return $query;
@@ -175,13 +179,13 @@ final class PartialQuery implements \IteratorAggregate
      * class User {
      *     public function __construct(private PDO $db) {}
      * }
-     * $users = db()->table('users')->withEntityClass(User::class, [db()->getPdo()]);
+     * $users = db()->query('users')->withEntityClass(User::class, [db()->getPdo()]);
      * ```
      *
      * Example without constructor:
      * ```php
      * // Skip constructor - useful when constructor has required params
-     * $users = db()->table('users')->withEntityClass(User::class, false);
+     * $users = db()->query('users')->withEntityClass(User::class, false);
      * ```
      *
      * @template TObject of object
@@ -206,7 +210,7 @@ final class PartialQuery implements \IteratorAggregate
      *
      * Example:
      * ```php
-     * $users = db()->table('users')->withHydrator(
+     * $users = db()->query('users')->withHydrator(
      *     fn($id, $name, $email) => new User($id, $name, $email)
      * );
      * ```
@@ -354,11 +358,20 @@ final class PartialQuery implements \IteratorAggregate
     /**
      * Build SQL query string
      *
+     * Uses a CTE (Common Table Expression) to wrap the base query, allowing
+     * WHERE/ORDER/LIMIT to be safely appended to any query.
+     *
      * @return string Complete SQL query
      */
     private function buildSql(): string
     {
-        $sql = $this->baseSql;
+        // If no additional clauses, return base SQL with just LIMIT
+        if (empty($this->wheres) && $this->orderBy === null && $this->offset === 0) {
+            return $this->baseSql . $this->buildLimitClause();
+        }
+
+        // Wrap base query in CTE for safe composition
+        $sql = "WITH _q AS ({$this->baseSql}) SELECT * FROM _q";
 
         if ($this->wheres) {
             $sql .= ' WHERE ' . implode(' AND ', $this->wheres);
@@ -368,7 +381,6 @@ final class PartialQuery implements \IteratorAggregate
             $sql .= " ORDER BY {$this->orderBy}";
         }
 
-        // Dialect-specific LIMIT/OFFSET syntax
         $sql .= $this->buildLimitClause();
 
         return $sql;
@@ -430,20 +442,20 @@ final class PartialQuery implements \IteratorAggregate
     /**
      * Count total matching rows
      *
-     * Wraps the base query (with WHERE) as a subquery and counts.
-     * Ignores ORDER BY and LIMIT/OFFSET.
+     * Wraps the query in a CTE and counts. Ignores ORDER BY and LIMIT/OFFSET.
      *
      * @return int Number of matching rows
      */
     public function count(): int
     {
-        $innerSql = $this->baseSql;
-
-        if ($this->wheres) {
-            $innerSql .= ' WHERE ' . implode(' AND ', $this->wheres);
+        // If no additional WHERE clauses, count base query directly
+        if (empty($this->wheres)) {
+            $sql = "SELECT COUNT(*) FROM ({$this->baseSql}) AS _count";
+            return (int)$this->db->queryField($sql, $this->params);
         }
 
-        $sql = "SELECT COUNT(*) FROM ({$innerSql}) AS _count";
+        // Use CTE to apply WHERE clauses
+        $sql = "WITH _q AS ({$this->baseSql}) SELECT COUNT(*) FROM _q WHERE " . implode(' AND ', $this->wheres);
 
         return (int)$this->db->queryField($sql, $this->params);
     }
@@ -458,7 +470,7 @@ final class PartialQuery implements \IteratorAggregate
      */
     public function getIterator(): \Traversable
     {
-        $rows = $this->db->query($this->buildSql(), $this->params);
+        $rows = $this->db->rawQuery($this->buildSql(), $this->params);
 
         // No hydration - yield rows as-is
         if ($this->entityClass === null && $this->hydrator === null) {
@@ -515,18 +527,18 @@ final class PartialQuery implements \IteratorAggregate
     /**
      * Get the table name for UPDATE/DELETE operations
      *
-     * Only available for queries created via db()->table() or PartialQuery::fromTable().
-     * Queries created with raw SQL (JOINs, subqueries) cannot be used with UPDATE/DELETE.
+     * Only available for queries created via db()->query('tablename') or PartialQuery::table().
+     * Queries created with full SELECT SQL cannot be used with UPDATE/DELETE.
      *
      * @return string Table name
-     * @throws \LogicException If query was not created from a simple table
+     * @throws \LogicException If query was not created from a simple table name
      */
     public function getTable(): string
     {
         if ($this->table === null) {
             throw new \LogicException(
-                'Cannot get table name from a PartialQuery created with raw SQL. ' .
-                'UPDATE/DELETE operations require queries created via db()->table().'
+                'Cannot get table name from a PartialQuery created with SELECT SQL. ' .
+                "UPDATE/DELETE operations require queries created via db()->query('tablename')."
             );
         }
         return $this->table;
