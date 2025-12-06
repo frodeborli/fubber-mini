@@ -53,6 +53,15 @@ $availableCommands = [
             'docs search Router' => 'Search entity names for "Router"',
             'docs "mini\\db"' => 'Show db() function documentation'
         ]
+    ],
+    'test' => [
+        'description' => 'Run tests',
+        'script' => 'mini-test.php',
+        'examples' => [
+            'test' => 'Run all tests in tests/',
+            'test tests/ Router' => 'Run tests matching "Router"',
+            'test --list' => 'List available tests'
+        ]
     ]
 ];
 

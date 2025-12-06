@@ -45,16 +45,25 @@ class Translatable implements \Stringable
      */
     private function getCallingFile(): string
     {
+        static $thisFile = null;
+        static $functionsFile = null;
+
+        // Cache the paths to skip (this file and the functions.php file)
+        if ($thisFile === null) {
+            $thisFile = __FILE__;
+            $functionsFile = __DIR__ . '/functions.php';
+        }
+
         $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 10);
 
         // Get project root from Mini singleton
         $projectRoot = Mini::$mini->root;
 
-        // Find the first call that's not in this file or functions.php
+        // Find the first call that's not in this file or the I18n functions.php
         foreach ($backtrace as $frame) {
             if (isset($frame['file']) &&
-                !str_ends_with($frame['file'], 'Translatable.php') &&
-                !str_ends_with($frame['file'], 'functions.php')) {
+                $frame['file'] !== $thisFile &&
+                $frame['file'] !== $functionsFile) {
 
                 // Return relative path from project root
                 $relativePath = str_replace($projectRoot . '/', '', $frame['file']);
