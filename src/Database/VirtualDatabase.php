@@ -47,8 +47,6 @@ use mini\Parsing\SQL\AST\{
  */
 class VirtualDatabase implements DatabaseInterface
 {
-    use PartialQueryableTrait;
-
     /** @var array<string, VirtualTable> */
     private array $tables = [];
 
@@ -70,11 +68,31 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
-     * Execute SQL query
+     * Create a PartialQuery from any SELECT query or table name
+     *
+     * @param string $sql SELECT query or table name
+     * @param array $params Parameters to bind
+     * @param string|null $table Explicit table name for delete/update operations
+     * @return PartialQuery Composable query builder
+     */
+    public function query(string $sql, array $params = [], ?string $table = null): PartialQuery
+    {
+        // Detect simple table name (identifier with optional schema prefix)
+        if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$/', $sql)) {
+            return PartialQuery::fromTable($this, $sql);
+        }
+
+        return PartialQuery::fromSql($this, $sql, $params, $table);
+    }
+
+    /**
+     * Execute raw SQL and return results as iterable
      *
      * Parses SQL and delegates to appropriate virtual table.
+     *
+     * @internal Used by PartialQuery
      */
-    public function query(string $sql, array $params = []): iterable
+    public function rawQuery(string $sql, array $params = []): iterable
     {
         try {
             $ast = $this->parser->parse($sql);
@@ -86,7 +104,7 @@ class VirtualDatabase implements DatabaseInterface
             return $this->executeSelect($ast, $params);
         }
 
-        throw new \RuntimeException("Only SELECT queries supported in VirtualDatabase::query()");
+        throw new \RuntimeException("Only SELECT queries supported in VirtualDatabase::rawQuery()");
     }
 
     public function queryOne(string $sql, array $params = []): ?array
@@ -154,7 +172,7 @@ class VirtualDatabase implements DatabaseInterface
 
     public function getDialect(): SqlDialect
     {
-        return SqlDialect::Generic;
+        return SqlDialect::Virtual;
     }
 
     public function quote(mixed $value): string
@@ -166,6 +184,17 @@ class VirtualDatabase implements DatabaseInterface
             return (string)$value;
         }
         return "'" . str_replace("'", "''", (string)$value) . "'";
+    }
+
+    public function quoteIdentifier(string $identifier): string
+    {
+        // Handle dotted identifiers (e.g., "table.column")
+        if (str_contains($identifier, '.')) {
+            return implode('.', array_map(fn($part) => $this->quoteIdentifier($part), explode('.', $identifier)));
+        }
+
+        // Use standard double quotes for generic SQL
+        return '"' . str_replace('"', '""', $identifier) . '"';
     }
 
     public function delete(PartialQuery $query): int
@@ -181,23 +210,23 @@ class VirtualDatabase implements DatabaseInterface
         return $this->exec($sql, $where['params']);
     }
 
-    public function update(PartialQuery $query, string|array $set): int
+    public function update(PartialQuery $query, string|array $set, array $params = []): int
     {
         // Build UPDATE SQL from PartialQuery
         $where = $query->getWhere();
 
         if (is_array($set)) {
             $setParts = [];
-            $params = [];
+            $setParams = [];
             foreach ($set as $col => $val) {
                 $setParts[] = "$col = ?";
-                $params[] = $val;
+                $setParams[] = $val;
             }
             $setClause = implode(', ', $setParts);
-            $params = array_merge($params, $where['params']);
+            $params = array_merge($setParams, $where['params']);
         } else {
             $setClause = $set;
-            $params = $where['params'];
+            $params = array_merge($params, $where['params']);
         }
 
         $sql = "UPDATE {$query->getTable()} SET $setClause";

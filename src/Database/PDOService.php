@@ -42,47 +42,32 @@ class PDOService
     /**
      * Configure PDO instance with framework defaults
      *
-     * This is always applied regardless of where the PDO instance came from.
-     * Applications can create custom _config/pdo.php but will still get
-     * proper charset, timezone, and error handling configuration.
+     * Applies consistent configuration regardless of how PDO was instantiated:
+     * - Exception error mode
+     * - Associative array fetch mode
+     * - UTF-8 charset
+     * - UTC timezone
      */
     public static function configure(\PDO $pdo): void
     {
-        // Always throw exceptions on errors
         $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-
-        // Always fetch as associative arrays
         $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
 
-        // Get character set from PHP ini (defaults to UTF-8)
-        $charset = \ini_get('default_charset') ?: 'UTF-8';
-
-        // Get driver name
-        $driver = $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
-
-        // Configure charset and timezone based on driver
-        switch ($driver) {
+        // Configure charset (UTF-8) and timezone (UTC) based on driver
+        switch ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME)) {
             case 'mysql':
-                // MySQL: Set charset and timezone
-                $mysqlCharset = strtolower($charset) === 'utf-8' ? 'utf8mb4' : $charset;
-                $pdo->exec("SET NAMES {$mysqlCharset}");
-                $pdo->exec("SET time_zone = '" . Mini::$mini->timezone . "'");
+                $pdo->exec("SET NAMES utf8mb4, time_zone = '+00:00'");
                 break;
-
             case 'pgsql':
-                // PostgreSQL: Set client encoding and timezone
-                $pgsqlCharset = strtoupper($charset);
-                $pdo->exec("SET client_encoding TO '{$pgsqlCharset}'");
-                $pdo->exec("SET timezone TO '" . Mini::$mini->timezone . "'");
+                $pdo->exec("SET client_encoding TO 'UTF8', timezone TO 'UTC'");
                 break;
-
+            case 'oci':
+                $pdo->exec("ALTER SESSION SET TIME_ZONE = 'UTC'");
+                break;
             case 'sqlite':
-                // SQLite: Set encoding (UTF-8/UTF-16)
-                if (stripos($charset, 'utf-8') !== false || stripos($charset, 'utf8') !== false) {
-                    $pdo->exec("PRAGMA encoding = 'UTF-8'");
-                }
-                // Note: SQLite doesn't support timezone settings
+                $pdo->exec("PRAGMA encoding = 'UTF-8'");
                 break;
+            // sqlsrv/dblib: charset via connection string, no session timezone
         }
     }
 

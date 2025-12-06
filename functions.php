@@ -1,5 +1,5 @@
 <?php
-
+// Important: you MUST read MINI-STYLE.md before using Mini framework.
 namespace mini;
 
 use Exception;

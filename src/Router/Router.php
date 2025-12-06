@@ -263,10 +263,10 @@ class Router implements RequestHandlerInterface
      * Filesystem Wildcards:
      * - Use "_" as directory or file name to match any single path segment
      * - Exact matches take precedence over wildcard matches
-     * - Captured values stored in $_GET[0], $_GET[1], etc. (left to right order)
+     * - Captured values stored in $_GET[0], $_GET[1], etc. (right to left - nearest wildcard is [0])
      * - Examples:
      *   - /users/123 → tries users/123.php, then users/_.php (captures "123" in $_GET[0])
-     *   - /users/100/friendship/200 → tries exact path, then users/_/friendship/_.php (captures "100", "200")
+     *   - /users/100/friendship/200 → tries exact path, then users/_/friendship/_.php ($_GET[0]="200", $_GET[1]="100")
      *
      * Security:
      * - Client requests: Path components starting with underscore are blocked (except via __DEFAULT__.php)
@@ -416,13 +416,15 @@ class Router implements RequestHandlerInterface
      * Populate $_GET with wildcard parameter values
      *
      * Assigns numeric indices (0, 1, 2, ...) to wildcard values captured from filesystem-based
-     * wildcard routing using "_" directories and files.
+     * wildcard routing using "_" directories and files. Values are stored in reverse order
+     * (rightmost/nearest wildcard is $_GET[0]) so code remains stable when files are moved.
      *
-     * @param array<int, string> $values Wildcard values in left-to-right order
+     * @param array<int, string> $values Wildcard values in left-to-right URL order
      */
     private function populateWildcardParams(array $values): void
     {
-        foreach ($values as $index => $value) {
+        $reversed = array_reverse($values);
+        foreach ($reversed as $index => $value) {
             $_GET[$index] = $value;
         }
     }

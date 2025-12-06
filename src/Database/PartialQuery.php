@@ -2,76 +2,11 @@
 
 namespace mini\Database;
 
+use mini\Parsing\GenericParser;
+use mini\Parsing\TextNode;
+
 /**
  * Immutable query builder for composable SQL queries
- *
- * PRIMARY VALUE: Expert-level composition architecture
- * - Each method returns a NEW instance (immutability = no side effects)
- * - Build reusable, non-mutating query fragments
- * - Safely branch query logic without copying or mutation
- * - Encapsulate security (parameter binding) at the architectural level
- *
- * SECONDARY VALUE: Beginner-friendly safety
- * - IDE autocomplete for discoverability
- * - Safe-by-default (SQL injection protection built-in)
- * - No need to understand parameterized queries to use safely
- *
- * DEFAULT LIMIT (1000 rows):
- * - Follows industry standards (Google BigTable, cloud database services)
- * - Prevents accidental full table scans and memory exhaustion
- * - Forces intentional pagination for large result sets
- * - If you need more: explicitly call limit(10000) or limit(PHP_INT_MAX)
- * - Note: "Unlimited" queries (no limit) are guaranteed to break at scale
- * - This is a feature, not a limitation - it encourages better architecture
- *
- * Example - simple table queries:
- * ```php
- * // Define reusable base query
- * $active = db()->query('users')->eq('is_deleted', 0);
- *
- * // Branch without mutation
- * $verified = $active->eq('email_verified', 1);
- * $admins = $active->eq('role', 'admin');
- *
- * // Original unchanged - safe for reuse
- * foreach ($active as $user) { }
- * foreach ($verified as $user) { }
- * ```
- *
- * Example - complex queries with JOINs:
- * ```php
- * // Any SELECT query works - JOINs, subqueries, existing WHERE clauses
- * $query = db()->query('
- *     SELECT u.*, r.name as role_name
- *     FROM users u
- *     JOIN roles r ON r.id = u.role_id
- *     WHERE u.active = 1
- * ');
- *
- * // Still composable! Uses CTE to wrap base query safely
- * $admins = $query->eq('r.name', 'admin')->order('u.name')->limit(10);
- * ```
- *
- * Example - relationships:
- * ```php
- * class User {
- *     use ActiveRecordTrait;
- *
- *     /** @return PartialQuery<User> Friends of this user *\/
- *     public function friends(): PartialQuery {
- *         return db()->query('
- *             SELECT u.* FROM users u
- *             INNER JOIN friendships f ON f.friend_id = u.id AND f.user_id = ?
- *         ', [$this->id])->withEntityClass(User::class, false);
- *     }
- * }
- *
- * // Composable - add WHERE/ORDER/LIMIT
- * $onlineFriends = $user->friends()->eq('online', 1)->limit(10);
- * ```
- *
- * See also: mini\validator($user::class)->isInvalid($user) for validation,
- *           mini\metadata($user::class)->getDescription() for metadata
  *
  * @template T of array|object
  * @implements \IteratorAggregate<int, T>
@@ -79,344 +14,519 @@ namespace mini\Database;
 final class PartialQuery implements \IteratorAggregate
 {
     private DatabaseInterface $db;
-    private string $baseSql;
-    private ?string $table = null;
-    private array $params = [];
-    private array $wheres = [];
+
+    /**
+     * Logical base table or alias this query targets.
+     * Used for delete/update operations and as the outer alias for subqueries.
+     */
+    private string $table;
+
+    /**
+     * Base SQL for this query:
+     * - null  => simple table query: SELECT ... FROM $table
+     * - non-null => wrapped as: SELECT ... FROM ($baseSql) AS <alias>
+     *
+     * @var string|null
+     */
+    private ?string $baseSql;
+
+    /** @var array<int, mixed> Parameters for placeholders in the base SQL (constructor) */
+    private array $baseParams = [];
+
+    /**
+     * Each WHERE clause is stored with its own parameters
+     * @var array<int, array{sql: string, params: array<int, mixed>}>
+     */
+    private array $whereParts = [];
+
+    /**
+     * Verbatim CTE definitions
+     * Each entry: ['name' => string, 'sql' => string, 'params' => array]
+     *
+     * Example: ['name' => '_cte0', 'sql' => 'SELECT ...', 'params' => [1, 2]]
+     *
+     * Params for CTEs are kept separate so we can prepend them
+     * in the correct order when executing.
+     *
+     * @var array<int, array{name: string, sql: string, params: array<int, mixed>}>
+     */
+    private array $cteList = [];
+
+    private ?string $select = null;
     private ?string $orderBy = null;
     private int $limit = 1000;
     private int $offset = 0;
+
     private ?\Closure $hydrator = null;
     private ?string $entityClass = null;
     private array|false $entityConstructorArgs = false;
 
     /**
-     * Create a PartialQuery from a base SELECT query
-     *
-     * Accepts any valid SELECT query. The query is wrapped in a CTE (Common Table
-     * Expression) when building the final SQL, allowing WHERE/ORDER/LIMIT to be
-     * safely appended to any query - even those with existing WHERE clauses.
-     *
-     * Examples:
-     * ```php
-     * // Simple query
-     * new PartialQuery(db(), 'SELECT * FROM users');
-     *
-     * // Complex query with JOINs
-     * new PartialQuery(db(), '
-     *     SELECT u.*, c.name as class_name
-     *     FROM users u
-     *     JOIN classes c ON c.id = u.class_id
-     * ');
-     *
-     * // Query with existing WHERE - still composable!
-     * new PartialQuery(db(), '
-     *     SELECT * FROM users WHERE role = ?
-     * ', ['admin']);
-     *
-     * // All can be further composed
-     * $query->eq('active', 1)->order('name')->limit(10);
-     * ```
-     *
-     * @param DatabaseInterface $db Database connection
-     * @param string $sql Any valid SELECT query
-     * @param array $params Parameters for placeholders in the query
+     * @internal Use PartialQuery::from() factory instead
      */
-    public function __construct(DatabaseInterface $db, string $sql, array $params = [])
-    {
-        $trimmed = ltrim($sql);
-        if (stripos($trimmed, 'SELECT') !== 0) {
-            throw new \InvalidArgumentException(
-                'PartialQuery SQL must start with SELECT'
-            );
-        }
-
-        $this->db = $db;
-        $this->baseSql = $sql;
-        $this->params = $params;
+    private function __construct(
+        DatabaseInterface $db,
+        string $table,
+        ?string $baseSql = null,
+        array $params = []
+    ) {
+        $this->db         = $db;
+        $this->table      = $table;
+        $this->baseSql    = $baseSql;
+        $this->baseParams = $params;
     }
 
     /**
-     * Create a PartialQuery for a simple table
+     * Create a PartialQuery.
      *
-     * Convenience method for simple table queries. Supports UPDATE/DELETE
-     * operations via db()->update() and db()->delete().
+     * Usage:
+     *  - Simple table:
+     *      PartialQuery::from($db, 'users')
+     *      // => SELECT ... FROM users
      *
-     * @param DatabaseInterface $db Database connection
-     * @param string $table Table name (must be a valid identifier, no spaces or special chars)
-     * @return self
+     *  - From custom SQL (wrapped as subquery):
+     *      PartialQuery::from($db, 'users', 'SELECT * FROM users WHERE active = 1', [$param]);
+     *      // => SELECT ... FROM (SELECT * FROM users WHERE active = 1) AS users
+     *
+     * @param DatabaseInterface $db    Database connection
+     * @param string            $table Logical base table / alias name
+     * @param string|null       $sql   Optional base SELECT query
+     * @param array<int,mixed>  $params Parameters for placeholders in $sql
      */
-    public static function table(DatabaseInterface $db, string $table): self
-    {
-        // Validate table name - simple identifier only
-        if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $table)) {
-            throw new \InvalidArgumentException(
-                "Invalid table name '{$table}'. Use the constructor for complex queries."
-            );
-        }
+    public static function from(
+        DatabaseInterface $db,
+        string $table,
+        ?string $sql = null,
+        array $params = []
+    ): self {
+        return new self($db, $table, $sql, $params);
+    }
 
-        $query = new self($db, "SELECT * FROM {$table}");
-        $query->table = $table;
-        return $query;
+    /**
+     * Get alias for this query when used as a subquery.
+     *
+     * Uses the base table name, stripping any schema prefix.
+     */
+    private function getAlias(): string
+    {
+        $parts = explode('.', $this->table);
+        return end($parts);
+    }
+
+    /**
+     * Get the base query string as provided to the constructor
+     *
+     * If no custom SQL was provided, returns the table name.
+     */
+    public function getBaseQuery(): string
+    {
+        return $this->baseSql ?? $this->table;
+    }
+
+    /**
+     * Get the table name for delete/update operations
+     *
+     * @return string
+     */
+    public function getTable(): string
+    {
+        return $this->table;
+    }
+
+    /**
+     * Set the logical table name / alias (for delete/update and subquery alias)
+     */
+    public function withTable(string $table): self
+    {
+        $new        = clone $this;
+        $new->table = $table;
+        return $new;
     }
 
     /**
      * Use an entity class for hydration
      *
-     * The framework will hydrate rows into instances of the specified class
-     * using reflection to set properties after construction.
-     *
-     * Constructor behavior:
-     * - If $constructorArgs is an array: calls constructor with those arguments
-     * - If $constructorArgs is false: skips constructor entirely (useful when constructor has required params)
-     *
-     * Properties are set via reflection AFTER construction, supporting:
-     * - Public, protected, and private properties
-     * - Property cache per iteration for efficiency
-     *
-     * Example with constructor:
-     * ```php
-     * class User {
-     *     public function __construct(private PDO $db) {}
-     * }
-     * $users = db()->query('users')->withEntityClass(User::class, [db()->getPdo()]);
-     * ```
-     *
-     * Example without constructor:
-     * ```php
-     * // Skip constructor - useful when constructor has required params
-     * $users = db()->query('users')->withEntityClass(User::class, false);
-     * ```
-     *
      * @template TObject of object
-     * @param class-string<TObject> $class Entity class name
-     * @param array|false $constructorArgs Constructor arguments or false to skip constructor
-     * @return PartialQuery<TObject> New instance with entity class
+     * @param class-string<TObject> $class
+     * @param array|false           $constructorArgs
+     * @return PartialQuery<TObject>
      */
     public function withEntityClass(string $class, array|false $constructorArgs = false): self
     {
-        $new = clone $this;
-        $new->entityClass = $class;
-        $new->entityConstructorArgs = $constructorArgs;
-        $new->hydrator = null;
+        $new                         = clone $this;
+        $new->entityClass            = $class;
+        $new->entityConstructorArgs  = $constructorArgs;
+        $new->hydrator               = null;
         return $new;
     }
 
     /**
      * Use a custom hydrator closure
      *
-     * Provides full control over object construction from database rows.
-     * The closure receives column values as separate arguments (PDO::FETCH_FUNC style).
-     *
-     * Example:
-     * ```php
-     * $users = db()->query('users')->withHydrator(
-     *     fn($id, $name, $email) => new User($id, $name, $email)
-     * );
-     * ```
-     *
      * @template TObject of object
-     * @param \Closure(...mixed):TObject $hydrator Closure with signature fn(...$columnValues):T
-     * @return PartialQuery<TObject> New instance with custom hydrator
+     * @param \Closure(...mixed):TObject $hydrator
+     * @return PartialQuery<TObject>
      */
     public function withHydrator(\Closure $hydrator): self
     {
-        $new = clone $this;
-        $new->hydrator = $hydrator;
+        $new             = clone $this;
+        $new->hydrator   = $hydrator;
         $new->entityClass = null;
         return $new;
     }
 
     /**
      * Add a WHERE clause with raw SQL
-     *
-     * @param string $sql SQL condition (e.g., "age >= ? AND age <= ?")
-     * @param array $params Parameters to bind
-     * @return self New instance with added WHERE clause
      */
     public function where(string $sql, array $params = []): self
     {
         $new = clone $this;
-        $new->wheres[] = "($sql)";
-        $new->params = array_merge($new->params, $params);
+        $new->whereParts[] = [
+            'sql'    => '(' . $sql . ')',
+            'params' => array_values($params),
+        ];
         return $new;
     }
 
     /**
-     * Add WHERE column = value clause
-     *
-     * Handles NULL automatically (converts to IS NULL).
-     *
-     * @param string $column Column name
-     * @param mixed $value Value to compare
-     * @return self New instance with added WHERE clause
+     * Add WHERE column = value clause (NULL -> IS NULL)
      */
     public function eq(string $column, mixed $value): self
     {
+        $col = $this->db->quoteIdentifier($column);
         if ($value === null) {
-            return $this->where("$column IS NULL");
+            return $this->where("$col IS NULL");
         }
-        return $this->where("$column = ?", [$value]);
+        return $this->where("$col = ?", [$value]);
     }
 
-    /**
-     * Add WHERE column < value clause
-     */
     public function lt(string $column, mixed $value): self
     {
-        return $this->where("$column < ?", [$value]);
+        $col = $this->db->quoteIdentifier($column);
+        return $this->where("$col < ?", [$value]);
     }
 
-    /**
-     * Add WHERE column <= value clause
-     */
     public function lte(string $column, mixed $value): self
     {
-        return $this->where("$column <= ?", [$value]);
+        $col = $this->db->quoteIdentifier($column);
+        return $this->where("$col <= ?", [$value]);
     }
 
-    /**
-     * Add WHERE column > value clause
-     */
     public function gt(string $column, mixed $value): self
     {
-        return $this->where("$column > ?", [$value]);
+        $col = $this->db->quoteIdentifier($column);
+        return $this->where("$col > ?", [$value]);
     }
 
-    /**
-     * Add WHERE column >= value clause
-     */
     public function gte(string $column, mixed $value): self
     {
-        return $this->where("$column >= ?", [$value]);
+        $col = $this->db->quoteIdentifier($column);
+        return $this->where("$col >= ?", [$value]);
     }
 
     /**
      * Add WHERE column IN (...) clause
      *
-     * @param string $column Column name
-     * @param array $values Array of values for IN clause
-     * @return self New instance with added WHERE clause
+     * @param string                 $column
+     * @param array<int, mixed>|self $values
      */
-    public function in(string $column, array $values): self
+    public function in(string $column, array|self $values): self
     {
-        if (empty($values)) {
-            // IN with empty array should match nothing
-            return $this->where('1 = 0');
+        $col = $this->db->quoteIdentifier($column);
+
+        // Array case -> parameterized IN (?, ?, ?)
+        if (is_array($values)) {
+            // Empty IN -> false
+            if ($values === []) {
+                return $this->where('1 = 0');
+            }
+
+            $placeholders = implode(', ', array_fill(0, count($values), '?'));
+            return $this->where("$col IN ($placeholders)", array_values($values));
         }
-        $placeholders = implode(',', array_fill(0, count($values), '?'));
-        return $this->where("$column IN ($placeholders)", $values);
+
+        // Subquery case
+        if ($values instanceof self) {
+            // Cross-database or dialect without subquery support: materialize to value list
+            if ($this->db !== $values->db || !$this->db->getDialect()->supportsSubquery()) {
+                $list = $values->column();
+                if ($list === []) {
+                    return $this->where('1 = 0');
+                }
+                $placeholders = implode(', ', array_fill(0, count($list), '?'));
+                return $this->where("$col IN ($placeholders)", $list);
+            }
+
+            // Same database with subquery support:
+            // 1) Merge CTEs from the inner query into this query
+            $new = $this->withCTEsFrom($values);
+
+            // 2) Inline the inner query core as a literal subquery in the WHERE clause
+            //    (allows correlation with outer aliases)
+            $subSql    = $values->buildCoreSql();   // private, but callable from same class
+            $subParams = $values->getMainParams();  // base + WHERE params of the inner query
+
+            return $new->where("$col IN ($subSql)", $subParams);
+        }
+
+        throw new \InvalidArgumentException(
+            'Values for IN() must be an array or PartialQuery instance.'
+        );
+    }
+
+    /**
+     * Return new instance with CTEs from another PartialQuery merged in.
+     *
+     * CTEs are merged by name:
+     * - If a CTE with the same name, SQL and params already exists, it is reused.
+     * - If a CTE with the same name but different SQL or params exists, a LogicException is thrown.
+     *
+     * @throws \InvalidArgumentException If queries use different database connections
+     * @throws \LogicException           If conflicting CTE definitions are detected
+     */
+    private function withCTEsFrom(self $query): self
+    {
+        if ($this->db !== $query->db) {
+            throw new \InvalidArgumentException(
+                'Cannot combine PartialQueries from different database connections. ' .
+                'Use ->column() to materialize the subquery first.'
+            );
+        }
+
+        $new = clone $this;
+
+        foreach ($query->cteList as $foreignCte) {
+            $name = $foreignCte['name'];
+
+            // Check if CTE with the same name already exists
+            $existingIndex = null;
+            foreach ($new->cteList as $idx => $existing) {
+                if ($existing['name'] === $name) {
+                    $existingIndex = $idx;
+                    break;
+                }
+            }
+
+            if ($existingIndex !== null) {
+                $existing = $new->cteList[$existingIndex];
+
+                // Same definition -> reuse silently
+                if ($existing['sql'] === $foreignCte['sql']
+                    && $existing['params'] === $foreignCte['params']
+                ) {
+                    continue;
+                }
+
+                // Same name, different definition -> ambiguous
+                throw new \LogicException(
+                    "Conflicting CTE definition for '{$name}' between combined PartialQueries."
+                );
+            }
+
+            // New CTE -> append
+            $new->cteList[] = $foreignCte;
+        }
+
+        return $new;
+    }
+
+    /**
+     * Set SELECT clause (overwrites previous, default is *)
+     */
+    public function select(string $selectPart): self
+    {
+        $new         = clone $this;
+        $new->select = $selectPart;
+        return $new;
+    }
+
+    /**
+     * Get the SELECT clause (null means *)
+     */
+    public function getSelect(): ?string
+    {
+        return $this->select;
     }
 
     /**
      * Set ORDER BY clause (overwrites previous)
-     *
-     * Accepts any SQL ORDER BY specification:
-     * - Single column: ->order('name') or ->order('name ASC')
-     * - Multi-column: ->order('priority DESC, created_at ASC')
-     * - Complex expressions: ->order('FIELD(status, "active", "pending"), name')
-     *
-     * The SQL is used directly in the query without modification.
-     * Direction (ASC/DESC) must be included in the string if needed.
-     *
-     * @param string $orderSpec SQL ORDER BY specification (without "ORDER BY" keyword)
-     * @return self New instance with ORDER BY
      */
     public function order(string $orderSpec): self
     {
-        $new = clone $this;
+        $new          = clone $this;
         $new->orderBy = $orderSpec;
         return $new;
     }
 
     /**
      * Set LIMIT (overwrites previous)
-     *
-     * @param int $limit Maximum number of rows
-     * @return self New instance with LIMIT
      */
     public function limit(int $limit): self
     {
-        $new = clone $this;
+        $new        = clone $this;
         $new->limit = $limit;
         return $new;
     }
 
     /**
      * Set OFFSET (overwrites previous)
-     *
-     * @param int $offset Number of rows to skip
-     * @return self New instance with OFFSET
      */
     public function offset(int $offset): self
     {
-        $new = clone $this;
+        $new         = clone $this;
         $new->offset = $offset;
         return $new;
     }
 
     /**
-     * Build SQL query string
-     *
-     * Uses a CTE (Common Table Expression) to wrap the base query, allowing
-     * WHERE/ORDER/LIMIT to be safely appended to any query.
-     *
-     * @return string Complete SQL query
+     * Build SQL query string with optional WITH prefix
      */
     private function buildSql(): string
     {
-        // If no additional clauses, return base SQL with just LIMIT
-        if (empty($this->wheres) && $this->orderBy === null && $this->offset === 0) {
-            return $this->baseSql . $this->buildLimitClause();
+        $core = $this->buildCoreSql();
+
+        if (empty($this->cteList)) {
+            return $core;
         }
 
-        // Wrap base query in CTE for safe composition
-        $sql = "WITH _q AS ({$this->baseSql}) SELECT * FROM _q";
-
-        if ($this->wheres) {
-            $sql .= ' WHERE ' . implode(' AND ', $this->wheres);
+        $withParts = [];
+        foreach ($this->cteList as $cte) {
+            $withParts[] = $cte['name'] . ' AS (' . $cte['sql'] . ')';
         }
 
-        if ($this->orderBy) {
+        return 'WITH ' . implode(', ', $withParts) . ' ' . $core;
+    }
+
+    /**
+     * Build core SQL (without WITH prefix)
+     */
+    private function buildCoreSql(): string
+    {
+        $dialect = $this->db->getDialect();
+        $select  = $this->select ?? '*';
+
+        if ($this->baseSql === null) {
+            // Simple table name -> SELECT ... FROM table
+            $sql = "SELECT {$select} FROM {$this->table}";
+        } else {
+            // Wrap user SELECT in a subquery to:
+            // - avoid double LIMIT
+            // - allow us to apply additional WHERE/ORDER/LIMIT safely
+            $alias = $this->getAlias();
+            $sql   = "SELECT {$select} FROM ({$this->baseSql}) AS {$alias}";
+        }
+
+        if (!empty($this->whereParts)) {
+            $sql .= ' WHERE ' . $this->buildWhereSql();
+        }
+
+        if ($this->orderBy !== null) {
             $sql .= " ORDER BY {$this->orderBy}";
+        } elseif ($dialect === SqlDialect::SqlServer || $dialect === SqlDialect::Oracle) {
+            // SQL Server and Oracle require ORDER BY when using OFFSET/FETCH
+            $sql .= " ORDER BY (SELECT 0)";
         }
 
-        $sql .= $this->buildLimitClause();
+        $sql .= $this->buildLimitClause($dialect);
 
         return $sql;
     }
 
     /**
-     * Build LIMIT clause according to database dialect
+     * Build WHERE clause string (without "WHERE")
      */
-    private function buildLimitClause(): string
+    private function buildWhereSql(): string
     {
-        $dialect = $this->db->getDialect();
+        if (empty($this->whereParts)) {
+            return '';
+        }
 
-        return match($dialect) {
-            SqlDialect::MySQL => $this->offset > 0
-                ? " LIMIT {$this->offset}, {$this->limit}"
-                : " LIMIT {$this->limit}",
+        $parts = [];
+        foreach ($this->whereParts as $part) {
+            $parts[] = $part['sql'];
+        }
 
-            SqlDialect::SqlServer => $this->offset > 0
-                ? " OFFSET {$this->offset} ROWS FETCH NEXT {$this->limit} ROWS ONLY"
-                : " OFFSET 0 ROWS FETCH NEXT {$this->limit} ROWS ONLY",
+        return implode(' AND ', $parts);
+    }
+
+    /**
+     * Build LIMIT/OFFSET clause according to database dialect
+     */
+    private function buildLimitClause(SqlDialect $dialect): string
+    {
+        $limit  = $this->limit;
+        $offset = $this->offset;
+
+        return match ($dialect) {
+            SqlDialect::MySQL =>
+                $offset > 0
+                    ? " LIMIT {$offset}, {$limit}"
+                    : " LIMIT {$limit}",
+
+            SqlDialect::SqlServer,
+            SqlDialect::Oracle =>
+                // SQL Server (2012+) & modern Oracle: OFFSET .. FETCH
+                // For SQL Server we ensured an ORDER BY earlier.
+                " OFFSET {$offset} ROWS FETCH NEXT {$limit} ROWS ONLY",
 
             SqlDialect::Postgres,
             SqlDialect::Sqlite,
-            SqlDialect::Oracle,
-            SqlDialect::Generic => $this->offset > 0
-                ? " LIMIT {$this->limit} OFFSET {$this->offset}"
-                : " LIMIT {$this->limit}",
+            SqlDialect::Generic,
+            SqlDialect::Virtual =>
+                $offset > 0
+                    ? " LIMIT {$limit} OFFSET {$offset}"
+                    : " LIMIT {$limit}",
         };
+    }
+
+    /**
+     * Params for the "main" query (base SQL + WHERE params), excluding CTE params
+     *
+     * @return array<int, mixed>
+     */
+    private function getMainParams(): array
+    {
+        $params = $this->baseParams;
+
+        foreach ($this->whereParts as $part) {
+            if (!empty($part['params'])) {
+                foreach ($part['params'] as $p) {
+                    $params[] = $p;
+                }
+            }
+        }
+
+        return $params;
+    }
+
+    /**
+     * Flattened params for all CTEs (in order), then main query params
+     *
+     * @return array<int, mixed>
+     */
+    private function getAllParams(): array
+    {
+        $params = [];
+
+        // CTE params first
+        foreach ($this->cteList as $cte) {
+            foreach ($cte['params'] as $p) {
+                $params[] = $p;
+            }
+        }
+
+        // Then main/base + WHERE params
+        foreach ($this->getMainParams() as $p) {
+            $params[] = $p;
+        }
+
+        return $params;
     }
 
     /**
      * Fetch first row or null
      *
-     * Uses limit(1) internally for efficiency.
-     *
-     * @return T|null Single row or null if no results
+     * @return T|null
      */
     public function one(): mixed
     {
@@ -429,63 +539,85 @@ final class PartialQuery implements \IteratorAggregate
     /**
      * Fetch first column from all rows
      *
-     * Returns the first column of the result set, regardless of
-     * which columns were selected.
-     *
-     * @return array Array of scalar values
+     * @return array<int, mixed>
      */
     public function column(): array
     {
-        return $this->db->queryColumn($this->buildSql(), $this->params);
+        return $this->db->queryColumn($this->buildSql(), $this->getAllParams());
     }
 
     /**
-     * Count total matching rows
-     *
-     * Wraps the query in a CTE and counts. Ignores ORDER BY and LIMIT/OFFSET.
-     *
-     * @return int Number of matching rows
+     * Count total matching rows (ignores ORDER BY and LIMIT/OFFSET)
      */
     public function count(): int
     {
-        // If no additional WHERE clauses, count base query directly
-        if (empty($this->wheres)) {
-            $sql = "SELECT COUNT(*) FROM ({$this->baseSql}) AS _count";
-            return (int)$this->db->queryField($sql, $this->params);
+        $cteSql = '';
+        if (!empty($this->cteList)) {
+            $parts = [];
+            foreach ($this->cteList as $cte) {
+                $parts[] = $cte['name'] . ' AS (' . $cte['sql'] . ')';
+            }
+            $cteSql = 'WITH ' . implode(', ', $parts) . ' ';
         }
 
-        // Use CTE to apply WHERE clauses
-        $sql = "WITH _q AS ({$this->baseSql}) SELECT COUNT(*) FROM _q WHERE " . implode(' AND ', $this->wheres);
+        $whereSql = $this->buildWhereSql();
 
-        return (int)$this->db->queryField($sql, $this->params);
+        $baseParams  = $this->baseParams;
+        $whereParams = [];
+        foreach ($this->whereParts as $part) {
+            foreach ($part['params'] as $p) {
+                $whereParams[] = $p;
+            }
+        }
+
+        $cteParams = [];
+        foreach ($this->cteList as $cte) {
+            foreach ($cte['params'] as $p) {
+                $cteParams[] = $p;
+            }
+        }
+
+        $params = array_merge($cteParams, $baseParams, $whereParams);
+
+        if ($this->baseSql === null) {
+            $sql = "SELECT COUNT(*) FROM {$this->table}";
+        } else {
+            $sql = "SELECT COUNT(*) FROM ({$this->baseSql}) AS _count";
+        }
+
+        if ($whereSql !== '') {
+            $sql .= ' WHERE ' . $whereSql;
+        }
+
+        return (int) $this->db->queryField($cteSql . $sql, $params);
     }
 
     /**
-     * Make query iterable (foreach support)
+     * Iterator over results (streaming)
      *
-     * Streams results for memory efficiency.
-     * Use iterator_to_array() if you need an actual array.
-     *
-     * @return \Generator<int, T, mixed, void> Iterator over results
+     * @return \Traversable<int, T>
      */
     public function getIterator(): \Traversable
     {
-        $rows = $this->db->rawQuery($this->buildSql(), $this->params);
+        $rows = $this->db->rawQuery($this->buildSql(), $this->getAllParams());
 
-        // No hydration - yield rows as-is
+        // No hydration -> yield rows as-is
         if ($this->entityClass === null && $this->hydrator === null) {
-            yield from $rows;
+            foreach ($rows as $row) {
+                yield $row;
+            }
             return;
         }
 
         // Entity class hydration with reflection
         if ($this->entityClass !== null) {
             $class = $this->entityClass;
-            $args = $this->entityConstructorArgs;
-            $reflectionCache = [];
+            $args  = $this->entityConstructorArgs;
 
             try {
                 $refClass = new \ReflectionClass($class);
+                /** @var array<string, \ReflectionProperty> $reflectionCache */
+                $reflectionCache = [];
 
                 foreach ($rows as $row) {
                     // Create instance with or without constructor
@@ -495,11 +627,19 @@ final class PartialQuery implements \IteratorAggregate
                         $obj = $refClass->newInstanceArgs($args);
                     }
 
-                    // Set properties via reflection
+                    // Map columns to properties by name if property exists
                     foreach ($row as $propertyName => $value) {
-                        // Cache reflection property on first access
-                        $refProp = $reflectionCache[$propertyName] ?? ($reflectionCache[$propertyName] = new \ReflectionProperty($class, $propertyName));
-                        $refProp->setValue($obj, $value);
+                        if (!isset($reflectionCache[$propertyName])) {
+                            if (!$refClass->hasProperty($propertyName)) {
+                                // Unknown column -> skip
+                                continue;
+                            }
+                            $prop = $refClass->getProperty($propertyName);
+                            $prop->setAccessible(true);
+                            $reflectionCache[$propertyName] = $prop;
+                        }
+
+                        $reflectionCache[$propertyName]->setValue($obj, $value);
                     }
 
                     yield $obj;
@@ -514,7 +654,7 @@ final class PartialQuery implements \IteratorAggregate
             return;
         }
 
-        // Custom closure hydration
+        // Custom closure hydration (PDO::FETCH_FUNC style)
         if ($this->hydrator !== null) {
             $hydrator = $this->hydrator;
             foreach ($rows as $row) {
@@ -525,51 +665,35 @@ final class PartialQuery implements \IteratorAggregate
     }
 
     /**
-     * Get the table name for UPDATE/DELETE operations
+     * Get WHERE clause SQL and parameters, for DELETE/UPDATE
      *
-     * Only available for queries created via db()->query('tablename') or PartialQuery::table().
-     * Queries created with full SELECT SQL cannot be used with UPDATE/DELETE.
+     * Returns only the WHERE portion; CTE/base params are intentionally excluded.
      *
-     * @return string Table name
-     * @throws \LogicException If query was not created from a simple table name
-     */
-    public function getTable(): string
-    {
-        if ($this->table === null) {
-            throw new \LogicException(
-                'Cannot get table name from a PartialQuery created with SELECT SQL. ' .
-                "UPDATE/DELETE operations require queries created via db()->query('tablename')."
-            );
-        }
-        return $this->table;
-    }
-
-    /**
-     * Get WHERE clause SQL and parameters
-     *
-     * Used by DatabaseInterface for DELETE/UPDATE operations.
-     * Returns the WHERE clause without the "WHERE" keyword.
-     *
-     * @return array{sql: string, params: array}
+     * @return array{sql: string, params: array<int, mixed>}
      */
     public function getWhere(): array
     {
-        if (empty($this->wheres)) {
+        if (empty($this->whereParts)) {
             return ['sql' => '', 'params' => []];
         }
 
+        $sql = $this->buildWhereSql();
+
+        $params = [];
+        foreach ($this->whereParts as $part) {
+            foreach ($part['params'] as $p) {
+                $params[] = $p;
+            }
+        }
+
         return [
-            'sql' => implode(' AND ', $this->wheres),
-            'params' => $this->params
+            'sql'    => $sql,
+            'params' => $params,
         ];
     }
 
     /**
-     * Get LIMIT value
-     *
-     * Used by DatabaseInterface for DELETE/UPDATE operations.
-     *
-     * @return int Limit value
+     * Get LIMIT value (for DELETE/UPDATE implementations)
      */
     public function getLimit(): int
     {
@@ -578,40 +702,39 @@ final class PartialQuery implements \IteratorAggregate
 
     /**
      * Debug information for var_dump/print_r
-     *
-     * @return array SQL query and parameters
      */
     public function __debugInfo(): array
     {
         return [
-            'sql' => $this->buildSql(),
-            'params' => $this->params,
+            'sql'    => $this->buildSql(),
+            'params' => $this->getAllParams(),
         ];
     }
 
     /**
      * Convert to string for logging/debugging
      *
-     * Returns executable SQL with quoted values (not parameterized).
-     * Uses DatabaseInterface::quote() for safe value escaping.
-     *
-     * WARNING: For debugging only - use parameterized queries in production.
-     *
-     * @return string Executable SQL query
+     * Uses GenericParser to correctly handle placeholders, avoiding
+     * replacement of '?' characters inside quoted strings.
      */
     public function __toString(): string
     {
-        $sql = $this->buildSql();
-        $params = $this->params;
+        $sql    = $this->buildSql();
+        $params = $this->getAllParams();
+        $db     = $this->db;
 
-        foreach ($params as $param) {
-            $pos = strpos($sql, '?');
-            if ($pos === false) break;
+        $tree = GenericParser::sql()->parse($sql);
 
-            $quoted = $this->db->quote($param);
-            $sql = substr_replace($sql, $quoted, $pos, 1);
-        }
+        $tree->walk(function ($node) use (&$params, $db) {
+            if ($node instanceof TextNode) {
+                return preg_replace_callback('/\?/', function () use (&$params, $db) {
+                    $value = array_shift($params);
+                    return $value === null ? 'NULL' : $db->quote($value);
+                }, $node->text);
+            }
+            return null;
+        });
 
-        return $sql;
+        return (string) $tree;
     }
 }

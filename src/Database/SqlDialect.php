@@ -84,6 +84,20 @@ enum SqlDialect
     case Generic;
 
     /**
+     * Virtual database dialect (in-memory, CSV, API backends)
+     *
+     * Key differences:
+     * - No subquery support (IN clauses must use value lists)
+     * - No CTE/WITH support
+     * - No JOIN support
+     * - LIMIT syntax: LIMIT count OFFSET offset
+     * - Identifier quotes: double quotes "table_name"
+     *
+     * Used by VirtualDatabase for non-SQL data sources.
+     */
+    case Virtual;
+
+    /**
      * Get the recommended identifier quote character for this dialect
      */
     public function getIdentifierQuote(): string
@@ -91,7 +105,7 @@ enum SqlDialect
         return match($this) {
             self::MySQL => '`',
             self::SqlServer => '[',  // Opening bracket, closing is ']'
-            self::Postgres, self::Sqlite, self::Oracle, self::Generic => '"',
+            self::Postgres, self::Sqlite, self::Oracle, self::Generic, self::Virtual => '"',
         };
     }
 
@@ -103,7 +117,18 @@ enum SqlDialect
         return match($this) {
             self::MySQL => false,  // Uses LIMIT offset, count
             self::SqlServer => false,  // Uses OFFSET/FETCH
-            self::Postgres, self::Sqlite, self::Oracle, self::Generic => true,
+            self::Postgres, self::Sqlite, self::Oracle, self::Generic, self::Virtual => true,
+        };
+    }
+
+    /**
+     * Check if this dialect supports subqueries (e.g., IN (SELECT ...))
+     */
+    public function supportsSubquery(): bool
+    {
+        return match($this) {
+            self::Virtual => false,
+            default => true,
         };
     }
 
@@ -119,6 +144,7 @@ enum SqlDialect
             self::SqlServer => 'SQL Server',
             self::Oracle => 'Oracle',
             self::Generic => 'Generic ANSI SQL',
+            self::Virtual => 'Virtual Database',
         };
     }
 }

@@ -7,6 +7,7 @@ use mini\Mini;
 use PDO;
 use PDOException;
 use Exception;
+use function mini\sqlval;
 
 /**
  * PDO-based database implementation
@@ -32,7 +33,7 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Create a PartialQuery from any SELECT query
+     * Create a PartialQuery from any SELECT query or table name
      *
      * Returns an immutable, composable query builder. The query can include
      * JOINs, WHERE clauses, subqueries - anything. Additional WHERE/ORDER/LIMIT
@@ -42,16 +43,17 @@ class PDODatabase implements DatabaseInterface
      *
      * @param string $sql SELECT query or table name
      * @param array $params Parameters to bind
+     * @param string|null $table Explicit table name for delete/update operations
      * @return PartialQuery Composable query builder
      */
-    public function query(string $sql, array $params = []): PartialQuery
+    public function query(string $sql, array $params = [], ?string $table = null): PartialQuery
     {
-        // Simple table name? Use convenience method
-        if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $sql)) {
-            return PartialQuery::table($this, $sql);
+        // Detect simple table name (identifier with optional schema prefix)
+        if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$/', $sql)) {
+            return PartialQuery::fromTable($this, $sql);
         }
 
-        return new PartialQuery($this, $sql, $params);
+        return PartialQuery::fromSql($this, $sql, $params, $table);
     }
 
     /**
@@ -66,7 +68,7 @@ class PDODatabase implements DatabaseInterface
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute($params);
+            $stmt->execute(array_map(sqlval(...), $params));
 
             while ($row = $stmt->fetch()) {
                 yield $row;
@@ -83,7 +85,7 @@ class PDODatabase implements DatabaseInterface
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute($params);
+            $stmt->execute(array_map(sqlval(...), $params));
             $result = $stmt->fetch();
             return $result ?: null;
         } catch (PDOException $e) {
@@ -98,7 +100,7 @@ class PDODatabase implements DatabaseInterface
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute($params);
+            $stmt->execute(array_map(sqlval(...), $params));
             $result = $stmt->fetch();
             return $result ? array_values($result)[0] : null;
         } catch (PDOException $e) {
@@ -113,7 +115,7 @@ class PDODatabase implements DatabaseInterface
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute($params);
+            $stmt->execute(array_map(sqlval(...), $params));
             return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
         } catch (PDOException $e) {
             throw new Exception("Query column failed: " . $e->getMessage());
@@ -127,7 +129,7 @@ class PDODatabase implements DatabaseInterface
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute($params);
+            $stmt->execute(array_map(sqlval(...), $params));
             return $stmt->rowCount();
         } catch (PDOException $e) {
             throw new Exception("Exec failed: " . $e->getMessage());
@@ -264,21 +266,41 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
+     * Quotes an identifier (table name, column name) for safe use in SQL
+     */
+    public function quoteIdentifier(string $identifier): string
+    {
+        $dialect = $this->getDialect();
+
+        // Handle dotted identifiers (e.g., "table.column")
+        if (str_contains($identifier, '.')) {
+            return implode('.', array_map(fn($part) => $this->quoteIdentifier($part), explode('.', $identifier)));
+        }
+
+        return match($dialect) {
+            SqlDialect::MySQL => '`' . str_replace('`', '``', $identifier) . '`',
+            SqlDialect::SqlServer => '[' . str_replace(']', ']]', $identifier) . ']',
+            default => '"' . str_replace('"', '""', $identifier) . '"',
+        };
+    }
+
+    /**
      * Delete rows matching a partial query
      */
     public function delete(PartialQuery $query): int
     {
+        $table = $query->getTable();
         $where = $query->getWhere();
 
         // Require WHERE clause for safety
         // Use db()->exec('DELETE FROM table') or TRUNCATE for mass deletes
         if (empty($where['sql'])) {
             throw new \InvalidArgumentException(
-                "DELETE requires a WHERE clause. Use db()->exec('DELETE FROM {$query->getTable()}') for mass deletes."
+                "DELETE requires a WHERE clause. Use db()->exec('DELETE FROM {$table}') for mass deletes."
             );
         }
 
-        $sql = "DELETE FROM {$query->getTable()}";
+        $sql = "DELETE FROM {$table}";
         $sql .= " WHERE {$where['sql']}";
         $sql .= " LIMIT {$query->getLimit()}";
 
@@ -294,14 +316,15 @@ class PDODatabase implements DatabaseInterface
     /**
      * Update rows matching a partial query
      */
-    public function update(PartialQuery $query, string|array $set): int
+    public function update(PartialQuery $query, string|array $set, array $params = []): int
     {
+        $table = $query->getTable();
         $where = $query->getWhere();
 
         if (is_string($set)) {
-            // Raw SQL expression
-            $sql = "UPDATE {$query->getTable()} SET {$set}";
-            $params = $where['params'];
+            // Raw SQL expression with optional params
+            $sql = "UPDATE {$table} SET {$set}";
+            $params = array_merge($params, $where['params']);
         } else {
             // Array of column => value assignments
             $setParts = [];
@@ -312,7 +335,7 @@ class PDODatabase implements DatabaseInterface
                 $setParams[] = $value;
             }
 
-            $sql = "UPDATE {$query->getTable()} SET " . implode(', ', $setParts);
+            $sql = "UPDATE {$table} SET " . implode(', ', $setParts);
             $params = array_merge($setParams, $where['params']);
         }
 

@@ -23,11 +23,15 @@ interface DatabaseInterface
      * For complex queries:
      *   db()->query('SELECT u.* FROM users u JOIN roles r ON r.id = u.role_id')
      *
+     * For complex queries that need delete/update support, provide a table name:
+     *   db()->query('SELECT p.* FROM posts p JOIN users u ON ...', [], 'posts')
+     *
      * @param string $sql SELECT query or simple table name
      * @param array $params Parameters to bind to the query
+     * @param string|null $table Explicit table name for delete/update operations
      * @return PartialQuery<array> Immutable partial query that can be iterated or further composed
      */
-    public function query(string $sql, array $params = []): PartialQuery;
+    public function query(string $sql, array $params = [], ?string $table = null): PartialQuery;
 
     /**
      * Execute raw SQL and return results as iterable
@@ -147,6 +151,16 @@ interface DatabaseInterface
     public function quote(mixed $value): string;
 
     /**
+     * Quotes an identifier (table name, column name) for safe use in SQL
+     *
+     * Handles reserved words and special characters in identifiers.
+     *
+     * @param string $identifier Table or column name
+     * @return string Quoted identifier safe for SQL
+     */
+    public function quoteIdentifier(string $identifier): string;
+
+    /**
      * Delete rows matching a partial query
      *
      * Respects WHERE clauses and LIMIT from the query.
@@ -171,6 +185,7 @@ interface DatabaseInterface
      * Use string for raw SQL expressions:
      * ```php
      * db()->update($query, 'login_count = login_count + 1')
+     * db()->update($query, 'last_seen = ?, status = ?', [$now, 'active'])
      * ```
      *
      * Use array for simple assignments (values passed as-is):
@@ -183,9 +198,10 @@ interface DatabaseInterface
      *
      * @param PartialQuery $query Query defining which rows to update
      * @param string|array $set Either raw SQL expression or ['column' => 'value'] array
+     * @param array $params Parameters for placeholders in SQL expression (only used when $set is string)
      * @return int Number of affected rows
      */
-    public function update(PartialQuery $query, string|array $set): int;
+    public function update(PartialQuery $query, string|array $set, array $params = []): int;
 
     /**
      * Insert a new row into a table
@@ -212,33 +228,22 @@ interface DatabaseInterface
     /**
      * Insert a row, or update if conflict on unique columns
      *
-     * Performs an "UPSERT" operation (INSERT or UPDATE). If a row with the
-     * specified unique column values already exists, updates that row instead
-     * of inserting a new one.
-     *
-     * The conflict columns should be columns with UNIQUE constraints or
-     * PRIMARY KEY. Multiple columns can be specified for composite keys.
+     * Performs an "UPSERT" operation. If a row with the specified unique
+     * column values already exists, updates that row instead of inserting.
      *
      * Example:
      * ```php
-     * // Insert new user or update if email exists
      * db()->upsert('users', ['email' => 'john@example.com', 'name' => 'John'], 'email');
-     *
-     * // Composite unique key
      * db()->upsert('user_prefs', ['user_id' => 1, 'key' => 'theme', 'value' => 'dark'], 'user_id', 'key');
      * ```
      *
-     * After calling upsert(), use lastInsertId() to get the ID if a new row was inserted.
-     * Note: lastInsertId() behavior on UPDATE varies by database (some return 0, some return existing ID).
-     *
-     * WARNING: Values are NOT converted automatically. You must handle
-     * conversion yourself (dates to strings, JSON encoding, etc).
+     * Note: MySQL's ON DUPLICATE KEY UPDATE ignores $conflictColumns and triggers
+     * on any unique constraint. Behavior may differ across databases.
      *
      * @param string $table Table name
      * @param array $data Associative array of column => value pairs
-     * @param string ...$conflictColumns Column(s) that define uniqueness (PRIMARY KEY or UNIQUE constraint)
-     * @return int Number of affected rows (1 for insert, 1 for update, 0 for no change)
-     * @throws \InvalidArgumentException If data is empty or no conflict columns specified
+     * @param string ...$conflictColumns Column(s) that define uniqueness
+     * @return int Number of affected rows
      */
     public function upsert(string $table, array $data, string ...$conflictColumns): int;
 }

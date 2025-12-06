@@ -99,8 +99,8 @@ class PathsRegistry
             return $this->cacheFirst[$filename];
         }
 
-        // L2: APCu cache (survives across requests, 1s TTL for hot paths)
-        $result = apcu_entry($this->cachePrefix . $filename, function() use ($filename) {
+        // Resolver function - used by both APCu and direct call paths
+        $resolver = function() use ($filename) {
             // Check primary path first
             $fullPath = $this->primaryPath . '/' . ltrim($filename, '/');
             if (file_exists($fullPath)) {
@@ -116,7 +116,15 @@ class PathsRegistry
             }
 
             return null;
-        }, ttl: 1);
+        };
+
+        $result = apcu_entry($this->cachePrefix . $filename, $resolver, ttl: 1);
+
+        // Note; probably a PHP bug (or poor design choice) - apcu_entry callback
+        // not called if APCu disabled
+        if ($result === null && !apcu_enabled()) {
+            $result = $resolver();
+        }
 
         $this->cacheFirst[$filename] = $result;
         return $result;
@@ -141,8 +149,7 @@ class PathsRegistry
             return $this->cacheAll[$filename];
         }
 
-        // L2: APCu cache (survives across requests, 1s TTL for hot paths)
-        $result = apcu_entry($this->cachePrefix . 'all:' . $filename, function() use ($filename) {
+        $resolver = function() use ($filename) {
             $found = [];
 
             // Check primary path first
@@ -160,7 +167,14 @@ class PathsRegistry
             }
 
             return $found;
-        }, ttl: 1);
+        };
+
+        // L2: APCu cache (survives across requests, 1s TTL for hot paths)
+        $result = apcu_entry($this->cachePrefix . 'all:' . $filename, $resolver, ttl: 1);
+
+        if ($result === null && !apcu_enabled()) {
+            $result = $resolver();
+        }
 
         $this->cacheAll[$filename] = $result;
         return $result;

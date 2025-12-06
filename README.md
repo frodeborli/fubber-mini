@@ -1,8 +1,8 @@
 # Mini Framework
 
-> **Designed for decades, not release cycles.** [Why choose Mini?](docs/WHY-MINI.md)
+> **Designed for decades, not release cycles.**
 
-**Get started in 4 commands:**
+**LLMs and senior developers: read [MINI-STYLE.md](MINI-STYLE.md) before working on Mini projects.**
 
 ```bash
 composer require fubber/mini
@@ -15,15 +15,23 @@ Visit `http://localhost/time` - you're running.
 
 ---
 
-**Mini isn't minimal because it lacks features - it's minimal because it lacks overhead.**
+## Philosophy
 
-Traditional frameworks bootstrap in 50-100ms, loading megabytes of PHP classes to reinvent what PHP's C engine already does. Mini bootstraps in ~2ms by leveraging PHP's engine-level capabilities instead of fighting them.
+Mini is built on a **Lindy perspective**: if a pattern has worked for 40 years, it will likely work for 40 more. We reject patterns that trigger frequent redesign.
 
-**Monolithic by design, lazy by execution.** Mini includes full-stack capabilities (ORM, auth, i18n, templates, validation), but they only load when you touch them. Start with a single file returning a timestamp, scale to enterprise complexity without changing frameworks.
+**Use PHP's engine, not userland abstractions.** Traditional frameworks reinvent locale handling, date formatting, routing, and templating in PHP code. Mini uses PHP's C-level engine: `intl` extension for ICU, file system for routing, PHP files for templates.
 
-**Zero required dependencies** enables safe sub-application mounting - run PSR-15 compliant apps (Slim, Mezzio, etc.) side-by-side without dependency conflicts. Each mounted app can have its own `composer.json` and dependency versions.
+**Dependency locator, not dependency injection.** DI in PHP forces proxy classes, scattered configuration, and compilation steps. We locate dependencies via `db()`, `cache()`, `auth()` - simple functions resolving from `Mini::$mini`. Same testability (swap the container service), no proxy explosion.
 
-## Philosophy: Engine-Native, Not Userland-Native
+**Embrace PHP's short-lived request cycle.** PHP bootstraps fresh for each request - no memory leaks, no stale state, predictable cleanup. We optimize for this reality instead of fighting it.
+
+**Multiple routing paradigms.** `_routes/` files can echo output like classic PHP, return values (converted to PSR-7 via converter registry), return controllers with attribute-based routing, or return PSR-15 handlers (mount Slim, Mezzio, etc.). We don't reject patterns that have been idiomatic PHP for 20+ years.
+
+**Fiber-safe globals.** `$_GET`, `$_POST`, `$_COOKIE`, `$_SESSION` are `ArrayAccess` proxies routing to the current PSR-7 request context - works in FPM, Swoole, ReactPHP, and Fiber-based async.
+
+**Full-stack, lazy-loaded.** ORM, auth, i18n, templates, validation - all included, nothing loads until touched. Hello World uses ~300KB. Zero required dependencies enables mounting PSR-15 apps without dependency conflicts.
+
+## Engine-Native, Not Userland-Native
 
 **We use PHP's C-level engine, not userland reimplementations.** Modern frameworks reimplement locale handling, date formatting, and number formatting in PHP code. Mini uses PHP's `intl` extension (ICU library in C) and native functions.
 
@@ -205,8 +213,8 @@ echo json_encode($user);
 
 ```php
 // _routes/users/_/posts/_.php - Matches /users/{userId}/posts/{postId}
-$userId = $_GET[0];   // First wildcard segment
-$postId = $_GET[1];   // Second wildcard segment
+$postId = $_GET[0];   // Rightmost wildcard (nearest to file)
+$userId = $_GET[1];   // Next wildcard to the left
 $post = db()->queryOne("SELECT * FROM posts WHERE id = ? AND user_id = ?", [$postId, $userId]);
 echo json_encode($post);
 ```
@@ -215,15 +223,17 @@ echo json_encode($post);
 - `_.php` matches any single segment (e.g., `/users/123`)
 - `_/index.php` matches any single segment with trailing slash (e.g., `/users/123/`)
 - Exact matches take precedence over wildcards
-- Captured values stored in `$_GET[0]`, `$_GET[1]`, etc. (left to right)
+- Captured values stored in `$_GET[0]`, `$_GET[1]`, etc. (right to left - nearest wildcard is `[0]`)
 - Wildcards match single segments only (won't match across `/`)
 
 **Examples:**
 ```
 URL: /users/123           → _routes/users/_.php          ($_GET[0] = "123")
 URL: /users/123/          → _routes/users/_/index.php    ($_GET[0] = "123")
-URL: /users/john/posts/5  → _routes/users/_/posts/_.php  ($_GET[0] = "john", $_GET[1] = "5")
+URL: /users/john/posts/5  → _routes/users/_/posts/_.php  ($_GET[0] = "5", $_GET[1] = "john")
 ```
+
+**Why right-to-left?** If you move `_routes/users/_/posts/_.php` to `_routes/_/posts/_.php`, the code using `$_GET[0]` for post ID still works - only `$_GET[1]` changes.
 
 ### Trailing Slash Redirects
 

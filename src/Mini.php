@@ -1,4 +1,6 @@
 <?php
+// Important: Read MINI-STYLE.md before using Mini framework.
+
 namespace mini;
 
 use Closure;
@@ -10,7 +12,6 @@ use Psr\Container\ContainerInterface;
 use Psr\Container\NotFoundExceptionInterface;
 use ReflectionClass;
 use RuntimeException;
-use Symfony\Component\Dotenv\Dotenv;
 use WeakMap;
 
 /**
@@ -424,8 +425,32 @@ final class Mini implements ContainerInterface {
     private function bootstrap(): void {
         $this->root = getenv('MINI_ROOT') ?: \dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 3);
         if (is_readable($this->root . '/.env')) {
-            $dotenv = new Dotenv();
-            $dotenv->load($this->root . '/.env');
+            (static function(string $path): void {
+                $re = '/^\s*(?!\#)(?<k>[^\s=]+)\s*=\s*+(?<v>("(\\\\.|[^"\\\\]|"")*+"|\'(\\\\.|[^\'\\\\]|\'\')*+\'|[^\r\n#]*))\s*(\#[^\r\n]*)?(\R|$)/mu';
+                if (preg_match_all($re, file_get_contents($path), $matches, PREG_SET_ORDER)) {
+                    foreach ($matches as $m) {
+                        $k = $m['k'];
+                        // Don't overwrite existing env vars (match Symfony behavior)
+                        if (isset($_ENV[$k])) {
+                            continue;
+                        }
+                        $v = trim($m['v']);
+                        // Strip quotes and process escapes
+                        if (($v[0] ?? '') === '"' && str_ends_with($v, '"')) {
+                            $v = substr($v, 1, -1);
+                            $v = str_replace(['\\\\', '\\"', '\\n', '\\r', '""'], ['\\', '"', "\n", "\r", '"'], $v);
+                        } elseif (($v[0] ?? '') === "'" && str_ends_with($v, "'")) {
+                            $v = substr($v, 1, -1);
+                            $v = str_replace("''", "'", $v);
+                        }
+                        $_ENV[$k] = $v;
+                        if (!str_starts_with($k, 'HTTP_')) {
+                            $_SERVER[$k] = $v;
+                        }
+                        putenv("$k=$v");
+                    }
+                }
+            })($this->root . '/.env');
         }
 
         // Initialize paths registries directly (too fundamental to be a configurable service)
