@@ -196,8 +196,7 @@ final class Mini implements ContainerInterface {
         // Not in fiber - check if we're in Ready phase (request handling enabled)
         if ($this->phase->getCurrentState() !== Phase::Ready) {
             throw new \LogicException(
-                'Cannot access Scoped services outside of Ready phase. ' .
-                'Scoped services (db(), auth(), etc.) can only be accessed after calling mini\bootstrap(). ' .
+                'Cannot get request scope outside of Ready phase. ' .
                 'Current phase: ' . $this->phase
             );
         }
@@ -304,6 +303,50 @@ final class Mini implements ContainerInterface {
     }
 
     /**
+     * Set a service instance directly, bypassing factory creation.
+     *
+     * Can be used during bootstrap to register pre-instantiated services,
+     * or during Ready phase for testing (logs a warning).
+     *
+     * @param string $id Service identifier
+     * @param mixed $instance The instance to inject
+     * @throws \LogicException If service was already instantiated and cached
+     */
+    public function set(string $id, mixed $instance): void {
+        // Check if already instantiated in singleton cache
+        $singletonCache = $this->instanceCache[$this] ?? null;
+        if ($singletonCache !== null && property_exists($singletonCache, $id)) {
+            throw new \LogicException("Cannot shadow service '$id': already instantiated");
+        }
+
+        // Check scoped cache if in Ready phase (scope exists)
+        if ($this->phase->getCurrentState() === Phase::Ready) {
+            $scopeObject = $this->getRequestScope();
+            if ($scopeObject !== $this && $this->instanceCache->offsetExists($scopeObject)) {
+                $scopedCache = $this->instanceCache[$scopeObject];
+                $cacheKey = 'service:' . $id;
+                if (property_exists($scopedCache, $cacheKey)) {
+                    throw new \LogicException("Cannot shadow service '$id': already instantiated in current scope");
+                }
+            }
+
+            trigger_error("set('$id') called during Ready phase - intended for testing only", E_USER_WARNING);
+        }
+
+        // Store in singleton cache
+        if ($singletonCache === null) {
+            $singletonCache = new \stdClass();
+            $this->instanceCache[$this] = $singletonCache;
+        }
+        $singletonCache->{$id} = $instance;
+
+        // Register service definition if not exists
+        if (!isset($this->services[$id])) {
+            $this->services[$id] = ['factory' => fn() => $instance, 'lifetime' => Lifetime::Singleton];
+        }
+    }
+
+    /**
      * Check if a service is registered in the container
      *
      * @param string $id Service identifier
@@ -357,6 +400,13 @@ final class Mini implements ContainerInterface {
 
         // Scoped: Store in instanceCache[getRequestScope()]
         if ($lifetime === Lifetime::Scoped) {
+            if ($this->phase->getCurrentState() !== Phase::Ready) {
+                throw new \LogicException(
+                    "Cannot access Scoped service '$id' outside of Ready phase. " .
+                    "Scoped services can only be accessed after calling mini\\bootstrap(). " .
+                    "Current phase: " . $this->phase
+                );
+            }
             $scopedCache = $this->getRequestScopeCache();
             $cacheKey = 'service:' . $id;
 
