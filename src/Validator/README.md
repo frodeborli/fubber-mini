@@ -2,10 +2,10 @@
 
 ## Philosophy
 
-Mini provides **composable, type-safe validation** with full JSON Schema compliance. Build validation rules with a fluent API, export them as JSON Schema for client-side validation, and customize error messages for perfect UX.
+Mini provides **composable, type-safe validation** with JSON Schema-compatible rules. Build validation rules with a fluent API, export them as JSON Schema for client-side validation, and customize error messages for perfect UX.
 
 **Key Principles:**
-- **JSON Schema compliant** - Export validation rules for client-side reuse
+- **JSON Schema compatible** - Export validation rules for client-side reuse
 - **Fully immutable** - Chain validators without side effects
 - **Custom error messages** - User-friendly validation feedback via `x-error`
 - **Context-aware validation** - Access parent objects for relational validation
@@ -13,6 +13,10 @@ Mini provides **composable, type-safe validation** with full JSON Schema complia
 - **Zero dependencies** - Pure PHP validation, no external libraries
 
 ## Setup
+
+```php
+use function mini\validator;
+```
 
 ### Basic Usage
 
@@ -29,6 +33,24 @@ $validator = validator()
 $error = $validator->isInvalid('ab');
 if ($error) {
     echo "Error: $error"; // "Must be at least 3 characters long."
+}
+```
+
+### Return Values
+
+`isInvalid($value)` returns:
+- `null` if the value is valid
+- `string|Stringable` error message for scalar validators
+- `array<string, string|Stringable>` of field errors for object validators
+
+```php
+// Scalar validation returns string or null
+$error = $stringValidator->isInvalid($value);
+
+// Object validation returns array or null
+$errors = $objectValidator->isInvalid($data);
+if ($errors) {
+    // ['username' => 'Too short.', 'email' => 'Invalid format.']
 }
 ```
 
@@ -310,7 +332,17 @@ if ($errors) {
 
 ## Context-Aware Validation
 
-Custom validators can access the parent object for relational validation:
+Custom validators receive the field value and parent object/array:
+
+```php
+->custom(function (mixed $value, mixed $parent): bool {
+    // Return true if valid, false if invalid
+})
+```
+
+The callback returns `true` for valid, `false` for invalid (uses default "Validation failed." message). Custom validators are server-side only and not exported to JSON Schema.
+
+**Password confirmation example:**
 
 ```php
 $registrationValidator = validator()
@@ -322,8 +354,8 @@ $registrationValidator = validator()
         validator()
             ->type('string')
             ->required('Please confirm your password.')
-            ->custom(fn($confirmation, $user) =>
-                isset($user['password']) && $confirmation === $user['password']
+            ->custom(fn($confirmation, $data) =>
+                isset($data['password']) && $confirmation === $data['password']
             )
     );
 
@@ -370,7 +402,7 @@ Output:
 }
 ```
 
-The `x-error` object contains custom error messages that can be used by client-side validation libraries.
+The `x-error` extension maps JSON Schema keyword names (`minLength`, `pattern`, etc.) to their custom error messages. Keywords without custom messages are omitted. Note that `custom()` validators are server-side only and not included in the exported schema.
 
 ## Available Validators
 
@@ -631,7 +663,7 @@ if ($error) {
 
 ## Performance
 
-- **No reflection** - Custom validators use direct closure invocation
+- **No reflection at runtime** - Attributes are processed once when building validators; validation uses direct calls only
 - **Fail-fast** - Validation stops at first error for simple values
 - **Efficient** - Shallow clones for immutability (no deep copying)
 - **Zero overhead** - JSON Schema export via simple array serialization
