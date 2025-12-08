@@ -93,7 +93,7 @@ class FilesystemCache implements CacheInterface
         }
 
         $data = @unserialize($contents);
-        if (!is_array($data) || !isset($data['value'], $data['expires_at'])) {
+        if (!is_array($data) || !array_key_exists('value', $data) || !array_key_exists('expires_at', $data)) {
             return null;
         }
 

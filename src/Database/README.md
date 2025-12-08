@@ -1,6 +1,6 @@
 # Database
 
-Mini's database layer is a thin wrapper over PDO with an immutable query builder.
+Mini's database layer wraps a database engine (PDO by default) with an immutable query builder.
 
 ## Quick Start
 
@@ -45,7 +45,7 @@ $active = db()->partialQuery('users')->eq('active', 1);
 $admins = $active->eq('role', 'admin');      // New instance
 $mods = $active->eq('role', 'moderator');    // New instance
 
-// Methods
+// Methods - all conditions are combined with AND
 $query->eq('column', $value)      // = (NULL becomes IS NULL)
 $query->lt('column', $value)      // <
 $query->lte('column', $value)     // <=
@@ -53,7 +53,7 @@ $query->gt('column', $value)      // >
 $query->gte('column', $value)     // >=
 $query->in('column', [...])       // IN (...)
 $query->in('column', $subquery)   // IN (SELECT ...) via CTE
-$query->where('sql', $params)     // Raw WHERE clause
+$query->where('sql', $params)     // Raw WHERE clause (ANDed with existing)
 $query->order('created_at DESC')  // ORDER BY
 $query->limit(100)                // LIMIT (default: 1000 when iterating)
 $query->offset(50)                // OFFSET
@@ -221,7 +221,7 @@ $commentCount = $post?->comments()->count();
 
 ## Authorization Pattern: `::mine()`
 
-Use `::mine()` as a security boundary. It's shorter than `::query()`, making the secure path the default.
+Use `::mine()` as a security boundary for user-facing queries where authorization matters.
 
 ```php
 class Post
@@ -246,13 +246,16 @@ class Post
 
     public static function find(int $id): ?Post
     {
-        return self::mine()->eq('id', $id)->one();  // Authorized!
+        return self::mine()->eq('id', $id)->one();  // Includes auth check
     }
 }
 
-// Always use ::mine() for user-facing queries
+// User-facing queries should use ::mine()
 $posts = Post::mine()->order('created_at DESC')->limit(20);
 $post = Post::find(123);  // Returns null if not authorized
+
+// Admin/internal queries can use ::query() directly
+$allPosts = Post::query()->eq('status', 'spam');  // For moderation
 ```
 
 ## DELETE and UPDATE

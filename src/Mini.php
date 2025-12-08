@@ -350,11 +350,22 @@ final class Mini implements ContainerInterface {
     /**
      * Check if a service is registered in the container
      *
+     * Returns false if the service was explicitly set to null via set($id, null),
+     * which allows tests to simulate "not configured" scenarios.
+     *
      * @param string $id Service identifier
-     * @return bool True if service is registered
+     * @return bool True if service is registered and not null
      */
     public function has(string $id): bool {
-        return isset($this->services[$id]);
+        if (!array_key_exists($id, $this->services)) {
+            return false;
+        }
+        // Check if explicitly set to null in singleton cache
+        $singletonCache = $this->instanceCache[$this] ?? null;
+        if ($singletonCache !== null && property_exists($singletonCache, $id) && $singletonCache->{$id} === null) {
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -371,7 +382,7 @@ final class Mini implements ContainerInterface {
      * @throws Exceptions\NotFoundException If service is not registered
      */
     public function get(string $id): mixed {
-        if (!isset($this->services[$id])) {
+        if (!array_key_exists($id, $this->services)) {
             throw new Exceptions\NotFoundException("Service not found: $id");
         }
 
@@ -394,6 +405,11 @@ final class Mini implements ContainerInterface {
 
             if (!property_exists($singletonCache, $id)) {
                 $singletonCache->{$id} = $factory();
+            }
+
+            // Treat null as "not registered" (allows tests to simulate missing services)
+            if ($singletonCache->{$id} === null) {
+                throw new Exceptions\NotFoundException("Service not found: $id");
             }
 
             return $singletonCache->{$id};
