@@ -347,7 +347,9 @@ if ($errors) {
 }
 ```
 
-## Context-Aware Validation
+## Custom Validation
+
+**Philosophy:** Client-side validation is for UX, server-side validation is for security. You should always validate on the server. The `custom()` validator enables server-side checks that can't be offloaded to the client - like checking if a username already exists in the database.
 
 Custom validators receive the field value and parent object/array:
 
@@ -359,10 +361,31 @@ Custom validators receive the field value and parent object/array:
 
 The callback returns `true` for valid, `false` for invalid (uses default "Validation failed." message). Custom validators are server-side only and not exported to JSON Schema.
 
-**Password confirmation example:**
+**Database validation example:**
 
 ```php
 $registrationValidator = validator()
+    ->type('object')
+    ->forProperty('username',
+        validator()
+            ->type('string')
+            ->minLength(3)
+            ->required()
+            ->custom(fn($username) => !userExists($username))
+    )
+    ->forProperty('email',
+        validator()
+            ->type('string')
+            ->format('email')
+            ->required()
+            ->custom(fn($email) => !emailTaken($email))
+    );
+```
+
+**Password confirmation example:**
+
+```php
+$validator = validator()
     ->type('object')
     ->forProperty('password',
         validator()->type('string')->minLength(8)->required()
@@ -375,21 +398,14 @@ $registrationValidator = validator()
                 isset($data['password']) && $confirmation === $data['password']
             )
     );
-
-$data = [
-    'password' => 'secret123',
-    'password_confirmation' => 'different'
-];
-
-$errors = $registrationValidator->isInvalid($data);
-// $errors = ['password_confirmation' => 'Validation failed.']
 ```
 
 **Use Cases:**
+- Database uniqueness checks (username, email)
 - Password confirmation
 - Conditional required fields (e.g., state required if country is US)
-- Database relationship validation
 - Cross-field validation
+- External API validation
 
 ## JSON Schema Export
 
