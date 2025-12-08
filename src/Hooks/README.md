@@ -29,6 +29,55 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
 });
 ```
 
+## Recommended Pattern: Typed Event Properties
+
+The idiomatic way to use dispatchers is to expose them as typed readonly properties on your class, one property per event type:
+
+```php
+use mini\Hooks\Event;
+
+// Define event payload as a class
+class PageViewEvent {
+    public function __construct(
+        public readonly string $path,
+        public readonly int $userId,
+    ) {}
+}
+
+class PageTracker {
+    /** @var Event<PageViewEvent> */
+    public readonly Event $onPageView;
+
+    public function __construct() {
+        $this->onPageView = new Event('page-view');
+    }
+
+    public function trackView(string $path, int $userId): void {
+        // ... tracking logic ...
+        $this->onPageView->trigger(new PageViewEvent($path, $userId));
+    }
+}
+
+// Usage - IDE provides full type inference
+$tracker = new PageTracker();
+$tracker->onPageView->listen(function(PageViewEvent $event) {
+    Analytics::track($event->path, $event->userId);
+});
+```
+
+This pattern provides:
+- **Type safety** - PHPStan/Psalm can verify listener signatures
+- **IDE support** - Autocompletion for event properties
+- **Discoverability** - Class properties document available events
+- **Encapsulation** - Event data grouped in payload objects
+
+For simple cases, you can also use scalar types directly:
+
+```php
+/** @var Event<string> */
+public readonly Event $onMessage;
+```
+
 ## Dispatcher Classes
 
 ### Event - Multi-fire, Multiple Listeners
@@ -38,26 +87,33 @@ Use when an event can happen multiple times and you want all listeners notified.
 ```php
 use mini\Hooks\Event;
 
-// Create a page view event
+class PageViewEvent {
+    public function __construct(
+        public readonly string $path,
+        public readonly int $userId,
+    ) {}
+}
+
+/** @var Event<PageViewEvent> */
 $onPageView = new Event('page-view');
 
 // Subscribe listeners
-$onPageView->listen(function(string $path, int $userId) {
-    error_log("Page viewed: $path by user $userId");
+$onPageView->listen(function(PageViewEvent $event) {
+    error_log("Page viewed: {$event->path} by user {$event->userId}");
 });
 
-$onPageView->listen(function(string $path, int $userId) {
-    Analytics::track('page_view', ['path' => $path, 'user' => $userId]);
+$onPageView->listen(function(PageViewEvent $event) {
+    Analytics::track('page_view', ['path' => $event->path, 'user' => $event->userId]);
 });
 
 // One-time listener (auto-unsubscribes after first trigger)
-$onPageView->once(function(string $path, int $userId) {
+$onPageView->once(function(PageViewEvent $event) {
     echo "First page view recorded!";
 });
 
 // Trigger the event (all listeners called)
-$onPageView->trigger('/dashboard', 42);
-$onPageView->trigger('/settings', 42);  // Can trigger multiple times
+$onPageView->trigger(new PageViewEvent('/dashboard', 42));
+$onPageView->trigger(new PageViewEvent('/settings', 42));  // Can trigger multiple times
 ```
 
 ### Trigger - One-time Event with Memory
@@ -67,19 +123,25 @@ Use when something happens exactly once and late subscribers should still be not
 ```php
 use mini\Hooks\Trigger;
 
-// Bootstrap completion trigger
+class BootstrapCompleteEvent {
+    public function __construct(
+        public readonly array $config,
+    ) {}
+}
+
+/** @var Trigger<BootstrapCompleteEvent> */
 $onBootstrapComplete = new Trigger('bootstrap-complete');
 
 // Early subscriber
-$onBootstrapComplete->listen(function(array $config) {
-    echo "Bootstrap done with " . count($config) . " config items\n";
+$onBootstrapComplete->listen(function(BootstrapCompleteEvent $event) {
+    echo "Bootstrap done with " . count($event->config) . " config items\n";
 });
 
 // Trigger fires once
-$onBootstrapComplete->trigger(['db' => 'mysql', 'cache' => 'redis']);
+$onBootstrapComplete->trigger(new BootstrapCompleteEvent(['db' => 'mysql', 'cache' => 'redis']));
 
 // Late subscriber - called immediately with original data!
-$onBootstrapComplete->listen(function(array $config) {
+$onBootstrapComplete->listen(function(BootstrapCompleteEvent $event) {
     echo "Late subscriber still gets the config\n";
 });
 
@@ -89,7 +151,7 @@ if ($onBootstrapComplete->wasTriggered()) {
 }
 
 // Second trigger throws LogicException
-// $onBootstrapComplete->trigger([]);  // Error!
+// $onBootstrapComplete->trigger(...);  // Error!
 ```
 
 ### Handler - First Non-null Response Wins
@@ -99,32 +161,40 @@ Use when you want to find a handler that can process something. First handler to
 ```php
 use mini\Hooks\Handler;
 
-// Error handler chain
+class ErrorResponse {
+    public function __construct(
+        public readonly int $status,
+        public readonly string $message,
+        public readonly array $errors = [],
+    ) {}
+}
+
+/** @var Handler<\Throwable, ErrorResponse> */
 $errorHandler = new Handler('error-handler');
 
 // Register handlers (checked in order)
-$errorHandler->listen(function(\Throwable $e, array $context) {
+$errorHandler->listen(function(\Throwable $e): ?ErrorResponse {
     if ($e instanceof ValidationException) {
-        return ['status' => 400, 'errors' => $e->errors];
+        return new ErrorResponse(400, 'Validation failed', $e->errors);
     }
     return null;  // Can't handle, try next
 });
 
-$errorHandler->listen(function(\Throwable $e, array $context) {
+$errorHandler->listen(function(\Throwable $e): ?ErrorResponse {
     if ($e instanceof NotFoundException) {
-        return ['status' => 404, 'message' => $e->getMessage()];
+        return new ErrorResponse(404, $e->getMessage());
     }
     return null;  // Can't handle, try next
 });
 
 // Fallback handler
-$errorHandler->listen(function(\Throwable $e, array $context) {
-    return ['status' => 500, 'message' => 'Internal error'];
+$errorHandler->listen(function(\Throwable $e): ErrorResponse {
+    return new ErrorResponse(500, 'Internal error');
 });
 
 // Trigger - first non-null response returned
-$response = $errorHandler->trigger(new NotFoundException('User not found'), []);
-// $response = ['status' => 404, 'message' => 'User not found']
+$response = $errorHandler->trigger(new NotFoundException('User not found'));
+// $response->status === 404
 ```
 
 ### Filter - Transform Data Through Pipeline
@@ -134,32 +204,32 @@ Use when you want to pass data through a chain of transformers.
 ```php
 use mini\Hooks\Filter;
 
-// Response filter
+/** @var Filter<string> */
 $responseFilter = new Filter('response-filter');
 
 // Add filters (each receives and must return the value)
-$responseFilter->listen(function(string $html, array $context): string {
+$responseFilter->listen(function(string $html): string {
     // Add security headers comment
     return "<!-- Security headers applied -->\n" . $html;
 });
 
-$responseFilter->listen(function(string $html, array $context): string {
-    // Minify if in production
-    if ($context['env'] === 'production') {
+$responseFilter->listen(function(string $html): string {
+    // Minify in production
+    if ($_ENV['APP_ENV'] === 'production') {
         return preg_replace('/\s+/', ' ', $html);
     }
     return $html;
 });
 
-$responseFilter->listen(function(string $html, array $context): string {
+$responseFilter->listen(function(string $html): string {
     // Add timing footer
-    $time = microtime(true) - $context['start'];
+    $time = microtime(true) - $_SERVER['REQUEST_TIME_FLOAT'];
     return $html . "\n<!-- Generated in {$time}s -->";
 });
 
 // Filter the value through all listeners
 $html = '<html><body>Hello</body></html>';
-$filtered = $responseFilter->filter($html, ['env' => 'dev', 'start' => $_SERVER['REQUEST_TIME_FLOAT']]);
+$filtered = $responseFilter->filter($html);
 ```
 
 ### StateMachine - Managed State Transitions
@@ -169,39 +239,47 @@ Use when you need to enforce valid state transitions with hooks at each stage.
 ```php
 use mini\Hooks\StateMachine;
 
-// Define states and valid transitions
+enum OrderStatus {
+    case Pending;
+    case Confirmed;
+    case Shipped;
+    case Delivered;
+    case Cancelled;
+}
+
+/** @var StateMachine<OrderStatus> */
 $order = new StateMachine([
-    ['pending', 'confirmed', 'cancelled'],     // pending → confirmed OR cancelled
-    ['confirmed', 'shipped', 'cancelled'],     // confirmed → shipped OR cancelled
-    ['shipped', 'delivered'],                  // shipped → delivered
-    ['delivered'],                             // delivered is terminal
-    ['cancelled'],                             // cancelled is terminal
+    [OrderStatus::Pending, OrderStatus::Confirmed, OrderStatus::Cancelled],
+    [OrderStatus::Confirmed, OrderStatus::Shipped, OrderStatus::Cancelled],
+    [OrderStatus::Shipped, OrderStatus::Delivered],
+    [OrderStatus::Delivered],   // terminal
+    [OrderStatus::Cancelled],   // terminal
 ]);
 
 // Hook into transitions
-$order->onExitingState('pending', function($from, $to) {
-    echo "Leaving pending state, going to $to\n";
+$order->onExitingState(OrderStatus::Pending, function(OrderStatus $from, OrderStatus $to) {
+    echo "Leaving pending state, going to {$to->name}\n";
 });
 
-$order->onEnteringState('confirmed', function($from, $to) {
+$order->onEnteringState(OrderStatus::Confirmed, function(OrderStatus $from, OrderStatus $to) {
     echo "About to confirm order\n";
     // Could throw here to prevent transition
 });
 
-$order->onEnteredState('confirmed', function($from, $to) {
+$order->onEnteredState(OrderStatus::Confirmed, function(OrderStatus $from, OrderStatus $to) {
     echo "Order confirmed! Sending email...\n";
 });
 
-$order->onEnteredState(['shipped', 'delivered'], function($from, $to) {
-    echo "Order is now $to - updating tracking\n";
+$order->onEnteredState([OrderStatus::Shipped, OrderStatus::Delivered], function(OrderStatus $from, OrderStatus $to) {
+    echo "Order is now {$to->name} - updating tracking\n";
 });
 
 // Trigger transitions
-$order->trigger('confirmed');  // pending → confirmed
-$order->trigger('shipped');    // confirmed → shipped
+$order->trigger(OrderStatus::Confirmed);  // Pending → Confirmed
+$order->trigger(OrderStatus::Shipped);    // Confirmed → Shipped
 
 // Invalid transitions throw LogicException
-// $order->trigger('pending');  // Error: can't go back to pending
+// $order->trigger(OrderStatus::Pending);  // Error: can't go back to Pending
 ```
 
 ### PerItemTriggers - One-time Per Source
@@ -211,25 +289,31 @@ Use when you need a trigger that fires once per unique source (string key or obj
 ```php
 use mini\Hooks\PerItemTriggers;
 
-// Model loaded event - fires once per model instance
+class ModelLoadedEvent {
+    public function __construct(
+        public readonly string $name,
+    ) {}
+}
+
+/** @var PerItemTriggers<string, ModelLoadedEvent> */
 $onModelLoaded = new PerItemTriggers('model-loaded');
 
 // Global listener (receives all)
-$onModelLoaded->listen(function(string|object $source, array $data) {
-    echo "Model loaded: " . (is_string($source) ? $source : get_class($source)) . "\n";
+$onModelLoaded->listen(function(string $source, ModelLoadedEvent $event) {
+    echo "Model loaded: $source with name {$event->name}\n";
 });
 
 // Trigger for specific sources
-$onModelLoaded->triggerFor('User:42', ['name' => 'John']);
-$onModelLoaded->triggerFor('User:43', ['name' => 'Jane']);
+$onModelLoaded->triggerFor('User:42', new ModelLoadedEvent('John'));
+$onModelLoaded->triggerFor('User:43', new ModelLoadedEvent('Jane'));
 
 // Listen for specific source - called immediately if already triggered
-$onModelLoaded->listenFor('User:42', function($source, $data) {
-    echo "User 42 loaded with name: {$data['name']}\n";  // Called immediately!
+$onModelLoaded->listenFor('User:42', function(string $source, ModelLoadedEvent $event) {
+    echo "User 42 loaded with name: {$event->name}\n";  // Called immediately!
 });
 
 // Future subscriber for not-yet-triggered source
-$onModelLoaded->listenFor('User:99', function($source, $data) {
+$onModelLoaded->listenFor('User:99', function(string $source, ModelLoadedEvent $event) {
     echo "User 99 loaded\n";  // Called when User:99 triggers
 });
 

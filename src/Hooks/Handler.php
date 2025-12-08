@@ -7,16 +7,19 @@ use Closure;
  * Event where first non-null response wins
  * Remaining listeners are not called
  *
+ * @template TInput The input type to be handled
+ * @template TOutput The output type returned by handlers
  * @package mini\Hooks
  */
 class Handler extends Dispatcher {
 
+    /** @var list<callable(TInput, mixed...): (TOutput|null)> */
     protected array $listeners = [];
 
     /**
      * Unsubscribe handler
      *
-     * @param Closure ...$listeners
+     * @param callable(TInput, mixed...): (TOutput|null) ...$listeners
      */
     public function off(Closure ...$listeners): void {
         self::filterArrays($listeners, $this->listeners);
@@ -25,7 +28,7 @@ class Handler extends Dispatcher {
     /**
      * Register a handler function
      *
-     * @param Closure ...$listeners
+     * @param callable(TInput, mixed...): (TOutput|null) ...$listeners
      */
     public function listen(Closure ...$listeners): void {
         foreach ($listeners as $listener) {
@@ -34,12 +37,11 @@ class Handler extends Dispatcher {
     }
 
     /**
-     * Try each listener in order
-     * First non-null response is returned
+     * Try each handler in order until one returns non-null
      *
-     * @param mixed $data
-     * @param mixed ...$args
-     * @return mixed Returns null if no handler handled the data
+     * @param TInput $data The data to handle
+     * @param mixed ...$args Additional context arguments
+     * @return TOutput|null First non-null response, or null if no handler matched
      * @throws \Throwable
      */
     public function trigger(mixed $data, mixed ...$args): mixed {

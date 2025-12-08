@@ -6,17 +6,22 @@ use Closure;
 /**
  * Event dispatcher for events that can trigger multiple times
  *
+ * @template TPayload The primary payload type passed to listeners
  * @package mini\Hooks
  */
 class Event extends Dispatcher {
 
+    /** @var list<callable(TPayload, mixed...): void> */
     protected array $listeners = [];
+
+    /** @var list<callable(TPayload, mixed...): void> */
     protected array $onceListeners = [];
 
     /**
      * Invoke all event listeners with the provided arguments
      *
-     * @param mixed ...$args
+     * @param TPayload $payload
+     * @param mixed ...$args Additional arguments
      * @throws \Throwable
      */
     public function trigger(mixed ...$args): void {
@@ -30,7 +35,7 @@ class Event extends Dispatcher {
     /**
      * Subscribe to this event
      *
-     * @param Closure ...$listeners
+     * @param callable(TPayload, mixed...): void ...$listeners
      */
     public function listen(Closure ...$listeners): void {
         foreach ($listeners as $listener) {
@@ -41,7 +46,7 @@ class Event extends Dispatcher {
     /**
      * Subscribe and auto-unsubscribe after first trigger
      *
-     * @param Closure ...$listeners
+     * @param callable(TPayload, mixed...): void ...$listeners
      */
     public function once(Closure ...$listeners): void {
         foreach ($listeners as $listener) {
@@ -52,7 +57,7 @@ class Event extends Dispatcher {
     /**
      * Unsubscribe from this event
      *
-     * @param Closure ...$listeners
+     * @param callable(TPayload, mixed...): void ...$listeners
      */
     public function off(Closure ...$listeners): void {
         self::filterArrays(

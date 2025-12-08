@@ -27,6 +27,7 @@ use UnitEnum;
  * $machine->trigger(Phase::Request);  // Transitions and fires hooks
  * ```
  *
+ * @template TState of string|int|UnitEnum The state type
  * @package mini\Hooks
  */
 class StateMachine extends Dispatcher {
@@ -34,14 +35,14 @@ class StateMachine extends Dispatcher {
     /**
      * Valid state transitions for the state machine.
      *
-     * @var array<string|int, array<int, string|int|UnitEnum>>
+     * @var array<string|int, list<TState>>
      */
     protected readonly array $transitions;
 
     /**
      * The current state
      *
-     * @var string|int|UnitEnum
+     * @var TState
      */
     protected string|int|UnitEnum $state;
 
@@ -50,49 +51,49 @@ class StateMachine extends Dispatcher {
      *
      * Used to prevent re-entrant transitions.
      *
-     * @var string|int|UnitEnum|null
+     * @var TState|null
      */
     protected null|string|int|UnitEnum $transitioningTo = null;
 
     /**
      * Subscribers to all state changes
      *
-     * @var Closure[]
+     * @var list<callable(TState, TState): void>
      */
     protected array $listeners = [];
 
     /**
      * Subscribers for entering a particular state
      *
-     * @var array<string|int, Closure[]>
+     * @var array<string|int, list<callable(TState, TState): void>>
      */
     protected array $enteringListeners = [];
 
     /**
      * Subscribers for exiting a particular state
      *
-     * @var array<string|int, Closure[]>
+     * @var array<string|int, list<callable(TState, TState): void>>
      */
     protected array $exitingListeners = [];
 
     /**
      * Subscribers for completed entering a particular state
      *
-     * @var array<string|int, Closure[]>
+     * @var array<string|int, list<callable(TState, TState): void>>
      */
     protected array $enteredListeners = [];
 
     /**
      * Subscribers for completed exiting a particular state
      *
-     * @var array<string|int, Closure[]>
+     * @var array<string|int, list<callable(TState, TState): void>>
      */
     protected array $exitedListeners = [];
 
     /**
      * Subscribers to get notified ONCE when the current state exits
      *
-     * @var Closure[]
+     * @var list<callable(TState, TState): void>
      */
     protected array $exitCurrentListeners = [];
 
@@ -122,7 +123,7 @@ class StateMachine extends Dispatcher {
      *
      * Note: Enums cannot be used as array keys in PHP, hence the nested array format.
      *
-     * @param array<int, array<int, string|int|UnitEnum>> $transitions State definitions with valid targets
+     * @param array<int, list<TState>> $transitions State definitions with valid targets
      * @param string|null $description Optional description for debugging
      */
     public function __construct(array $transitions, ?string $description = null) {
@@ -144,7 +145,7 @@ class StateMachine extends Dispatcher {
     /**
      * Return the current state
      *
-     * @return string|int|UnitEnum
+     * @return TState
      */
     public function getCurrentState(): string|int|UnitEnum {
         return $this->state;
@@ -171,7 +172,7 @@ class StateMachine extends Dispatcher {
      * 6. exited listeners for old state
      * 7. entered listeners for new state
      *
-     * @param string|int|UnitEnum $targetState The state to transition to
+     * @param TState $targetState The state to transition to
      * @throws LogicException If transition is invalid or already transitioning
      */
     public function trigger(string|int|UnitEnum $targetState): void {
@@ -208,7 +209,7 @@ class StateMachine extends Dispatcher {
     /**
      * Register a listener that fires once when the current state exits
      *
-     * @param Closure $listener function(string|int|UnitEnum $oldState, string|int|UnitEnum $newState): void
+     * @param callable(TState, TState): void $listener
      */
     public function onExitCurrentState(Closure $listener): void {
         $this->exitCurrentListeners[] = $listener;
@@ -217,8 +218,8 @@ class StateMachine extends Dispatcher {
     /**
      * Subscribe to when a particular state is about to be entered
      *
-     * @param string|int|UnitEnum|array<string|int|UnitEnum> $targetStates
-     * @param Closure $listener function(string|int|UnitEnum $oldState, string|int|UnitEnum $newState): void
+     * @param TState|list<TState> $targetStates
+     * @param callable(TState, TState): void $listener
      */
     public function onEnteringState(string|int|UnitEnum|array $targetStates, Closure $listener): void {
         foreach ($this->filterStatesArgument($targetStates) as $state) {
@@ -229,8 +230,8 @@ class StateMachine extends Dispatcher {
     /**
      * Subscribe to when a particular state has been entered
      *
-     * @param string|int|UnitEnum|array<string|int|UnitEnum> $targetStates
-     * @param Closure $listener function(string|int|UnitEnum $oldState, string|int|UnitEnum $newState): void
+     * @param TState|list<TState> $targetStates
+     * @param callable(TState, TState): void $listener
      */
     public function onEnteredState(string|int|UnitEnum|array $targetStates, Closure $listener): void {
         foreach ($this->filterStatesArgument($targetStates) as $state) {
@@ -241,8 +242,8 @@ class StateMachine extends Dispatcher {
     /**
      * Subscribe to when a particular state is about to be exited
      *
-     * @param string|int|UnitEnum|array<string|int|UnitEnum> $targetStates
-     * @param Closure $listener function(string|int|UnitEnum $oldState, string|int|UnitEnum $newState): void
+     * @param TState|list<TState> $targetStates
+     * @param callable(TState, TState): void $listener
      */
     public function onExitingState(string|int|UnitEnum|array $targetStates, Closure $listener): void {
         foreach ($this->filterStatesArgument($targetStates) as $state) {
@@ -253,8 +254,8 @@ class StateMachine extends Dispatcher {
     /**
      * Subscribe to when a particular state has been exited
      *
-     * @param string|int|UnitEnum|array<string|int|UnitEnum> $targetStates
-     * @param Closure $listener function(string|int|UnitEnum $oldState, string|int|UnitEnum $newState): void
+     * @param TState|list<TState> $targetStates
+     * @param callable(TState, TState): void $listener
      */
     public function onExitedState(string|int|UnitEnum|array $targetStates, Closure $listener): void {
         foreach ($this->filterStatesArgument($targetStates) as $state) {
@@ -265,7 +266,7 @@ class StateMachine extends Dispatcher {
     /**
      * Subscribe to get notified about all state transitions
      *
-     * @param Closure ...$listeners function(string|int|UnitEnum $oldState, string|int|UnitEnum $newState): void
+     * @param callable(TState, TState): void ...$listeners
      */
     public function listen(Closure ...$listeners): void {
         foreach ($listeners as $listener) {
@@ -278,7 +279,7 @@ class StateMachine extends Dispatcher {
      *
      * Removes ALL subscriptions for the provided closures.
      *
-     * @param Closure ...$listeners
+     * @param callable(TState, TState): void ...$listeners
      */
     public function off(Closure ...$listeners): void {
         self::filterArrays($listeners,
@@ -308,7 +309,7 @@ class StateMachine extends Dispatcher {
     /**
      * Assert that the provided states exist in the state machine
      *
-     * @param string|int|UnitEnum ...$states
+     * @param TState ...$states
      * @throws LogicException If any state is unknown
      */
     protected function assertStateExists(string|int|UnitEnum ...$states): void {
@@ -322,7 +323,7 @@ class StateMachine extends Dispatcher {
     /**
      * Assert that the provided state is a valid target from current state
      *
-     * @param string|int|UnitEnum $state
+     * @param TState $state
      * @throws LogicException If transition is invalid
      */
     protected function assertValidTargetState(string|int|UnitEnum $state): void {
@@ -354,8 +355,8 @@ class StateMachine extends Dispatcher {
     /**
      * Normalize state arguments (handles arrays, recursion)
      *
-     * @param string|int|UnitEnum|array<string|int|UnitEnum> ...$states
-     * @return array<int, string|int|UnitEnum>
+     * @param TState|list<TState> ...$states
+     * @return list<TState>
      */
     protected function filterStatesArgument(string|int|UnitEnum|array ...$states): array {
         $result = [];
@@ -377,7 +378,7 @@ class StateMachine extends Dispatcher {
      *
      * UnitEnums use their name, others pass through.
      *
-     * @param string|int|UnitEnum $state
+     * @param TState $state
      * @return string|int
      */
     private static function scalarState(string|int|UnitEnum $state): string|int {

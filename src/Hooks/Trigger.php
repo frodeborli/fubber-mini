@@ -8,12 +8,17 @@ use LogicException;
  * Event that can only trigger ONCE
  * Late subscribers are called immediately with the original trigger data
  *
+ * @template TPayload The primary payload type passed to listeners
  * @package mini\Hooks
  */
 class Trigger extends Dispatcher {
 
     protected bool $triggered = false;
+
+    /** @var list<mixed> */
     protected array $data = [];
+
+    /** @var list<callable(TPayload, mixed...): void> */
     protected array $listeners = [];
 
     /**
@@ -28,8 +33,9 @@ class Trigger extends Dispatcher {
     /**
      * Activate the trigger and run all listeners
      *
-     * @param mixed ...$args
-     * @throws LogicException
+     * @param TPayload $payload
+     * @param mixed ...$args Additional arguments
+     * @throws LogicException If already triggered
      */
     public function trigger(mixed ...$args): void {
         if ($this->triggered) {
@@ -46,7 +52,7 @@ class Trigger extends Dispatcher {
      * Subscribe to this trigger
      * If already triggered, listener is called immediately
      *
-     * @param Closure ...$listeners
+     * @param callable(TPayload, mixed...): void ...$listeners
      */
     public function listen(Closure ...$listeners): void {
         if ($this->triggered) {
@@ -61,7 +67,7 @@ class Trigger extends Dispatcher {
     /**
      * Unsubscribe from this trigger
      *
-     * @param Closure ...$listeners
+     * @param callable(TPayload, mixed...): void ...$listeners
      */
     public function off(Closure ...$listeners): void {
         self::filterArrays($listeners, $this->listeners);

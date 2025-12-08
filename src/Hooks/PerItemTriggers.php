@@ -9,6 +9,8 @@ use WeakMap;
  * Event dispatcher that triggers once per source (string or object)
  * After triggering for a source, new subscribers are called immediately
  *
+ * @template TSource of string|object The source identifier type
+ * @template TPayload The payload type passed to listeners
  * @package mini\Hooks
  */
 class PerItemTriggers extends Dispatcher {
@@ -16,35 +18,35 @@ class PerItemTriggers extends Dispatcher {
     /**
      * String sources that triggered
      *
-     * @var array<string, array>
+     * @var array<string, list<mixed>>
      */
     protected array $triggeredStrings = [];
 
     /**
      * Object sources that triggered
      *
-     * @var WeakMap<object, array>
+     * @var WeakMap<object, list<mixed>>
      */
     protected readonly WeakMap $triggeredObjects;
 
     /**
      * Listeners on string sources
      *
-     * @var array<string, Closure[]>
+     * @var array<string, list<callable(TSource, TPayload, mixed...): void>>
      */
     protected array $stringListeners = [];
 
     /**
      * Listeners on object sources
      *
-     * @var WeakMap<object, Closure[]>
+     * @var WeakMap<object, list<callable(TSource, TPayload, mixed...): void>>
      */
     protected readonly WeakMap $objectListeners;
 
     /**
      * Listeners on all events
      *
-     * @var Closure[]
+     * @var list<callable(TSource, TPayload, mixed...): void>
      */
     protected array $listeners = [];
 
@@ -57,7 +59,7 @@ class PerItemTriggers extends Dispatcher {
     /**
      * Was this event triggered for a specific source?
      *
-     * @param string|object $source
+     * @param TSource $source
      * @return bool
      */
     public function wasTriggeredFor(string|object $source): bool {
@@ -71,9 +73,10 @@ class PerItemTriggers extends Dispatcher {
     /**
      * Trigger event for a specific source
      *
-     * @param string|object $source
-     * @param mixed ...$data
-     * @throws LogicException
+     * @param TSource $source
+     * @param TPayload $payload
+     * @param mixed ...$data Additional arguments
+     * @throws LogicException If already triggered for this source
      */
     public function triggerFor(string|object $source, mixed ...$data): void {
         if ($this->wasTriggeredFor($source)) {
@@ -111,7 +114,7 @@ class PerItemTriggers extends Dispatcher {
     /**
      * Subscribe to all events (receives source as first arg)
      *
-     * @param Closure ...$listeners
+     * @param callable(TSource, TPayload, mixed...): void ...$listeners
      */
     public function listen(Closure ...$listeners): void {
         foreach ($listeners as $listener) {
@@ -123,8 +126,8 @@ class PerItemTriggers extends Dispatcher {
      * Subscribe to a specific source
      * If already triggered, listener is called immediately
      *
-     * @param string|object $source
-     * @param Closure ...$listeners
+     * @param TSource $source
+     * @param callable(TSource, TPayload, mixed...): void ...$listeners
      */
     public function listenFor(string|object $source, Closure ...$listeners): void {
         if (\is_object($source)) {
@@ -153,11 +156,19 @@ class PerItemTriggers extends Dispatcher {
     /**
      * Unsubscribe from event
      *
-     * @param Closure ...$listeners
+     * @param callable(TSource, TPayload, mixed...): void ...$listeners
      */
     public function off(Closure ...$listeners): void {
         self::filterArrays($listeners, $this->listeners);
-        self::filterArrays($listeners, ...$this->stringListeners);
+
+        foreach ($this->stringListeners as $source => $array) {
+            self::filterArrays($listeners, $array);
+            if ($array === []) {
+                unset($this->stringListeners[$source]);
+            } else {
+                $this->stringListeners[$source] = $array;
+            }
+        }
 
         foreach ($this->objectListeners as $object => $array) {
             self::filterArrays($listeners, $array);

@@ -8,18 +8,20 @@ use Throwable;
  * Chain of listeners that transform a value
  * Each listener receives the value and returns a (potentially) modified version
  *
+ * @template TValue The type being filtered/transformed
  * @package mini\Hooks
  */
 class Filter extends Dispatcher {
 
+    /** @var list<callable(TValue, mixed...): TValue> */
     protected array $listeners = [];
 
     /**
      * Filter a value through all registered listeners
      *
-     * @param mixed $value The value to filter
-     * @param mixed ...$args Extra arguments passed to listeners
-     * @return mixed Filtered value
+     * @param TValue $value The value to filter
+     * @param mixed ...$args Extra context arguments passed to listeners
+     * @return TValue Filtered value
      */
     public function filter(mixed $value, mixed ...$args): mixed {
         try {
@@ -40,7 +42,7 @@ class Filter extends Dispatcher {
      * Register a filter function
      * Function MUST return the value (modified or not)
      *
-     * @param Closure ...$listeners
+     * @param callable(TValue, mixed...): TValue ...$listeners
      */
     public function listen(Closure ...$listeners): void {
         foreach ($listeners as $listener) {
@@ -51,7 +53,7 @@ class Filter extends Dispatcher {
     /**
      * Unsubscribe filter function
      *
-     * @param Closure ...$listeners
+     * @param callable(TValue, mixed...): TValue ...$listeners
      */
     public function off(Closure ...$listeners): void {
         self::filterArrays($listeners, $this->listeners);
