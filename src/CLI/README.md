@@ -1,438 +1,146 @@
 # CLI - Command Line Interface
 
-## Philosophy
+For simple scripts, use `$_SERVER['argv']` directly. Use `args()` when you need structured option parsing or subcommands.
 
-Mini provides **optional argument parsing** that respects `$_SERVER['argv']`. We don't hide PHP's native CLI toolsArgManager is a convenience layer for when you need structured argument parsing. For simple scripts, use `$_SERVER['argv']` directly.
-
-**Key Principles:**
-- **Optional convenience** - Use `args()` when helpful, `$_SERVER['argv']` when simple
-- **Subcommand support** - Parse multi-level commands (e.g., `git commit -m "msg"`)
-- **getopt-style syntax** - Short (`-v`) and long (`--verbose`) options
-- **Immutable design** - Returns new instances, doesn't modify globals
-- **Position tracking** - Clean delegation to external commands
-
-## Setup
-
-No configuration needed! ArgManager is automatically registered:
+## Quick Start
 
 ```php
 #!/usr/bin/env php
 <?php
-require_once __DIR__ . '/vendor/autoload.php';
-
+require_once __DIR__ . '/../vendor/autoload.php';
 use function mini\args;
 
-$args = args();
-echo "Command: " . $args->getCommand() . "\n";
-```
+args(args()->withFlag('v', 'verbose')->withRequiredValue('o', 'output'));
 
-### Custom ArgManager Configuration
-
-```php
-<?php
-// _config/mini/CLI/ArgManager.php
-
-return (new mini\CLI\ArgManager(0))
-    ->withSupportedArgs('v', ['verbose', 'config:', 'help'], 0);
-```
-
-## Common Usage Examples
-
-### Basic Argument Parsing
-
-```php
-#!/usr/bin/env php
-<?php
-// bin/greet
-// Usage: bin/greet Alice Bob --greeting="Hello"
-
-require_once __DIR__ . '/../vendor/autoload.php';
-
-$args = args()
-    ->withSupportedArgs('', ['greeting:'], 1);  // At least 1 positional arg
-
-$greeting = $args->opts['greeting'] ?? 'Hi';
-
-foreach ($args->args as $name) {
-    echo "$greeting, $name!\n";
-}
-```
-
-```bash
-$ bin/greet Alice Bob --greeting="Hello"
-Hello, Alice!
-Hello, Bob!
-```
-
-### Short and Long Options
-
-```php
-#!/usr/bin/env php
-<?php
-// bin/example
-// Usage: bin/example -v --config=file.ini
-
-$args = args()
-    ->withSupportedArgs('v', ['verbose', 'config:', 'help']);
-
-if (isset($args->opts['v']) || isset($args->opts['verbose'])) {
-    echo "Verbose mode enabled\n";
-}
-
-if (isset($args->opts['config'])) {
-    echo "Config: " . $args->opts['config'] . "\n";
-}
-
-if (isset($args->opts['help'])) {
-    echo "Usage: bin/example [options]\n";
-    exit(0);
-}
-```
-
-### Repeated Options
-
-```php
-#!/usr/bin/env php
-<?php
-// bin/verbose
-// Usage: bin/verbose -vvv
-
-$args = args()
-    ->withSupportedArgs('v');
-
-$verbosity = is_array($args->opts['v'] ?? null)
-    ? count($args->opts['v'])
-    : (isset($args->opts['v']) ? 1 : 0);
-
-echo "Verbosity level: $verbosity\n";
-```
-
-```bash
-$ bin/verbose -vvv
-Verbosity level: 3
-```
-
-### Subcommands
-
-```php
-#!/usr/bin/env php
-<?php
-// bin/app
-// Usage: bin/app user create --name="John"
-// Usage: bin/app user list
-
-$root = args();
-
-match ($root->getCommand()) {
-    'user' => handleUserCommand($root->nextCommand()),
-    'post' => handlePostCommand($root->nextCommand()),
-    default => die("Unknown command\n")
-};
-
-function handleUserCommand($cmd) {
-    match ($cmd->getCommand()) {
-        'create' => createUser($cmd),
-        'list' => listUsers($cmd),
-        default => die("Unknown user command\n")
-    };
-}
-
-function createUser($cmd) {
-    $args = $cmd->withSupportedArgs('', ['name:', 'email:']);
-
-    echo "Creating user: " . $args->opts['name'] . "\n";
-    echo "Email: " . $args->opts['email'] . "\n";
-}
-
-function listUsers($cmd) {
-    $args = $cmd->withSupportedArgs('', ['limit::']);
-
-    $limit = $args->opts['limit'] ?? 10;
-    echo "Listing $limit users\n";
-}
-```
-
-```bash
-$ bin/app user create --name="John" --email="john@example.com"
-Creating user: John
-Email: john@example.com
-
-$ bin/app user list --limit=5
-Listing 5 users
-```
-
-## Advanced Examples
-
-### Required and Optional Arguments
-
-```php
-#!/usr/bin/env php
-<?php
-// bin/deploy
-// Usage: bin/deploy production [branch]
-
-$args = args()
-    ->withSupportedArgs(
-        '',           // No short options
-        ['dry-run'],  // Long options
-        1,            // 1 required positional arg (environment)
-        1             // 1 optional arg (branch)
-    );
-
-$environment = $args->args[0];
-$branch = $args->args[1] ?? 'main';
-$dryRun = isset($args->opts['dry-run']);
-
-echo "Deploying $branch to $environment" . ($dryRun ? " (dry run)" : "") . "\n";
-```
-
-```bash
-$ bin/deploy production
-Deploying main to production
-
-$ bin/deploy staging feature-123 --dry-run
-Deploying feature-123 to staging (dry run)
-```
-
-### Mixed Short and Long Options
-
-```php
-#!/usr/bin/env php
-<?php
-// bin/search
-// Usage: bin/search query -i --match=pattern
-
-$args = args()
-    ->withSupportedArgs(
-        'ivwx',                      // Short options
-        ['match:', 'limit::'],       // Long options
-        1                             // 1 required arg (query)
-    );
-
-$query = $args->args[0];
-$caseInsensitive = isset($args->opts['i']);
-$pattern = $args->opts['match'] ?? null;
-
-echo "Searching for: $query\n";
-if ($caseInsensitive) echo "Case insensitive\n";
-if ($pattern) echo "Pattern: $pattern\n";
-```
-
-### Option Value Types
-
-```php
-#!/usr/bin/env php
-<?php
-// Demonstrate option types
-
-$args = args()
-    ->withSupportedArgs(
-        'f:v::',                  // -f requires value, -v optional value
-        ['file:', 'verbose::']    // --file requires, --verbose optional
-    );
-
-// Required value options
-// -f value or --file=value or --file value
-if (isset($args->opts['f'])) {
-    echo "File (short): " . $args->opts['f'] . "\n";
-}
-if (isset($args->opts['file'])) {
-    echo "File (long): " . $args->opts['file'] . "\n";
-}
-
-// Optional value options
-// -v or -v value
-// --verbose or --verbose=value or --verbose value
-$verbose = $args->opts['v'] ?? $args->opts['verbose'] ?? null;
-if ($verbose !== null) {
-    echo "Verbose: " . ($verbose === false ? "on" : $verbose) . "\n";
-}
-```
-
-### Using Raw $_SERVER['argv']
-
-```php
-#!/usr/bin/env php
-<?php
-// Simple script doesn't need ArgManager
-
-if ($argc < 2) {
-    die("Usage: {$argv[0]} <name>\n");
-}
-
-$name = $argv[1];
-echo "Hello, $name!\n";
-```
-
-### Integration with Mini
-
-```php
-#!/usr/bin/env php
-<?php
-// bin/db-query
-// Usage: bin/db-query "SELECT * FROM users WHERE id = ?" 123
-
-require_once __DIR__ . '/../vendor/autoload.php';
-
-$args = args()
-    ->withSupportedArgs('', ['format:'], 1);  // SQL query required
-
-$sql = $args->args[0];
-$params = array_slice($args->args, 1);
-$format = $args->opts['format'] ?? 'table';
-
-$results = db()->query($sql, $params);
-
-match ($format) {
-    'json' => echo json_encode($results, JSON_PRETTY_PRINT) . "\n",
-    'csv' => printCsv($results),
-    default => printTable($results)
-};
-```
-
-### Error Handling
-
-```php
-#!/usr/bin/env php
-<?php
-
-try {
-    $args = args()
-        ->withSupportedArgs('', ['config:'], 1);  // Config required
-
-    $query = $args->args[0];
-    $config = $args->opts['config'];
-
-    // ... process
-} catch (\RuntimeException $e) {
-    fwrite(STDERR, "Error: " . $e->getMessage() . "\n");
-    fwrite(STDERR, "Usage: {$_SERVER['argv'][0]} <query> --config=<file>\n");
+if (args()->getUnparsedArgs()) {
+    fwrite(STDERR, "Unexpected: " . implode(', ', args()->getUnparsedArgs()) . "\n");
     exit(1);
 }
+
+if (args()->getFlag('verbose')) {
+    echo "Verbose mode\n";
+}
+$output = args()->getOption('output');
 ```
 
-## Option Syntax
+## Declaring Options
 
-### Short Options
-
-| Pattern | Meaning | Example |
-|---------|---------|---------|
-| `v` | Boolean flag | `-v` |
-| `v:` | Required value | `-v value` |
-| `v::` | Optional value | `-v` or `-v value` |
-
-Combinations:
 ```php
--vvv         // v counted 3 times
--abc         // Three boolean flags
--f file.txt  // f with required value
+args(args()
+    ->withFlag('v', 'verbose')                         // -v or --verbose (counting)
+    ->withFlag('h', null)                              // -h only
+    ->withFlag(null, 'dry-run')                        // --dry-run only
+    ->withRequiredValue('c', 'config')                 // -c file or --config=file
+    ->withOptionalValue('l', 'log')                    // --log or --log=file
+    ->withOptionalValue('o', 'out', '/dev/stdout')    // default when present without value
+    ->withSubcommand('run', 'build', 'test')           // declared subcommands
+);
 ```
 
-### Long Options
+## Querying Values
 
-| Pattern | Meaning | Example |
-|---------|---------|---------|
-| `verbose` | Boolean flag | `--verbose` |
-| `file:` | Required value | `--file=path` or `--file path` |
-| `limit::` | Optional value | `--limit` or `--limit=10` |
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `getFlag('name')` | `int` | Count of times flag appeared (0 if absent) |
+| `getOption('name')` | `string\|false\|array\|null` | Option value (see below) |
+| `hasOption('name')` | `bool` | True if option was present |
+| `getUnparsedArgs()` | `string[]` | Arguments not matched by declared options/subcommands |
+| `getCommand()` | `string\|null` | Current command name |
+| `nextCommand()` | `ArgManager\|null` | ArgManager for matched subcommand |
+| `getRemainingArgs()` | `string[]` | Remaining argv for delegation (strips leading `--`) |
 
-### Positional Arguments
+`getOption()` return values:
 
-```php
-->withSupportedArgs(
-    'v',          // Options
-    ['verbose'],
-    2,            // 2 required positional args
-    1             // Plus 1 optional arg
-)
+| CLI input | getOption() result |
+|-----------|-------------------|
+| *(not present)* | `null` |
+| `--log` | `false` (or default if specified) |
+| `--log=file` | `"file"` |
+| `--log=a --log=b` | `["a", "b"]` |
+
+Flags can be repeated for counting (short and long forms are combined):
+```bash
+myapp -vvv              # getFlag('verbose') returns 3
+myapp -v -v --verbose   # same result
 ```
 
-## Configuration
-
-**Config File:** `_config/mini/CLI/ArgManager.php` (optional)
-
-**Environment Variables:** None - argument parsing is per-invocation
-
-## Overriding the Service
-
-```php
-// _config/mini/CLI/ArgManager.php
-
-// Pre-configure global options
-return (new mini\CLI\ArgManager(0))
-    ->withSupportedArgs('v', ['verbose', 'help', 'version']);
+Options with values accept multiple formats:
+```bash
+myapp -cfile.txt        # attached
+myapp -c file.txt       # separate
+myapp --config=file.txt # long with =
+myapp --config file.txt # long separate
 ```
 
-## CLI Scope
-
-ArgManager is **Singleton** - one instance shared, but typically you create new instances via `nextCommand()` or `withSupportedArgs()` for each subcommand context.
-
-## Best Practices
-
-### 1. Use Raw $argv for Simple Scripts
+## Subcommands
 
 ```php
-// Good: Simple script
-if ($argc < 2) die("Usage: script <file>\n");
-$file = $argv[1];
+#!/usr/bin/env php
+<?php
+// bin/myapp - Usage: myapp [-v] <command> [options]
+use function mini\args;
 
-// Avoid: Over-engineering
-$args = args()->withSupportedArgs('', [], 1);
-$file = $args->args[0];
-```
+args(args()
+    ->withFlag('v', 'verbose')
+    ->withSubcommand('run', 'build')
+);
 
-### 2. Parse Options Early
+if (args()->getUnparsedArgs()) {
+    die("Unknown: " . implode(', ', args()->getUnparsedArgs()));
+}
 
-```php
-// Good: Parse once at start
-$args = args()->withSupportedArgs('v', ['config:']);
-$verbose = isset($args->opts['v']);
-
-// Avoid: Multiple parsing calls
-$args1 = args()->withSupportedArgs('v');
-$args2 = args()->withSupportedArgs('', ['config:']);
-```
-
-### 3. Provide Help Text
-
-```php
-if (isset($args->opts['help'])) {
-    echo <<<HELP
-Usage: bin/deploy [options] <environment> [branch]
-
-Options:
-  --dry-run    Simulate deployment without making changes
-  --verbose    Show detailed output
-  --help       Show this help message
-
-Arguments:
-  environment  Target environment (production, staging, dev)
-  branch       Git branch to deploy (default: main)
-HELP;
-    exit(0);
+if ($sub = args()->nextCommand()) {
+    args($sub);
+    match (args()->getCommand()) {
+        'run' => require __DIR__ . '/commands/run.php',
+        'build' => require __DIR__ . '/commands/build.php',
+    };
 }
 ```
 
-### 4. Validate Arguments
+Each subcommand file uses the same pattern:
+```php
+<?php
+// commands/run.php
+use function mini\args;
+
+args(args()->withFlag(null, 'fast'));
+
+if (args()->getUnparsedArgs()) {
+    die("Unexpected: " . implode(', ', args()->getUnparsedArgs()));
+}
+
+echo args()->getFlag('fast') ? "Fast mode\n" : "Normal mode\n";
+```
+
+## Double-Dash (--)
+
+Everything after `--` goes to `getUnparsedArgs()`:
+```bash
+myapp -v -- --not-an-option file.txt
+```
+```php
+args()->getUnparsedArgs();  // ['--not-an-option', 'file.txt']
+```
+
+## Delegating to External Commands
 
 ```php
-$args = args()->withSupportedArgs('', ['env:'], 1);
+args(args()->withSubcommand('proxy'));
 
-$validEnvs = ['production', 'staging', 'dev'];
-if (!in_array($args->opts['env'], $validEnvs)) {
-    die("Invalid environment. Must be: " . implode(', ', $validEnvs) . "\n");
+if ($sub = args()->nextCommand()) {
+    args($sub);
+    $remaining = args()->getRemainingArgs();  // strips leading -- automatically
+    passthru('external-tool ' . implode(' ', array_map('escapeshellarg', $remaining)));
 }
 ```
 
-### 5. Use Exit Codes
+## Unit Testing
+
+For tests, create ArgManager directly instead of using the global `args()`:
 
 ```php
-try {
-    $args = args()->withSupportedArgs('', [], 1);
-    // ... process
-    exit(0);  // Success
-} catch (\Exception $e) {
-    fwrite(STDERR, "Error: " . $e->getMessage() . "\n");
-    exit(1);  // Failure
-}
+$_SERVER['argv'] = ['myapp', '-v', '--config=test.cfg'];
+$args = (new ArgManager())->withFlag('v', 'verbose')->withRequiredValue('c', 'config');
+$this->assertSame(1, $args->getFlag('verbose'));
 ```

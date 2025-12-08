@@ -3,7 +3,6 @@
 namespace mini;
 
 use mini\CLI\ArgManager;
-use mini\Mini;
 
 /**
  * CLI Feature - Global Helper Functions
@@ -11,40 +10,70 @@ use mini\Mini;
  * These functions provide the public API for the mini\CLI feature.
  */
 
-// Register ArgManager service
-Mini::$mini->addService(ArgManager::class, Lifetime::Singleton, fn() => Mini::$mini->loadServiceConfig(ArgManager::class));
-
 /**
- * Returns the root ArgManager instance for parsing CLI arguments
+ * Get or set the current ArgManager instance for CLI argument parsing
  *
- * This is Mini's convenience helper for building CLI applications.
- * Like all Mini helpers, it's optional - you can always use $_SERVER['argv']
- * directly if you prefer.
+ * Returns an unconfigured ArgManager on first call. Use the pattern:
+ *   args(args()->withFlag(...)->withSubcommand(...));
  *
- * The root ArgManager can be configured via config file following Mini's
- * standard pattern. Mini will search for:
- *   1. _config/mini/CLI/ArgManager.php (application config)
- *   2. vendor/fubber/mini/config/mini/CLI/ArgManager.php (framework default)
+ * This same pattern works at every command level - root command and subcommands
+ * all configure themselves identically.
  *
- * The config file should return a configured ArgManager instance.
+ * @param ArgManager|null $args ArgManager instance to set, or null to retrieve
+ * @return ArgManager The current ArgManager
  *
- * Example (_config/mini/CLI/ArgManager.php):
- *   <?php
- *   return (new mini\CLI\ArgManager(0))
- *       ->withSupportedArgs('v', ['verbose', 'config:'], 0);
+ * @example Simple command
+ * ```php
+ * // bin/myapp
+ * args(args()->withFlag('v', 'verbose')->withRequiredValue('o', 'output'));
  *
- * Example (usage in CLI script):
- *   $root = mini\args();
- *   $verbosity = isset($root->opts['v']) ? (is_array($root->opts['v']) ? count($root->opts['v']) : 1) : 0;
- *   $cmd = $root->nextCommand();
- *   // ... handle subcommand
+ * if (args()->getUnparsedArgs()) {
+ *     die("Unexpected: " . implode(', ', args()->getUnparsedArgs()));
+ * }
  *
- * Alternative (direct container access):
- *   $root = Mini::$mini->get(mini\CLI\ArgManager::class);
+ * if (args()->getFlag('verbose')) {
+ *     echo "Verbose mode\n";
+ * }
+ * ```
  *
- * @return ArgManager Root argument manager starting at index 0
+ * @example Command with subcommands
+ * ```php
+ * // bin/myapp
+ * args(args()->withFlag('v', 'verbose')->withSubcommand('run', 'build'));
+ *
+ * if (args()->getUnparsedArgs()) {
+ *     die("Unexpected: " . implode(', ', args()->getUnparsedArgs()));
+ * }
+ *
+ * if ($sub = args()->nextCommand()) {
+ *     args($sub);  // Hand off to subcommand
+ *     require __DIR__ . '/commands/' . $sub->getCommand() . '.php';
+ * }
+ * ```
+ *
+ * @example Subcommand file (commands/run.php)
+ * ```php
+ * // Subcommand configures itself - same pattern as root
+ * args(args()->withFlag(null, 'fast')->withRequiredValue('t', 'target'));
+ *
+ * if (args()->getUnparsedArgs()) {
+ *     die("Unexpected: " . implode(', ', args()->getUnparsedArgs()));
+ * }
+ *
+ * $fast = args()->getFlag('fast');
+ * $target = args()->getOption('target');
+ * ```
  */
-function args(): ArgManager
+function args(?ArgManager $args = null): ArgManager
 {
-    return Mini::$mini->get(ArgManager::class);
+    static $instance = null;
+
+    if ($args !== null) {
+        $instance = $args;
+    }
+
+    // Return unconfigured ArgManager by default
+    $instance ??= new ArgManager();
+
+    return $instance;
 }
