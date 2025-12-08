@@ -98,7 +98,7 @@ Routes can return any value - converters transform it to a PSR-7 Response:
 
 ```php
 // _routes/api/users.php
-return ['users' => db()->query("SELECT * FROM users")->fetchAll()];
+return ['users' => db()->query("SELECT * FROM users")->toArray()];
 // Automatically converted to JSON response
 
 // _routes/ping.php
@@ -106,9 +106,9 @@ return "pong";
 // Automatically converted to text/plain response
 
 // _routes/profile.php
-$user = db()->query("SELECT * FROM users WHERE id = ?", [$_GET['id']])->fetch();
+$user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$_GET['id']]);
 return $user ?: throw new NotFoundException('User not found');
-// Object converted to JSON, or exception converted to 404 error page
+// Array converted to JSON, or exception converted to 404 error page
 ```
 
 ### Exception to HTTP Response
@@ -275,6 +275,29 @@ $registry->register(function(int|bool $data): ResponseInterface { /* ... */ });
 $registry->register(function(string $text): ResponseInterface { /* ... */ });
 ```
 
+### Replacing Converters
+
+Use `replace()` to override existing converters without throwing conflicts:
+
+```php
+// Override the default string→Response converter
+$registry->replace(function(string $text): ResponseInterface {
+    return new Response(200, ['Content-Type' => 'text/html'], "<p>$text</p>");
+});
+```
+
+### Named Targets
+
+Register converters with custom target names (bypasses return type validation):
+
+```php
+// Convert BackedEnum to SQL value
+$registry->register(fn(\BackedEnum $e) => $e->value, 'sql-value');
+
+// Later, use with the named target
+$value = $registry->convert($myEnum, 'sql-value');
+```
+
 ## Interface & Implementation
 
 ### ConverterInterface
@@ -333,9 +356,15 @@ $converter->getOutputType(); // "Psr\Http\Message\ResponseInterface"
 ```php
 $registry = new ConverterRegistry();
 
-// Register converter
+// Register converter (throws if duplicate)
 $registry->register($converter);  // ConverterInterface
 $registry->register($closure);    // \Closure (wrapped in ClosureConverter)
+
+// Replace existing converter (allows override)
+$registry->replace($closure);     // Overwrites existing without conflict
+
+// Named target (bypasses return type validation)
+$registry->register(fn(\BackedEnum $e) => $e->value, 'sql-value');
 
 // Check if converter exists
 $has = $registry->has($input, ResponseInterface::class);
@@ -383,7 +412,7 @@ $registry->register(function(NotFoundException $e): ResponseInterface {
 
 // Usage in routes
 // _routes/api/users.php
-$user = db()->query("SELECT * FROM users WHERE id = ?", [$_GET['id']])->fetch();
+$user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$_GET['id']]);
 if (!$user) {
     throw new NotFoundException('User not found');
 }
@@ -434,7 +463,7 @@ $registry->register(function(ProductCollection $collection): ResponseInterface {
 // _routes/products.php
 $products = array_map(
     fn($row) => new Product($row['id'], $row['name'], $row['price']),
-    db()->query("SELECT * FROM products")->fetchAll()
+    db()->query("SELECT * FROM products")->toArray()
 );
 return new ProductCollection($products);
 ```
@@ -469,7 +498,7 @@ $registry->register(function(array $data): ResponseInterface {
 
 // Single route handler supports all formats
 // _routes/api/users.php
-return ['users' => db()->query("SELECT * FROM users")->fetchAll()];
+return ['users' => db()->query("SELECT * FROM users")->toArray()];
 // Returns JSON, XML, or HTML based on Accept header
 ```
 
