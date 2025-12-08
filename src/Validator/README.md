@@ -165,6 +165,51 @@ class Product {
 $validator = validator(Product::class);
 ```
 
+### Reusable Validator Library
+
+Define a library of reusable field validators and compose them into form validators:
+
+```php
+use mini\Validator\Attributes as V;
+
+// Define reusable validators as class properties
+class Validators {
+    #[V\Type('string')]
+    #[V\MinLength(3, 'Username must be at least 3 characters.')]
+    #[V\MaxLength(20, 'Username cannot exceed 20 characters.')]
+    #[V\Pattern('/^[a-zA-Z0-9_]+$/', 'Only letters, numbers, and underscores.')]
+    #[V\Required('Username is required.')]
+    public string $username;
+
+    #[V\Type('string')]
+    #[V\Format('email', 'Please enter a valid email.')]
+    #[V\Required('Email is required.')]
+    public string $email;
+
+    #[V\Type('string')]
+    #[V\MinLength(8, 'Password must be at least 8 characters.')]
+    #[V\Required('Password is required.')]
+    public string $password;
+}
+
+// Compose into different forms by picking the validators you need
+$loginForm = validator()
+    ->type('object')
+    ->forProperty('username', validator(Validators::class)->username)
+    ->forProperty('password', validator(Validators::class)->password);
+
+$registrationForm = validator()
+    ->type('object')
+    ->forProperty('username', validator(Validators::class)->username)
+    ->forProperty('email', validator(Validators::class)->email)
+    ->forProperty('password', validator(Validators::class)->password);
+
+// Each form has its own validation with shared, consistent rules
+$errors = $loginForm->isInvalid($_POST);
+```
+
+Property validators are accessed via magic `__get`, making composition feel natural.
+
 ### Validator Registry & Caching
 
 Validators are automatically cached for performance:
@@ -173,7 +218,7 @@ Validators are automatically cached for performance:
 // First call: builds from attributes
 $validator = validator(User::class);
 
-// Subsequent calls: returns cached validator (0.0005ms per call)
+// Subsequent calls: returns cached validator
 $validator = validator(User::class);
 ```
 
