@@ -38,19 +38,36 @@ if ($error) {
 
 ### Return Values
 
-`isInvalid($value)` returns:
-- `null` if the value is valid
-- `string|Stringable` error message for scalar validators
-- `array<string, string|Stringable>` of field errors for object validators
+`isInvalid($value)` returns `null` if valid, or a `ValidationError` if invalid. The `ValidationError` class implements:
+- **Stringable**: Cast to string for the error message
+- **ArrayAccess**: Access property errors via `$error['fieldName']`
+- **IteratorAggregate**: Iterate over property errors with `foreach`
+- **JsonSerializable**: Export for API responses
 
 ```php
-// Scalar validation returns string or null
+// Scalar validation
 $error = $stringValidator->isInvalid($value);
+if ($error) {
+    echo $error; // "Must be at least 3 characters."
+}
 
-// Object validation returns array or null
-$errors = $objectValidator->isInvalid($data);
-if ($errors) {
-    // ['username' => 'Too short.', 'email' => 'Invalid format.']
+// Object validation - access property errors
+$error = $objectValidator->isInvalid($data);
+if ($error) {
+    echo $error;              // "Validation failed."
+    echo $error['username'];  // "Username is required."
+    echo $error['email'];     // "Invalid email format."
+
+    // Iterate all errors
+    foreach ($error as $field => $fieldError) {
+        echo "$field: $fieldError\n";
+    }
+
+    // Nested objects
+    echo $error['address']['city']; // drills down
+
+    // JSON for APIs
+    echo json_encode($error);
 }
 ```
 
@@ -663,7 +680,7 @@ if ($error) {
 
 ## Performance
 
-- **No reflection at runtime** - Attributes are processed once when building validators; validation uses direct calls only
+- **Cached validators** - Validators built from attributes are cached; subsequent calls return clones instantly
 - **Fail-fast** - Validation stops at first error for simple values
 - **Efficient** - Shallow clones for immutability (no deep copying)
 - **Zero overhead** - JSON Schema export via simple array serialization

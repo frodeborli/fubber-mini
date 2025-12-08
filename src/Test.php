@@ -198,9 +198,13 @@ abstract class Test
         }
     }
 
-    protected function assertArrayHasKey(string|int $key, array $array, string $message = ''): void
+    protected function assertArrayHasKey(string|int $key, array|\ArrayAccess $array, string $message = ''): void
     {
-        if (!array_key_exists($key, $array)) {
+        $exists = $array instanceof \ArrayAccess
+            ? $array->offsetExists($key)
+            : array_key_exists($key, $array);
+
+        if (!$exists) {
             throw new \AssertionError($message ?: "Array does not have key '$key'");
         }
     }

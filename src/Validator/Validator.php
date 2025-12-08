@@ -101,9 +101,9 @@ class Validator implements \JsonSerializable
      * Invokable: $validator($value)
      *
      * @param mixed $value
-     * @return null|array|string|Stringable
+     * @return ?ValidationError
      */
-    public function __invoke(mixed $value): null|array|string|Stringable
+    public function __invoke(mixed $value): ?ValidationError
     {
         return $this->isInvalid($value);
     }
@@ -111,16 +111,17 @@ class Validator implements \JsonSerializable
     /**
      * Check if value is invalid
      *
-     * Returns null if valid, or error message(s) if invalid.
-     *
-     * For single field validation: Returns null or first error (string|Stringable)
-     * For object/array validation: Returns null or array of field errors
+     * Returns null if valid, or ValidationError if invalid. The ValidationError is:
+     * - Stringable: echo $error outputs the message
+     * - ArrayAccess: $error['field'] accesses property errors
+     * - IteratorAggregate: foreach ($error as $field => $fieldError)
+     * - JsonSerializable: json_encode($error) for API responses
      *
      * @param mixed $value Value to validate
      * @param mixed $context Parent context (containing object/array) for custom validators
-     * @return null|array|string|Stringable Null if valid, error(s) if invalid
+     * @return ?ValidationError Null if valid, ValidationError if invalid
      */
-    public function isInvalid(mixed $value, mixed $context = null): null|array|string|Stringable
+    public function isInvalid(mixed $value, mixed $context = null): ?ValidationError
     {
         // Check required first
         // Note: For validators with property rules or array item rules, [] is not "empty" -
@@ -133,7 +134,7 @@ class Validator implements \JsonSerializable
         $isEmpty = $value === null || $value === '' || ($value === [] && !$hasStructureRules);
 
         if ($this->isRequired && $isEmpty) {
-            return $this->requiredMessage ?? \mini\t("This field is required.");
+            return new ValidationError($this->requiredMessage ?? \mini\t("This field is required."));
         }
 
         // If not required and empty, skip all other rules
@@ -145,7 +146,7 @@ class Validator implements \JsonSerializable
         foreach ($this->rules as $keyword => $ruleValue) {
             $error = $this->validateRule($keyword, $ruleValue, $value, $context);
             if ($error !== null) {
-                return $error;
+                return new ValidationError($error);
             }
         }
 
@@ -192,7 +193,9 @@ class Validator implements \JsonSerializable
                 }
 
                 if (!$this->allowAdditionalProperties) {
-                    $errors[$property] = \mini\t("Additional property '{property}' is not allowed.", ['property' => $property]);
+                    $errors[$property] = new ValidationError(
+                        \mini\t("Additional property '{property}' is not allowed.", ['property' => $property])
+                    );
                 } elseif ($this->additionalPropertiesValidator !== null) {
                     $propValue = is_array($value) ? $value[$property] : $value->$property;
                     if ($error = $this->additionalPropertiesValidator->isInvalid($propValue, $value)) {
@@ -201,7 +204,9 @@ class Validator implements \JsonSerializable
                 }
             }
 
-            return $errors ?: null;
+            if (!empty($errors)) {
+                return new ValidationError(\mini\t("Validation failed."), $errors);
+            }
         }
 
         return null;
@@ -289,9 +294,9 @@ class Validator implements \JsonSerializable
      * Validate entire structure (alias for isInvalid)
      *
      * @param mixed $value
-     * @return null|array|string|Stringable
+     * @return ?ValidationError
      */
-    public function validate(mixed $value): null|array|string|Stringable
+    public function validate(mixed $value): ?ValidationError
     {
         return $this->isInvalid($value);
     }

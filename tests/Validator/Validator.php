@@ -48,7 +48,7 @@ $test = new class extends Test {
     {
         $v = (new Validator())->required('Please fill this field');
         $error = $v->isInvalid(null);
-        $this->assertSame('Please fill this field', $error);
+        $this->assertSame('Please fill this field', (string) $error);
     }
 
     public function testOptionalSkipsValidationWhenEmpty(): void
@@ -454,7 +454,7 @@ $test = new class extends Test {
     {
         $v = (new Validator())->minLength(5, 'Too short!');
         $error = $v->isInvalid('hi');
-        $this->assertSame('Too short!', $error);
+        $this->assertSame('Too short!', (string) $error);
     }
 
     // ========================================
@@ -581,6 +581,100 @@ $test = new class extends Test {
         $this->assertNotNull($partial->a);
         $this->assertNull($partial->b);
         $this->assertNull($partial->c);
+    }
+
+    // ========================================
+    // ValidationError
+    // ========================================
+
+    public function testValidationErrorIsStringable(): void
+    {
+        $v = (new Validator())->required('Field is required');
+        $error = $v->isInvalid(null);
+
+        $this->assertSame('Field is required', (string) $error);
+    }
+
+    public function testValidationErrorArrayAccess(): void
+    {
+        $v = (new Validator())
+            ->forProperty('name', (new Validator())->required('Name required'))
+            ->forProperty('email', (new Validator())->required('Email required'));
+
+        $error = $v->isInvalid([]);
+
+        // ArrayAccess
+        $this->assertNotNull($error['name']);
+        $this->assertNotNull($error['email']);
+        $this->assertNull($error['nonexistent']);
+
+        // Property errors are also ValidationError instances
+        $this->assertSame('Name required', (string) $error['name']);
+        $this->assertSame('Email required', (string) $error['email']);
+    }
+
+    public function testValidationErrorIteration(): void
+    {
+        $v = (new Validator())
+            ->forProperty('a', (new Validator())->required())
+            ->forProperty('b', (new Validator())->required());
+
+        $error = $v->isInvalid([]);
+
+        $fields = [];
+        foreach ($error as $field => $fieldError) {
+            $fields[] = $field;
+            $this->assertInstanceOf(\mini\Validator\ValidationError::class, $fieldError);
+        }
+
+        $this->assertTrue(in_array('a', $fields));
+        $this->assertTrue(in_array('b', $fields));
+    }
+
+    public function testValidationErrorJsonSerialize(): void
+    {
+        $v = (new Validator())
+            ->forProperty('name', (new Validator())->required('Name is required'))
+            ->forProperty('age', (new Validator())->type('integer'));
+
+        // Scalar error serializes to string
+        $scalarError = (new Validator())->required('Required')->isInvalid(null);
+        $this->assertSame('Required', json_decode(json_encode($scalarError)));
+
+        // Object error serializes to object
+        $objectError = $v->isInvalid(['age' => 'not a number']);
+        $json = json_decode(json_encode($objectError), true);
+        $this->assertArrayHasKey('name', $json);
+        $this->assertArrayHasKey('age', $json);
+    }
+
+    public function testValidationErrorNestedAccess(): void
+    {
+        $v = (new Validator())
+            ->forProperty('user', (new Validator())
+                ->forProperty('email', (new Validator())->required('Email required'))
+            );
+
+        $error = $v->isInvalid(['user' => []]);
+
+        // Drill down into nested errors
+        $this->assertNotNull($error['user']);
+        $this->assertNotNull($error['user']['email']);
+        $this->assertSame('Email required', (string) $error['user']['email']);
+    }
+
+    public function testValidationErrorHasPropertyErrors(): void
+    {
+        $v = (new Validator())
+            ->forProperty('name', (new Validator())->required());
+
+        // Object error has property errors
+        $objectError = $v->isInvalid([]);
+        $this->assertTrue($objectError->hasPropertyErrors());
+
+        // Scalar error does not
+        $scalarError = (new Validator())->required()->isInvalid(null);
+        $this->assertFalse($scalarError->hasPropertyErrors());
     }
 };
 
