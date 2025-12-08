@@ -108,20 +108,26 @@
 
 ## Email/Mail System & MIME
 - **Direct MIME structure mapping** - no mail-specific DSL
-- **Single `MultipartInterface` for all multipart types**
+- **Pure PSR-7 MessageInterface** - any MessageInterface works as a MIME part
+  - Accept Guzzle responses, any PSR-7 message - no wrapper classes needed
+  - `MultipartMessage` accepts any `MessageInterface` as parts
+- **Single `MultipartMessage` class for all multipart types**
   - Per RFC 2046: "All present and future subtypes of the 'multipart' type must use an identical syntax"
-  - No separate interfaces for mixed/alternative/related - structural behavior is identical
-  - Type differentiation via Content-Type header (native MIME, no duplicate encoding)
-  - Ergonomic helpers: `withMultipartType('alternative')`, `isMultipartType('mixed')`
-  - These internally map to Content-Type header operations
-- **MimeMessageInterface extends PSR-7 MessageInterface AND StreamInterface**
-  - Enables recursive tree structure: `$message->getBody()` returns `MimeMessageInterface`
-  - Natural composition: `if ($body->isMultipartType('alternative')) { ... }`
+  - No separate classes for mixed/alternative/related - structural behavior is identical
+  - Type differentiation via `MultipartType` enum and Content-Type header
+  - `getBody()` returns streaming `StreamInterface` - no buffering
+- **Recursive composition via streaming**
+  - Nested multipart messages stream through children automatically
+  - Each level inserts its own boundary markers
+  - Infinite nesting supported without memory overhead
+- **Parts API modeled after PSR-7 headers API**
+  - `getParts()`, `getPart(int)`, `hasPart(int)`
+  - `withPart(int, MessageInterface)`, `withAddedPart()`, `withoutPart(int)`
+  - `findPart(callable)`, `findParts(callable)`, `withParts(callable)`
   - ArrayAccess + Countable + IteratorAggregate for convenient part access
-- **Interface-based mailer backend** (like AuthInterface pattern)
+- **Interface-based mailer backend** (future)
   - Framework provides MIME structure, not transport
-  - Backends: PHPMailer, Symfony Mailer, SMTP, sendmail()
-  - No required dependencies
+  - No required dependencies - compose messages then use any transport
 - **Lindy credentials:**
   - MIME multipart (RFC 2046, 1996): 28+ years old
   - Email message format (RFC 5322/822, 1982): 42+ years old

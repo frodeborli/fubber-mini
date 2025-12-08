@@ -30,10 +30,10 @@ class Stream implements StreamInterface {
      * ```
      *
      * @param mixed $source Value to cast to Stream
-     * @return static Stream instance
+     * @return StreamInterface Stream instance (original if already StreamInterface, new Stream otherwise)
      * @throws \InvalidArgumentException If source cannot be cast to Stream
      */
-    public static function cast(mixed $source): static {
+    public static function cast(mixed $source): StreamInterface {
         // Already a stream? Return as-is
         if ($source instanceof StreamInterface) {
             return $source;

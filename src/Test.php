@@ -36,6 +36,7 @@ abstract class Test
     private array $results = [];
     private array $logs = [];
     private ?string $currentTest = null;
+    private ?string $expectedExceptionClass = null;
 
     /**
      * Run all test methods and return exit code
@@ -57,22 +58,35 @@ abstract class Test
         foreach ($methods as $method) {
             $this->currentTest = $method;
             $this->logs[$method] = [];
+            $this->expectedExceptionClass = null;
             $name = $this->methodToName($method);
 
             try {
                 $this->$method();
 
+                // If we expected an exception but didn't get one
+                if ($this->expectedExceptionClass !== null) {
+                    throw new \AssertionError("Expected {$this->expectedExceptionClass} to be thrown");
+                }
+
                 echo "✓ $name\n";
                 $this->results[$method] = ['status' => 'passed'];
                 $passed++;
             } catch (\Throwable $e) {
-                echo "✗ $name\n";
-                echo "  " . $e->getMessage() . "\n";
-                if ($e->getFile() && $e->getLine()) {
-                    echo "  at " . basename($e->getFile()) . ":" . $e->getLine() . "\n";
+                // Check if this was an expected exception
+                if ($this->expectedExceptionClass !== null && $e instanceof $this->expectedExceptionClass) {
+                    echo "✓ $name\n";
+                    $this->results[$method] = ['status' => 'passed'];
+                    $passed++;
+                } else {
+                    echo "✗ $name\n";
+                    echo "  " . $e->getMessage() . "\n";
+                    if ($e->getFile() && $e->getLine()) {
+                        echo "  at " . basename($e->getFile()) . ":" . $e->getLine() . "\n";
+                    }
+                    $this->results[$method] = ['status' => 'failed', 'error' => $e];
+                    $failed++;
                 }
-                $this->results[$method] = ['status' => 'failed', 'error' => $e];
-                $failed++;
             }
 
             // Output any logs for this test
@@ -236,6 +250,84 @@ abstract class Test
         if (!str_contains($haystack, $needle)) {
             throw new \AssertionError($message ?: "String does not contain '$needle'");
         }
+    }
+
+    protected function assertStringNotContainsString(string $needle, string $haystack, string $message = ''): void
+    {
+        if (str_contains($haystack, $needle)) {
+            throw new \AssertionError($message ?: "String unexpectedly contains '$needle'");
+        }
+    }
+
+    protected function assertStringStartsWith(string $prefix, string $string, string $message = ''): void
+    {
+        if (!str_starts_with($string, $prefix)) {
+            throw new \AssertionError($message ?: "String does not start with '$prefix'");
+        }
+    }
+
+    protected function assertStringEndsWith(string $suffix, string $string, string $message = ''): void
+    {
+        if (!str_ends_with($string, $suffix)) {
+            throw new \AssertionError($message ?: "String does not end with '$suffix'");
+        }
+    }
+
+    protected function assertNotSame(mixed $expected, mixed $actual, string $message = ''): void
+    {
+        if ($expected === $actual) {
+            throw new \AssertionError($message ?: "Values are unexpectedly the same");
+        }
+    }
+
+    protected function assertNotEmpty(mixed $value, string $message = ''): void
+    {
+        if (empty($value)) {
+            throw new \AssertionError($message ?: "Value is unexpectedly empty");
+        }
+    }
+
+    protected function assertGreaterThan(mixed $expected, mixed $actual, string $message = ''): void
+    {
+        if ($actual <= $expected) {
+            throw new \AssertionError($message ?: "Expected value greater than $expected, got $actual");
+        }
+    }
+
+    protected function assertLessThan(mixed $expected, mixed $actual, string $message = ''): void
+    {
+        if ($actual >= $expected) {
+            throw new \AssertionError($message ?: "Expected value less than $expected, got $actual");
+        }
+    }
+
+    protected function assertLessThanOrEqual(mixed $expected, mixed $actual, string $message = ''): void
+    {
+        if ($actual > $expected) {
+            throw new \AssertionError($message ?: "Expected value <= $expected, got $actual");
+        }
+    }
+
+    protected function assertGreaterThanOrEqual(mixed $expected, mixed $actual, string $message = ''): void
+    {
+        if ($actual < $expected) {
+            throw new \AssertionError($message ?: "Expected value >= $expected, got $actual");
+        }
+    }
+
+    /**
+     * Assert that a callable throws an exception
+     *
+     * Usage:
+     *   $this->expectException(\InvalidArgumentException::class);
+     *   $codeUnderTest();
+     *
+     * Note: This stores the expected exception and checks it at the end of the test.
+     * For more control, use assertThrows() which wraps the callable.
+     */
+    protected function expectException(string $exceptionClass): void
+    {
+        $this->expectedExceptionClass = $exceptionClass;
     }
 
     protected function fail(string $message = 'Test failed'): void

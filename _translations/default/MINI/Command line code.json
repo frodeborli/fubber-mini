@@ -1,5 +1,10 @@
 {
     "hello world": "hello world",
     "test": "test",
-    "Hello": "Hello"
+    "Hello": "Hello",
+    "User": "User",
+    "Username": "Username",
+    "Group": "Group",
+    "Group Name": "Group Name",
+    "Admin Group": "Admin Group"
 }

@@ -1,0 +1,17 @@
+{
+    "User Account": "User Account",
+    "Represents a user in the system": "Represents a user in the system",
+    "Username": "Username",
+    "Unique login identifier": "Unique login identifier",
+    "johndoe": "johndoe",
+    "admin": "admin",
+    "Email": "Email",
+    "Age": "Age",
+    "Active": "Active",
+    "ID": "ID",
+    "Name": "Name",
+    "Display name": "Display name",
+    "Admin Group": "Admin Group",
+    "Auto Group": "Auto Group",
+    "User Group": "User Group"
+}

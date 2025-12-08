@@ -85,7 +85,7 @@ session();  // Starts session if needed
 
 **All features exist, but nothing loads until touched:**
 ```php
-mail();        // Loads symfony/mailer only if installed
+mailer();      // Mail transport for sending emails
 table(User::class);  // Loads ORM only when used
 auth()->check();     // Loads authentication system on demand
 ```
@@ -929,7 +929,7 @@ Detailed documentation for each framework feature:
 - **[src/Tables/README.md](src/Tables/README.md)** - ORM, repositories, entities, query building
 - **[src/Auth/README.md](src/Auth/README.md)** - Authentication, user providers, sessions, JWT
 - **[src/Cache/README.md](src/Cache/README.md)** - PSR-16 caching, APCu, SQLite, filesystem
-- **[src/Mailer/README.md](src/Mailer/README.md)** - Email sending via Symfony Mailer
+- **[src/Mail/README.md](src/Mail/README.md)** - Email composition and sending
 - **[src/Validator/README.md](src/Validator/README.md)** - JSON Schema validation, attributes
 - **[src/Logger/README.md](src/Logger/README.md)** - PSR-3 logging, custom loggers
 - **[src/Router/README.md](src/Router/README.md)** - File-based routing, dynamic routes, PSR-15

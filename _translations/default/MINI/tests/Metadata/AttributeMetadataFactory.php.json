@@ -1,0 +1,20 @@
+{
+    "Test User": "Test User",
+    "A user entity for testing": "A user entity for testing",
+    "Username": "Username",
+    "Unique login identifier": "Unique login identifier",
+    "Email Address": "Email Address",
+    "Password": "Password",
+    "Legacy Field": "Legacy Field",
+    "Simple Entity": "Simple Entity",
+    "ID": "ID",
+    "Unique identifier": "Unique identifier",
+    "Email": "Email",
+    "Role": "Role",
+    "Virtual Field": "Virtual Field",
+    "Real Field": "Real Field",
+    "johndoe": "johndoe",
+    "admin123": "admin123",
+    "active": "active",
+    "user": "user"
+}

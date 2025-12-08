@@ -1,0 +1,10 @@
+{
+    "Must be {types}": "Must be {types}",
+    "Item at index {index} is invalid: {error}": "Item at index {index} is invalid: {error}",
+    "Invalid {format} format.": "Invalid {format} format.",
+    "Must match at least one of the allowed types.": "Must match at least one of the allowed types.",
+    "Must be at least {min} characters long.": "Must be at least {min} characters long.",
+    "Must match exactly one of the allowed types.": "Must match exactly one of the allowed types.",
+    "Must not match the disallowed type.": "Must not match the disallowed type.",
+    "Validation failed.": "Validation failed."
+}
