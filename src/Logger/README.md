@@ -67,11 +67,22 @@ log()->info("User {user} performed {action} on {resource}", [
     'resource' => 'database'
 ]);
 
-// Arrays are JSON-encoded
+// Arrays are JSON-encoded with backticks
 log()->info("User data: {user}", [
     'user' => ['id' => 123, 'name' => 'John']
 ]);
-// Output: [2025-10-27 13:38:53] [INFO] User data: {"id":123,"name":"John"}
+// Output: [2025-10-27 13:38:53] [INFO] User data: `{"id":123,"name":"John"}`
+
+// Special values use markdown-style backticks for easy parsing/colorization
+log()->info("Active: {active}, Value: {value}", [
+    'active' => true,
+    'value' => null
+]);
+// Output: [2025-10-27 13:38:53] [INFO] Active: `true`, Value: `null`
+
+// Non-stringable objects show class name
+log()->info("Request: {req}", ['req' => new stdClass()]);
+// Output: [2025-10-27 13:38:53] [INFO] Request: `stdClass`
 ```
 
 ## Exception Logging
@@ -223,6 +234,49 @@ if ($logger->isDebugEnabled()) {
 }
 ```
 
+## Scoped Logging
+
+Use `ScopedLogger` to prefix messages with a component/module identifier:
+
+```php
+use mini\Logger\ScopedLogger;
+
+class HttpKernel
+{
+    private LoggerInterface $log;
+
+    public function __construct()
+    {
+        $this->log = new ScopedLogger('http', \mini\log());
+    }
+
+    public function handle(Request $request): Response
+    {
+        $this->log->info("Incoming {method} {path}", [
+            'method' => $request->getMethod(),
+            'path'   => $request->getPath(),
+        ]);
+        // Output: [http] Incoming GET /users
+    }
+}
+```
+
+Scoped loggers can be nested:
+
+```php
+$appLog = new ScopedLogger('app', \mini\log());
+$dbLog = new ScopedLogger('db', $appLog);
+
+$dbLog->info("Query executed");
+// Output: [app] [db] Query executed
+```
+
+The scope is also added to context for structured loggers:
+
+```php
+$log->info("Message"); // context['scope'] = 'http'
+```
+
 ## Integration with Other Loggers
 
 The mini logger is PSR-3 compatible, so it works with popular logging libraries:
@@ -237,8 +291,9 @@ The mini logger is PSR-3 compatible, so it works with popular logging libraries:
 ```
 mini\Logger\
 ├── Logger.php           # Built-in PSR-3 logger implementation
+├── ScopedLogger.php     # Logger decorator for adding scope prefixes
 ├── functions.php        # Global log() function
-└── README.md           # This file
+└── README.md            # This file
 ```
 
 The logger is lazily initialized on first use via the `mini\log()` function.

@@ -2,7 +2,6 @@
 
 namespace mini\Logger;
 
-use MessageFormatter;
 use mini\Mini;
 use Psr\Log\AbstractLogger;
 use Psr\Log\LogLevel;
@@ -50,28 +49,66 @@ class Logger extends AbstractLogger
      */
     private function interpolate(string $message, array $context): string
     {
-        try {
-            // Use application's default locale (not per-user locale)
-            $locale = Mini::$mini->locale;
+        // Preprocess context values for MessageFormatter compatibility
+        $processedContext = $this->preprocessContext($context);
 
-            // Try MessageFormatter first
-            $formatter = new MessageFormatter($locale, $message);
-            $result = $formatter->format($context);
+        // Use application's default locale (not per-user locale)
+        $locale = Mini::$mini->locale;
 
-            if ($result !== false) {
-                return $result;
+        // Try MessageFormatter, fall back to simple replacement on failure
+        $result = msgfmt_format_message($locale, $message, $processedContext);
+
+        return $result !== false
+            ? $result
+            : $this->simplePlaceholderReplacement($message, $context);
+    }
+
+    /**
+     * Preprocess context values for MessageFormatter compatibility
+     *
+     * Converts non-scalar values to string representations with markdown-style formatting:
+     * - null → `null`
+     * - true/false → `true`/`false`
+     * - arrays → JSON
+     * - exceptions → skipped (handled separately)
+     * - objects with __toString → string value
+     * - other objects → `ClassName`
+     *
+     * @param array $context
+     * @return array
+     */
+    private function preprocessContext(array $context): array
+    {
+        $processed = [];
+        foreach ($context as $key => $value) {
+            // Skip exception key - it's handled separately in formatLogEntry
+            if ($key === 'exception' && $value instanceof \Throwable) {
+                continue;
             }
 
-            // If MessageFormatter fails, fall back to simple placeholder replacement
-            return $this->simplePlaceholderReplacement($message, $context);
-        } catch (\Exception $e) {
-            // If anything goes wrong, fall back to simple replacement
-            return $this->simplePlaceholderReplacement($message, $context);
+            if (is_null($value)) {
+                $processed[$key] = '`null`';
+            } elseif (is_bool($value)) {
+                $processed[$key] = $value ? '`true`' : '`false`';
+            } elseif (is_scalar($value)) {
+                $processed[$key] = $value;
+            } elseif (is_array($value)) {
+                $processed[$key] = '`' . json_encode($value) . '`';
+            } elseif (is_object($value) && method_exists($value, '__toString')) {
+                $processed[$key] = (string) $value;
+            } elseif (is_object($value)) {
+                $processed[$key] = '`' . get_class($value) . '`';
+            } else {
+                $processed[$key] = '`' . gettype($value) . '`';
+            }
         }
+        return $processed;
     }
 
     /**
      * Simple placeholder replacement for basic {key} patterns
+     *
+     * Uses preprocessContext for consistent value formatting.
      *
      * @param string $message
      * @param array $context
@@ -79,23 +116,10 @@ class Logger extends AbstractLogger
      */
     private function simplePlaceholderReplacement(string $message, array $context): string
     {
+        $processed = $this->preprocessContext($context);
         $replace = [];
-        foreach ($context as $key => $value) {
-            // Skip 'exception' key which is reserved for exception objects
-            if ($key === 'exception' && $value instanceof \Throwable) {
-                continue;
-            }
-
-            // Convert value to string
-            if (is_scalar($value) || (is_object($value) && method_exists($value, '__toString'))) {
-                $replace['{' . $key . '}'] = (string) $value;
-            } elseif (is_array($value)) {
-                $replace['{' . $key . '}'] = json_encode($value);
-            } elseif (is_null($value)) {
-                $replace['{' . $key . '}'] = 'null';
-            } else {
-                $replace['{' . $key . '}'] = '[' . gettype($value) . ']';
-            }
+        foreach ($processed as $key => $value) {
+            $replace['{' . $key . '}'] = (string) $value;
         }
 
         return strtr($message, $replace);
