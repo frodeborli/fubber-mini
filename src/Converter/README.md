@@ -26,6 +26,12 @@ $registry = Mini::$mini->get(ConverterRegistryInterface::class);
 // Use convert() helper function
 $response = convert($value, ResponseInterface::class);
 // Returns null if no converter registered for this type
+
+// Distinguish "no converter" from "converted to null value"
+$result = convert($value, 'string', $found);
+if (!$found) {
+    // No converter was registered for this input→target combination
+}
 ```
 
 ### Registering Custom Converters
@@ -67,9 +73,9 @@ use mini\Converter\ConverterRegistry;
 
 // Custom registry with logging
 return new class extends ConverterRegistry {
-    public function convert(mixed $input, string $targetType): mixed {
+    public function convert(mixed $input, string $targetType, ?bool &$found = null): mixed {
         error_log("Converting " . get_debug_type($input) . " to $targetType");
-        return parent::convert($input, $targetType);
+        return parent::convert($input, $targetType, $found);
     }
 };
 ```
@@ -346,9 +352,9 @@ $converter->getOutputType(); // "Psr\Http\Message\ResponseInterface"
 
 **Requirements:**
 - Exactly one typed parameter
-- Typed return value
-- No null in input or output types
-- Union input types allowed
+- Typed return value (non-nullable)
+- No nullable input types (`?string`, `mixed` not allowed)
+- Union input types allowed (`string|int`)
 - Union output types not allowed
 
 ### ConverterRegistry API
