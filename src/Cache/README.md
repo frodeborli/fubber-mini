@@ -44,6 +44,17 @@ $redis = new Client('tcp://127.0.0.1:6379');
 return new class($redis) implements \Psr\SimpleCache\CacheInterface {
     public function __construct(private Client $redis) {}
 
+    private function ttlToSeconds(null|int|\DateInterval $ttl): ?int {
+        if ($ttl === null) {
+            return null;
+        }
+        if ($ttl instanceof \DateInterval) {
+            $now = new \DateTimeImmutable();
+            return (int) $now->add($ttl)->format('U') - (int) $now->format('U');
+        }
+        return $ttl;
+    }
+
     public function get(string $key, mixed $default = null): mixed {
         $value = $this->redis->get($key);
         return $value !== null ? unserialize($value) : $default;
@@ -51,10 +62,14 @@ return new class($redis) implements \Psr\SimpleCache\CacheInterface {
 
     public function set(string $key, mixed $value, null|int|\DateInterval $ttl = null): bool {
         $serialized = serialize($value);
-        if ($ttl === null) {
+        $seconds = $this->ttlToSeconds($ttl);
+
+        if ($seconds === null) {
             $this->redis->set($key, $serialized);
+        } elseif ($seconds <= 0) {
+            $this->redis->del($key); // PSR-16: zero/negative TTL = immediate expiry
         } else {
-            $this->redis->setex($key, $ttl, $serialized);
+            $this->redis->setex($key, $seconds, $serialized);
         }
         return true;
     }
@@ -70,7 +85,7 @@ return new class($redis) implements \Psr\SimpleCache\CacheInterface {
     }
 
     public function has(string $key): bool {
-        return $this->redis->exists($key);
+        return $this->redis->exists($key) > 0; // exists() returns count, not bool
     }
 
     // ... implement remaining PSR-16 methods
@@ -135,12 +150,13 @@ function getPopularPosts() {
 
     if ($posts === null) {
         // Cache miss - fetch from database
+        // Note: toArray() materializes the result for caching
         $posts = db()->query("
             SELECT * FROM posts
             WHERE published = 1
             ORDER BY views DESC
             LIMIT 10
-        ");
+        ")->toArray();
 
         // Cache for 1 hour
         cache()->set($cacheKey, $posts, 3600);
@@ -160,13 +176,14 @@ $userCache = cache('user:' . $userId);
 $userCache->set('preferences', $prefs);
 $userCache->set('recent_activity', $activity);
 
-// Clear only this user's cache
-$userCache->clear();
-
 // API cache namespace
 $apiCache = cache('api:v1');
 $apiCache->set('endpoints', $endpoints, 7200);
 ```
+
+`cache('namespace')` returns a lightweight wrapper that prefixes all keys with the namespace. The underlying cache storage is shared.
+
+> **Note:** `clear()` on a namespaced cache throws `LogicException` because it cannot efficiently clear only prefixed keys without scanning all entries. Use `delete()` or `deleteMultiple()` to remove specific keys, or call `cache()->clear()` on the root cache to clear everything.
 
 ### Cache Invalidation Patterns
 
@@ -231,6 +248,8 @@ function checkRateLimit($userId, $limit = 100, $window = 60) {
 // Usage
 checkRateLimit($userId); // Allows 100 requests per minute
 ```
+
+> **Note:** This pattern is not atomic under high concurrency—two requests may read the same count and both increment to the same value. For precise rate limiting in high-traffic scenarios, use a cache backend with atomic increment (e.g., Redis `INCR` or APCu's `apcu_inc()`).
 
 ### Caching with TTL Variations
 
@@ -309,7 +328,7 @@ echo $html;
 ### Stampede Prevention
 
 ```php
-function getCachedValue($key, $callback, $ttl = 3600) {
+function getCachedValue($key, $callback, $ttl = 3600, $attempt = 0) {
     $value = cache()->get($key);
 
     if ($value === null) {
@@ -324,9 +343,12 @@ function getCachedValue($key, $callback, $ttl = 3600) {
 
             cache()->delete($lockKey);
         } else {
-            // Wait and retry
+            // Wait and retry (with max attempts to prevent infinite recursion)
+            if ($attempt >= 5) {
+                return $callback(); // Fallback: compute directly
+            }
             sleep(1);
-            return getCachedValue($key, $callback, $ttl);
+            return getCachedValue($key, $callback, $ttl, $attempt + 1);
         }
     }
 
@@ -334,30 +356,38 @@ function getCachedValue($key, $callback, $ttl = 3600) {
 }
 ```
 
+> **Note:** This is a simplified stampede prevention pattern. For robust locking across multiple processes, use a backend with proper locking primitives (e.g., Redis `SET NX PX`).
+
 ## Available Drivers
 
 ### APCu Cache
 - **Speed:** Fastest (in-memory)
 - **Persistence:** No (cleared on server restart)
-- **Shared:** Yes (across requests)
-- **Best for:** Session storage, temporary data
+- **Shared:** Within the same PHP process pool only (not across servers or separate FPM pools)
+- **Storage:** Memory only
+- **Best for:** Session storage, temporary data on single-server setups
+
+> **Note:** APCu is shared within a PHP-FPM worker pool, but not across multiple servers. For multi-node or clustered deployments, use Redis or Memcached instead.
 
 ### SQLite Cache
 - **Speed:** Fast
 - **Persistence:** Yes (survives restarts)
 - **Shared:** Yes (file-based)
+- **Storage:** `/tmp/mini-cache.sqlite3`
 - **Best for:** Development, small applications
 
 ### Filesystem Cache
 - **Speed:** Moderate
 - **Persistence:** Yes
 - **Shared:** Yes (if shared filesystem)
+- **Storage:** `/tmp/mini-cache/` directory with hashed filenames
 - **Best for:** Fallback, always available
 
 ### Database Cache
 - **Speed:** Moderate (depends on DB)
 - **Persistence:** Yes
 - **Shared:** Yes
+- **Storage:** `mini_cache` table in your application database
 - **Best for:** Consistency with database
 
 ## Configuration
@@ -383,9 +413,18 @@ return new \Symfony\Component\Cache\Psr16Cache(
 );
 ```
 
+## Serialization
+
+All built-in drivers use PHP's `serialize()` / `unserialize()` for storing values (except APCu which stores natively). This means:
+- Arbitrary PHP values (arrays, objects) can be cached
+- Be careful when changing class definitions between deployments—cached objects may fail to unserialize
+- Avoid caching closures, resources, or large object graphs
+
 ## Cache Scope
 
 Cache is **Singleton** - one instance shared across the entire application lifecycle. This is appropriate because:
 - Cache state should be consistent across the request
 - PSR-16 implementations are typically stateless
 - Multiple instances would create unnecessary overhead
+
+`cache()` returns the process-global cache instance. `cache('namespace')` returns a lightweight namespaced wrapper that shares the same underlying storage.
