@@ -87,11 +87,11 @@ enum SqlDialect
      * Virtual database dialect (in-memory, CSV, API backends)
      *
      * Key differences:
-     * - No subquery support (IN clauses must use value lists)
      * - No CTE/WITH support
      * - No JOIN support
      * - LIMIT syntax: LIMIT count OFFSET offset
      * - Identifier quotes: double quotes "table_name"
+     * - Subqueries supported via lazy evaluation
      *
      * Used by VirtualDatabase for non-SQL data sources.
      */
@@ -126,10 +126,7 @@ enum SqlDialect
      */
     public function supportsSubquery(): bool
     {
-        return match($this) {
-            self::Virtual => false,
-            default => true,
-        };
+        return true;
     }
 
     /**

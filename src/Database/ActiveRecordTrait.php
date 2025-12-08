@@ -42,7 +42,7 @@ trait ActiveRecordTrait {
      * @return PartialQuery<T>
      */
     public static function query(): PartialQuery {
-        return static::getDatabase()->query(static::getTableName())
+        return static::getDatabase()->partialQuery(static::getTableName())
             ->withEntityClass(static::getEntityClass(), false);
     }
 

@@ -2,7 +2,7 @@
 
 namespace mini\Database\Virtual;
 
-use mini\Parsing\SQL\AST\{SelectStatement, InsertStatement, UpdateStatement, DeleteStatement};
+use mini\Parsing\SQL\AST\SelectStatement;
 
 /**
  * Closure-based virtual table
@@ -14,9 +14,9 @@ use mini\Parsing\SQL\AST\{SelectStatement, InsertStatement, UpdateStatement, Del
  *
  * ```php
  * new VirtualTable(
- *     selectFn: function(SelectStatement $ast, \Collator $collator): iterable {
+ *     selectFn: function(SelectStatement $ast): iterable {
  *         // Optional: yield ordering metadata first
- *         yield new OrderInfo(column: 'id', desc: false, collation: 'BINARY');
+ *         yield new OrderInfo(column: 'id', desc: false);
  *
  *         // Then yield Row instances - REQUIRED!
  *         // Note: Placeholders in $ast->where are already replaced with literal values
@@ -31,7 +31,7 @@ use mini\Parsing\SQL\AST\{SelectStatement, InsertStatement, UpdateStatement, Del
  *
  * ```php
  * new VirtualTable(
- *     selectFn: function(SelectStatement $ast, \Collator $collator): iterable {
+ *     selectFn: function(SelectStatement $ast): iterable {
  *         foreach ($this->getAllRows() as $id => $columns) {
  *             yield new Row($id, $columns);  // Row instances required!
  *         }
@@ -58,44 +58,32 @@ use mini\Parsing\SQL\AST\{SelectStatement, InsertStatement, UpdateStatement, Del
 final class VirtualTable
 {
     /**
-     * @param callable|null $selectFn function(SelectStatement, \Collator): \Generator<ResultInterface> - Yields OrderInfo then Row instances (params already bound in AST)
+     * @param callable|null $selectFn function(SelectStatement): iterable<ResultInterface> - Yields OrderInfo then Row instances (params already bound in AST)
      * @param callable|null $insertFn function(array $row): string|int - Returns generated ID
      * @param callable|null $updateFn function(array $rowIds, array $changes): int - Returns affected rows
      * @param callable|null $deleteFn function(array $rowIds): int - Returns affected rows
-     * @param \Collator|null $defaultCollator Default collator for this table (defaults to BINARY)
      */
     public function __construct(
         private $selectFn = null,
         private $insertFn = null,
         private $updateFn = null,
         private $deleteFn = null,
-        private ?\Collator $defaultCollator = null,
     ) {
-        $this->defaultCollator ??= Collation::binary();
     }
 
     /**
      * Execute SELECT query
      *
      * @param SelectStatement $ast Parsed SELECT query (placeholders already bound to literal values)
-     * @param \Collator|null $collator Collation to use (overrides default)
      * @return iterable<ResultInterface> Iterable that optionally yields OrderInfo first, then Row instances
      * @throws \RuntimeException if SELECT not supported
      */
-    public function select(SelectStatement $ast, ?\Collator $collator = null): iterable
+    public function select(SelectStatement $ast): iterable
     {
         if ($this->selectFn === null) {
             throw new \RuntimeException("SELECT not supported for this table");
         }
-        return ($this->selectFn)($ast, $collator ?? $this->defaultCollator);
-    }
-
-    /**
-     * Get default collator for this table
-     */
-    public function getDefaultCollator(): \Collator
-    {
-        return $this->defaultCollator;
+        return ($this->selectFn)($ast);
     }
 
     /**

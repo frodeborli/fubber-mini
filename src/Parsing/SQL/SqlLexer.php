@@ -38,6 +38,10 @@ class SqlLexer
     public const T_AS     = 'AS';
     public const T_ASC    = 'ASC';
     public const T_DESC   = 'DESC';
+    public const T_NOT    = 'NOT';
+    public const T_IS     = 'IS';
+    public const T_NULL   = 'NULL';
+    public const T_LIKE   = 'LIKE';
     public const T_IDENTIFIER = 'IDENTIFIER';
     public const T_STRING = 'STRING';
     public const T_NUMBER = 'NUMBER';
@@ -240,6 +244,10 @@ class SqlLexer
                         'AS' => self::T_AS,
                         'ASC' => self::T_ASC,
                         'DESC' => self::T_DESC,
+                        'NOT' => self::T_NOT,
+                        'IS' => self::T_IS,
+                        'NULL' => self::T_NULL,
+                        'LIKE' => self::T_LIKE,
                         default => self::T_IDENTIFIER
                     };
                 }

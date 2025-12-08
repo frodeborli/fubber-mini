@@ -33,49 +33,30 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Create a PartialQuery from any SELECT query or table name
-     *
-     * Returns an immutable, composable query builder. The query can include
-     * JOINs, WHERE clauses, subqueries - anything. Additional WHERE/ORDER/LIMIT
-     * can be added via fluent methods.
-     *
-     * For simple table queries, just pass the table name.
-     *
-     * @param string $sql SELECT query or table name
-     * @param array $params Parameters to bind
-     * @param string|null $table Explicit table name for delete/update operations
-     * @return PartialQuery Composable query builder
+     * Execute a SELECT query and return results as ResultSet
      */
-    public function query(string $sql, array $params = [], ?string $table = null): PartialQuery
+    public function query(string $sql, array $params = []): ResultSetInterface
     {
-        // Detect simple table name (identifier with optional schema prefix)
-        if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$/', $sql)) {
-            return PartialQuery::fromTable($this, $sql);
-        }
+        return new ResultSet((function () use ($sql, $params) {
+            try {
+                $stmt = $this->lazyPdo()->prepare($sql);
+                $stmt->execute(array_map(sqlval(...), $params));
 
-        return PartialQuery::fromSql($this, $sql, $params, $table);
+                while ($row = $stmt->fetch()) {
+                    yield $row;
+                }
+            } catch (PDOException $e) {
+                throw new Exception("Query failed: " . $e->getMessage());
+            }
+        })());
     }
 
     /**
-     * Execute raw SQL and return results as iterable
-     *
-     * Internal method for executing final SQL. Used by PartialQuery.
-     * For public API, use query() which returns a composable PartialQuery.
-     *
-     * @internal
+     * Create a PartialQuery for composable query building
      */
-    public function rawQuery(string $sql, array $params = []): iterable
+    public function partialQuery(string $table, ?string $sql = null, array $params = []): PartialQuery
     {
-        try {
-            $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute(array_map(sqlval(...), $params));
-
-            while ($row = $stmt->fetch()) {
-                yield $row;
-            }
-        } catch (PDOException $e) {
-            throw new Exception("Query failed: " . $e->getMessage());
-        }
+        return PartialQuery::from($this, $table, $sql, $params);
     }
 
     /**
@@ -302,7 +283,10 @@ class PDODatabase implements DatabaseInterface
 
         $sql = "DELETE FROM {$table}";
         $sql .= " WHERE {$where['sql']}";
-        $sql .= " LIMIT {$query->getLimit()}";
+        $limit = $query->getLimit();
+        if ($limit !== null) {
+            $sql .= " LIMIT {$limit}";
+        }
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
@@ -343,7 +327,10 @@ class PDODatabase implements DatabaseInterface
             $sql .= " WHERE {$where['sql']}";
         }
 
-        $sql .= " LIMIT {$query->getLimit()}";
+        $limit = $query->getLimit();
+        if ($limit !== null) {
+            $sql .= " LIMIT {$limit}";
+        }
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);

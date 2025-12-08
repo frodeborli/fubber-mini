@@ -42,7 +42,7 @@ interface ConverterRegistryInterface
      *
      * Closure requirements:
      * - Exactly one typed parameter (may be union type: string|array)
-     * - Typed return value (single type only, no unions or null)
+     * - Typed return value (single type only, no unions or null) - unless $targetName is specified
      * - No null in input or output types
      *
      * Examples:
@@ -61,17 +61,16 @@ interface ConverterRegistryInterface
      *     return new Response(200, ['Content-Type' => 'application/json'], $json);
      * });
      *
-     * // Custom object converter
-     * $registry->register(function(MyModel $model): ResponseInterface {
-     *     return new Response(200, ['Content-Type' => 'application/json'], $model->toJson());
-     * });
+     * // Named target (bypasses return type validation for closures)
+     * $registry->register(fn(\BackedEnum $e) => $e->value, 'sql-value');
      * ```
      *
      * @param ConverterInterface|\Closure $converter Converter instance or typed closure
+     * @param ?string $targetName Optional explicit target name (bypasses return type validation for closures)
      * @throws \InvalidArgumentException If converter conflicts with existing registration
      * @throws \InvalidArgumentException If closure signature is invalid
      */
-    public function register(ConverterInterface|\Closure $converter): void;
+    public function register(ConverterInterface|\Closure $converter, ?string $targetName = null): void;
 
     /**
      * Replace an existing converter
@@ -94,9 +93,10 @@ interface ConverterRegistryInterface
      * ```
      *
      * @param ConverterInterface|\Closure $converter Converter instance or typed closure
+     * @param ?string $targetName Optional explicit target name (bypasses return type validation for closures)
      * @throws \InvalidArgumentException If closure signature is invalid
      */
-    public function replace(ConverterInterface|\Closure $converter): void;
+    public function replace(ConverterInterface|\Closure $converter, ?string $targetName = null): void;
 
     /**
      * Check if a converter exists for input to target type

@@ -37,7 +37,7 @@ class CsvTable
         string $escape = '\\'
     ): VirtualTable {
         return new VirtualTable(
-            selectFn: function(SelectStatement $ast, \Collator $collator) use ($filePath, $hasHeader, $delimiter, $enclosure, $escape): iterable {
+            selectFn: function(SelectStatement $ast) use ($filePath, $hasHeader, $delimiter, $enclosure, $escape): iterable {
                 $file = fopen($filePath, 'r');
                 if ($file === false) {
                     throw new \RuntimeException("Cannot open CSV file: $filePath");
@@ -85,7 +85,7 @@ class CsvTable
     public static function fromArray(array $rows): VirtualTable
     {
         return new VirtualTable(
-            selectFn: function(SelectStatement $ast, \Collator $collator) use ($rows): iterable {
+            selectFn: function(SelectStatement $ast) use ($rows): iterable {
                 // Yield Row instances with keys preserved (row IDs)
                 foreach ($rows as $rowId => $columns) {
                     yield new Row($rowId, $columns);

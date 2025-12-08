@@ -13,6 +13,9 @@ use mini\Parsing\SQL\AST\{
     UnaryOperation,
     BinaryOperation,
     InOperation,
+    IsNullOperation,
+    LikeOperation,
+    SubqueryNode,
     LiteralNode,
     IdentifierNode,
     PlaceholderNode
@@ -297,27 +300,61 @@ class SqlParser
             return new BinaryOperation($left, $op, $right);
         }
 
+        // Handle IS NULL / IS NOT NULL
+        if ($this->match(SqlLexer::T_IS)) {
+            $negated = $this->match(SqlLexer::T_NOT);
+            $this->expect(SqlLexer::T_NULL);
+            return new IsNullOperation($left, $negated);
+        }
+
+        // Handle NOT IN / NOT LIKE
+        if ($this->match(SqlLexer::T_NOT)) {
+            if ($this->match(SqlLexer::T_IN)) {
+                return $this->parseInOperation($left, negated: true);
+            }
+            if ($this->match(SqlLexer::T_LIKE)) {
+                $pattern = $this->parseAdditive();
+                return new LikeOperation($left, $pattern, negated: true);
+            }
+            throw new SqlSyntaxException(
+                "Expected IN or LIKE after NOT",
+                $this->sql,
+                $this->current()['pos']
+            );
+        }
+
         // Handle IN clause
         if ($this->match(SqlLexer::T_IN)) {
-            $this->expect(SqlLexer::T_LPAREN);
+            return $this->parseInOperation($left, negated: false);
+        }
 
-            // Check for Subquery
-            if ($this->current()['type'] === SqlLexer::T_SELECT) {
-                $subquery = $this->parseSelectStatement();
-                $this->expect(SqlLexer::T_RPAREN);
-                return new InOperation($left, true, $subquery);
-            } else {
-                // Simple List
-                $values = [];
-                do {
-                    $values[] = $this->parseExpression();
-                } while ($this->match(SqlLexer::T_COMMA));
-                $this->expect(SqlLexer::T_RPAREN);
-                return new InOperation($left, false, $values);
-            }
+        // Handle LIKE clause
+        if ($this->match(SqlLexer::T_LIKE)) {
+            $pattern = $this->parseAdditive();
+            return new LikeOperation($left, $pattern, negated: false);
         }
 
         return $left;
+    }
+
+    private function parseInOperation(ASTNode $left, bool $negated): InOperation
+    {
+        $this->expect(SqlLexer::T_LPAREN);
+
+        // Check for Subquery
+        if ($this->current()['type'] === SqlLexer::T_SELECT) {
+            $subquery = $this->parseSelectStatement();
+            $this->expect(SqlLexer::T_RPAREN);
+            return new InOperation($left, new SubqueryNode($subquery), $negated);
+        } else {
+            // Simple List
+            $values = [];
+            do {
+                $values[] = $this->parseExpression();
+            } while ($this->match(SqlLexer::T_COMMA));
+            $this->expect(SqlLexer::T_RPAREN);
+            return new InOperation($left, $values, $negated);
+        }
     }
 
     private function parseAdditive(): ASTNode

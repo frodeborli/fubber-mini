@@ -2,8 +2,8 @@
 
 namespace mini\Database;
 
-use mini\Database\Virtual\{VirtualTable, OrderInfo, WhereEvaluator, Collation};
-use mini\Parsing\SQL\{SqlParser, SqlSyntaxException};
+use mini\Database\Virtual\{VirtualTable, OrderInfo, WhereEvaluator, LazySubquery};
+use mini\Parsing\SQL\{SqlParser, SqlSyntaxException, AstParameterBinder};
 use mini\Parsing\SQL\AST\{
     ASTNode,
     SelectStatement,
@@ -12,7 +12,9 @@ use mini\Parsing\SQL\AST\{
     DeleteStatement,
     IdentifierNode,
     LiteralNode,
-    PlaceholderNode
+    PlaceholderNode,
+    SubqueryNode,
+    ColumnNode
 };
 
 /**
@@ -51,12 +53,10 @@ class VirtualDatabase implements DatabaseInterface
     private array $tables = [];
 
     private SqlParser $parser;
-    private \Collator $defaultCollator;
 
-    public function __construct(?\Collator $defaultCollator = null)
+    public function __construct()
     {
         $this->parser = new SqlParser();
-        $this->defaultCollator = $defaultCollator ?? Collation::binary();
     }
 
     /**
@@ -68,31 +68,9 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
-     * Create a PartialQuery from any SELECT query or table name
-     *
-     * @param string $sql SELECT query or table name
-     * @param array $params Parameters to bind
-     * @param string|null $table Explicit table name for delete/update operations
-     * @return PartialQuery Composable query builder
+     * Execute a SELECT query and return results as ResultSet
      */
-    public function query(string $sql, array $params = [], ?string $table = null): PartialQuery
-    {
-        // Detect simple table name (identifier with optional schema prefix)
-        if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$/', $sql)) {
-            return PartialQuery::fromTable($this, $sql);
-        }
-
-        return PartialQuery::fromSql($this, $sql, $params, $table);
-    }
-
-    /**
-     * Execute raw SQL and return results as iterable
-     *
-     * Parses SQL and delegates to appropriate virtual table.
-     *
-     * @internal Used by PartialQuery
-     */
-    public function rawQuery(string $sql, array $params = []): iterable
+    public function query(string $sql, array $params = []): ResultSetInterface
     {
         try {
             $ast = $this->parser->parse($sql);
@@ -100,11 +78,19 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("SQL parse error: " . $e->getMessage(), 0, $e);
         }
 
-        if ($ast instanceof SelectStatement) {
-            return $this->executeSelect($ast, $params);
+        if (!($ast instanceof SelectStatement)) {
+            throw new \RuntimeException("Only SELECT queries supported in VirtualDatabase::query()");
         }
 
-        throw new \RuntimeException("Only SELECT queries supported in VirtualDatabase::rawQuery()");
+        return new ResultSet($this->executeSelect($ast, $params));
+    }
+
+    /**
+     * Create a PartialQuery for composable query building
+     */
+    public function partialQuery(string $table, ?string $sql = null, array $params = []): PartialQuery
+    {
+        return PartialQuery::from($this, $table, $sql, $params);
     }
 
     public function queryOne(string $sql, array $params = []): ?array
@@ -205,7 +191,10 @@ class VirtualDatabase implements DatabaseInterface
         if (!empty($where['sql'])) {
             $sql .= " WHERE " . $where['sql'];
         }
-        $sql .= " LIMIT " . $query->getLimit();
+        $limit = $query->getLimit();
+        if ($limit !== null) {
+            $sql .= " LIMIT " . $limit;
+        }
 
         return $this->exec($sql, $where['params']);
     }
@@ -262,6 +251,55 @@ class VirtualDatabase implements DatabaseInterface
         return $this->tables[$name];
     }
 
+    /**
+     * Create a subquery resolver closure for WhereEvaluator
+     *
+     * Returns a closure that creates LazySubquery instances.
+     * The LazySubquery will execute the subquery on demand and cache results.
+     *
+     * @param array $params Parent query parameters (not used for subqueries which have their own scope)
+     * @return \Closure fn(SubqueryNode): LazySubquery
+     */
+    private function createSubqueryResolver(array $params): \Closure
+    {
+        return function (SubqueryNode $subqueryNode): LazySubquery {
+            // Extract column name from SELECT clause
+            $column = $this->extractSubqueryColumn($subqueryNode->query);
+
+            // Create executor that will run the subquery
+            $executor = function (SelectStatement $query): iterable {
+                return $this->executeSelect($query, []);
+            };
+
+            return new LazySubquery($subqueryNode->query, $executor, $column);
+        };
+    }
+
+    /**
+     * Extract the column name to use from a subquery's SELECT clause
+     *
+     * For "SELECT user_id FROM orders", returns "user_id"
+     * For "SELECT *", returns "*" (will use first column)
+     */
+    private function extractSubqueryColumn(SelectStatement $query): string
+    {
+        if (empty($query->columns)) {
+            return '*';
+        }
+
+        $firstColumn = $query->columns[0];
+        if ($firstColumn instanceof ColumnNode) {
+            $expr = $firstColumn->expression;
+            if ($expr instanceof IdentifierNode) {
+                // Handle dotted identifiers (table.column)
+                $parts = explode('.', $expr->name);
+                return end($parts);
+            }
+        }
+
+        return '*';
+    }
+
     private function executeSelect(SelectStatement $ast, array $params): iterable
     {
         $tableName = $ast->from->name;
@@ -269,18 +307,18 @@ class VirtualDatabase implements DatabaseInterface
 
         // Bind parameters to AST - replace placeholders with literal values
         // This makes it easier for virtual tables to inspect WHERE conditions
-        $binder = new Parsing\SQL\AstParameterBinder($params);
+        $binder = new AstParameterBinder($params);
         $boundAst = $binder->bind($ast);
 
         // Get rows from table (may include OrderInfo as first yield)
         // Virtual table receives AST with placeholders already replaced
-        $iter = $table->select($boundAst, $this->defaultCollator);
+        $iter = $table->select($boundAst);
 
         // Detect optional OrderInfo and validate row IDs
         $orderInfo = null;
         $dataIter = $this->extractOrderInfo($iter, $orderInfo, $tableName);
 
-        // Execute with engine logic (still need params for WhereEvaluator)
+        // Execute with engine logic
         return $this->selectWithEngineLogic($boundAst, $dataIter, $orderInfo, $params);
     }
 
@@ -342,17 +380,11 @@ class VirtualDatabase implements DatabaseInterface
 
         $hasOrder = !empty($orderBy);
 
-        // Required collator for this query (use default unless table has specific one)
-        $requiredCollator = $this->defaultCollator;
+        // Determine if we can stream
+        $canStream = $this->canStreamResults($hasOrder, $orderBy, $orderInfo);
 
-        // Determine if we can stream (checks collation compatibility!)
-        $canStream = $this->canStreamResults($hasOrder, $orderBy, $orderInfo, $requiredCollator);
-
-        // For execution: use backend's collator if compatible, otherwise use required
-        // If streaming, we already verified compatibility above
-        $collator = $canStream && $orderInfo
-            ? Collation::fromName($orderInfo->collation)
-            : $requiredCollator;
+        // If skipped is null, backend handled offset - don't apply it again
+        $backendSkipped = $orderInfo?->skipped;
 
         if ($canStream) {
             // Streaming mode - pull rows as needed
@@ -362,8 +394,7 @@ class VirtualDatabase implements DatabaseInterface
                 $params,
                 $offset,
                 $limit,
-                $orderInfo?->skipped ?? 0,
-                $collator
+                $backendSkipped
             );
         } else {
             // Materialization mode - load all, sort, then output
@@ -374,13 +405,12 @@ class VirtualDatabase implements DatabaseInterface
                 $orderBy,
                 $offset,
                 $limit,
-                $orderInfo?->skipped ?? 0,
-                $collator
+                $backendSkipped
             );
         }
     }
 
-    private function canStreamResults(bool $hasOrder, array $orderBy, ?OrderInfo $orderInfo, \Collator $requiredCollator): bool
+    private function canStreamResults(bool $hasOrder, array $orderBy, ?OrderInfo $orderInfo): bool
     {
         if (!$hasOrder) {
             return true; // No ORDER BY - always stream
@@ -415,24 +445,6 @@ class VirtualDatabase implements DatabaseInterface
             return false; // Different direction
         }
 
-        // CRITICAL: Match collation - backend sorting is only valid if collation matches!
-        // We can only trust the ordering if the backend used the same collation rules.
-        //
-        // Example: Backend sorted with BINARY (case-sensitive), but we need NOCASE (case-insensitive):
-        //   Backend order: ['Alice', 'Bob', 'alice']
-        //   NOCASE order:  ['Alice', 'alice', 'Bob']
-        // These are DIFFERENT orderings - we MUST re-sort!
-        //
-        // Canonicalize both collation names for comparison (handles no_NO === nb_NO, etc.)
-        $requiredCollationName = Collation::toName($requiredCollator);
-        $backendCollationName = strtoupper($orderInfo->collation) === 'BINARY' || strtoupper($orderInfo->collation) === 'NOCASE'
-            ? strtoupper($orderInfo->collation)
-            : \Locale::canonicalize($orderInfo->collation);
-
-        if ($backendCollationName !== $requiredCollationName) {
-            return false; // Different collation - must re-sort
-        }
-
         return true;
     }
 
@@ -442,24 +454,41 @@ class VirtualDatabase implements DatabaseInterface
         array $params,
         int $offset,
         ?int $limit,
-        int $backendSkipped,
-        \Collator $collator
+        ?int $backendSkipped
     ): \Generator {
-        $evaluator = new Virtual\WhereEvaluator($params, $collator);
         $skipped = 0;
         $emitted = 0;
 
-        // Adjust for backend-applied offset
-        $effectiveOffset = max(0, $offset - $backendSkipped);
+        // backendSkipped !== null means backend handled WHERE (possibly with custom collation)
+        // backendSkipped === null means we need to apply WHERE
+        $applyWhere = $backendSkipped === null;
+        $evaluator = $applyWhere
+            ? new WhereEvaluator($params, $this->createSubqueryResolver($params))
+            : null;
+
+        // Calculate how many rows we need to skip
+        if ($backendSkipped === null) {
+            // Backend didn't handle offset - we skip all
+            $toSkip = $offset;
+        } else {
+            // Backend skipped some rows - validate and adjust
+            if ($backendSkipped > $offset) {
+                throw new \RuntimeException(
+                    "Virtual table skipped {$backendSkipped} rows but only {$offset} were requested. " .
+                    "This is an implementation error in the virtual table."
+                );
+            }
+            $toSkip = $offset - $backendSkipped;
+        }
 
         foreach ($rows as $row) {
-            // Always re-apply WHERE using collator
-            if (!$evaluator->matches($row, $where)) {
+            // Apply WHERE only if backend didn't handle it
+            if ($applyWhere && !$evaluator->matches($row, $where)) {
                 continue;
             }
 
-            // Apply offset
-            if ($skipped < $effectiveOffset) {
+            // Skip rows if needed
+            if ($skipped < $toSkip) {
                 $skipped++;
                 continue;
             }
@@ -481,32 +510,47 @@ class VirtualDatabase implements DatabaseInterface
         array $orderBy,
         int $offset,
         ?int $limit,
-        int $backendSkipped,
-        \Collator $collator
+        ?int $backendSkipped
     ): \Generator {
-        $evaluator = new Virtual\WhereEvaluator($params, $collator);
+        // backendSkipped !== null means backend handled WHERE (possibly with custom collation)
+        // backendSkipped === null means we need to apply WHERE
+        $applyWhere = $backendSkipped === null;
+        $evaluator = $applyWhere
+            ? new WhereEvaluator($params, $this->createSubqueryResolver($params))
+            : null;
 
         // Materialize all matching rows
         $buffer = [];
         foreach ($rows as $row) {
-            if ($evaluator->matches($row, $where)) {
-                $buffer[] = $row;
+            if ($applyWhere && !$evaluator->matches($row, $where)) {
+                continue;
             }
+            $buffer[] = $row;
         }
 
-        // Sort if needed - use collator
+        // Sort if needed
         if (!empty($orderBy)) {
-            $this->sortRows($buffer, $orderBy, $collator);
+            $this->sortRows($buffer, $orderBy);
         }
 
-        // Apply backend skip
-        if ($backendSkipped > 0) {
-            $buffer = array_slice($buffer, $backendSkipped);
+        // Calculate how many rows to skip
+        if ($backendSkipped === null) {
+            // Backend didn't handle offset - we skip all
+            $toSkip = $offset;
+        } else {
+            // Backend skipped some rows - validate and adjust
+            if ($backendSkipped > $offset) {
+                throw new \RuntimeException(
+                    "Virtual table skipped {$backendSkipped} rows but only {$offset} were requested. " .
+                    "This is an implementation error in the virtual table."
+                );
+            }
+            $toSkip = $offset - $backendSkipped;
         }
 
         // Apply offset
-        if ($offset > 0) {
-            $buffer = array_slice($buffer, $offset);
+        if ($toSkip > 0) {
+            $buffer = array_slice($buffer, $toSkip);
         }
 
         // Apply limit
@@ -517,9 +561,9 @@ class VirtualDatabase implements DatabaseInterface
         yield from $buffer;
     }
 
-    private function sortRows(array &$rows, array $orderBy, \Collator $collator): void
+    private function sortRows(array &$rows, array $orderBy): void
     {
-        usort($rows, function($a, $b) use ($orderBy, $collator) {
+        usort($rows, function($a, $b) use ($orderBy) {
             foreach ($orderBy as $order) {
                 $colExpr = $order['column'];
                 $dir = $order['direction'];
@@ -535,8 +579,8 @@ class VirtualDatabase implements DatabaseInterface
                 $valA = $a[$col] ?? null;
                 $valB = $b[$col] ?? null;
 
-                // Use collator for comparison
-                $cmp = Collation::compare($collator, $valA, $valB);
+                // Simple comparison (no collation)
+                $cmp = $valA <=> $valB;
                 if ($cmp !== 0) {
                     return $dir === 'DESC' ? -$cmp : $cmp;
                 }
@@ -555,7 +599,6 @@ class VirtualDatabase implements DatabaseInterface
     private function executeInsert(InsertStatement $ast, array $params): int
     {
         $table = $this->getTable($ast->table->name);
-        $evaluator = new Virtual\WhereEvaluator($params, $this->defaultCollator);
 
         $affectedRows = 0;
 
@@ -563,16 +606,14 @@ class VirtualDatabase implements DatabaseInterface
         $columns = array_map(fn($col) => $col->name, $ast->columns);
 
         // Process each value row
+        $placeholderIndex = 0;
         foreach ($ast->values as $valueRow) {
             $row = [];
 
             // Evaluate each value expression
             foreach ($valueRow as $i => $valueExpr) {
                 $columnName = $columns[$i] ?? $i;
-
-                // Use WhereEvaluator's getValue for consistency
-                // We need to make getValue accessible, but for now, let's do direct evaluation
-                $row[$columnName] = $this->evaluateExpression($valueExpr, $params);
+                $row[$columnName] = $this->evaluateExpression($valueExpr, $params, $placeholderIndex);
             }
 
             // Insert the row
@@ -598,27 +639,19 @@ class VirtualDatabase implements DatabaseInterface
         $select->from = $ast->table;
         $select->where = $ast->where;
 
-        // Get collator for this table
-        $collator = $table->getDefaultCollator();
-
         // Bind parameters to SELECT (for WHERE evaluation)
-        $binder = new Parsing\SQL\AstParameterBinder($params);
+        $binder = new AstParameterBinder($params);
         $boundSelect = $binder->bind($select);
 
         // Get all rows from table (we need row IDs)
-        $iter = $table->select($boundSelect, $collator);
+        $iter = $table->select($boundSelect);
 
         // Extract OrderInfo if present and validate row IDs
         $orderInfo = null;
         $dataIter = $this->extractOrderInfo($iter, $orderInfo, $tableName);
 
-        // Use OrderInfo collation if available
-        if ($orderInfo && $orderInfo->collation) {
-            $collator = Collation::fromName($orderInfo->collation);
-        }
-
         // Evaluate WHERE to find matching row IDs
-        $evaluator = new Virtual\WhereEvaluator($params, $collator);
+        $evaluator = new WhereEvaluator($params, $this->createSubqueryResolver($params));
         $matchingRowIds = [];
 
         foreach ($dataIter as $rowId => $row) {
@@ -632,10 +665,11 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         // Extract changes from UPDATE SET clause
+        $placeholderIndex = 0;
         $changes = [];
         foreach ($ast->updates as $update) {
             $columnName = $update['column']->name;
-            $changes[$columnName] = $this->evaluateExpression($update['value'], $params);
+            $changes[$columnName] = $this->evaluateExpression($update['value'], $params, $placeholderIndex);
         }
 
         // Delegate to virtual table
@@ -657,27 +691,19 @@ class VirtualDatabase implements DatabaseInterface
         $select->from = $ast->table;
         $select->where = $ast->where;
 
-        // Get collator for this table
-        $collator = $table->getDefaultCollator();
-
         // Bind parameters to SELECT (for WHERE evaluation)
-        $binder = new Parsing\SQL\AstParameterBinder($params);
+        $binder = new AstParameterBinder($params);
         $boundSelect = $binder->bind($select);
 
         // Get all rows from table (we need row IDs)
-        $iter = $table->select($boundSelect, $collator);
+        $iter = $table->select($boundSelect);
 
         // Extract OrderInfo if present and validate row IDs
         $orderInfo = null;
         $dataIter = $this->extractOrderInfo($iter, $orderInfo, $tableName);
 
-        // Use OrderInfo collation if available
-        if ($orderInfo && $orderInfo->collation) {
-            $collator = Collation::fromName($orderInfo->collation);
-        }
-
         // Evaluate WHERE to find matching row IDs
-        $evaluator = new Virtual\WhereEvaluator($params, $collator);
+        $evaluator = new WhereEvaluator($params, $this->createSubqueryResolver($params));
         $matchingRowIds = [];
 
         foreach ($dataIter as $rowId => $row) {
@@ -698,8 +724,12 @@ class VirtualDatabase implements DatabaseInterface
      * Evaluate an expression to a value (for INSERT/UPDATE)
      *
      * Handles literals, placeholders, and simple expressions.
+     *
+     * @param ASTNode $expr The expression to evaluate
+     * @param array $params The bound parameters
+     * @param int &$placeholderIndex Current positional placeholder index (modified)
      */
-    private function evaluateExpression(ASTNode $expr, array $params): mixed
+    private function evaluateExpression(ASTNode $expr, array $params, int &$placeholderIndex = 0): mixed
     {
         if ($expr instanceof LiteralNode) {
             if ($expr->valueType === 'number') {
@@ -712,9 +742,8 @@ class VirtualDatabase implements DatabaseInterface
 
         if ($expr instanceof PlaceholderNode) {
             if ($expr->token === '?') {
-                // Positional - need to track index
-                static $index = 0;
-                return $params[$index++] ?? null;
+                // Positional - track index via reference
+                return $params[$placeholderIndex++] ?? null;
             } else {
                 // Named placeholder
                 $name = ltrim($expr->token, ':');

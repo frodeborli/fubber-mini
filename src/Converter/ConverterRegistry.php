@@ -42,22 +42,24 @@ class ConverterRegistry implements ConverterRegistryInterface
      * Register a converter
      *
      * @param ConverterInterface|\Closure $converter Converter instance or typed closure
+     * @param ?string $targetName Optional explicit target name (bypasses return type validation for closures)
      * @throws \InvalidArgumentException If converter conflicts with existing registration
      */
-    public function register(ConverterInterface|\Closure $converter): void
+    public function register(ConverterInterface|\Closure $converter, ?string $targetName = null): void
     {
-        $this->doRegister($converter, false);
+        $this->doRegister($converter, false, $targetName);
     }
 
     /**
      * Replace an existing converter
      *
      * @param ConverterInterface|\Closure $converter Converter instance or typed closure
+     * @param ?string $targetName Optional explicit target name (bypasses return type validation for closures)
      * @throws \InvalidArgumentException If closure signature is invalid
      */
-    public function replace(ConverterInterface|\Closure $converter): void
+    public function replace(ConverterInterface|\Closure $converter, ?string $targetName = null): void
     {
-        $this->doRegister($converter, true);
+        $this->doRegister($converter, true, $targetName);
     }
 
     /**
@@ -65,12 +67,13 @@ class ConverterRegistry implements ConverterRegistryInterface
      *
      * @param ConverterInterface|\Closure $converter Converter instance or typed closure
      * @param bool $allowReplace Whether to allow replacing existing converters
+     * @param ?string $targetName Optional explicit target name (bypasses return type validation for closures)
      * @throws \InvalidArgumentException If converter conflicts with existing registration
      */
-    private function doRegister(ConverterInterface|\Closure $converter, bool $allowReplace): void
+    private function doRegister(ConverterInterface|\Closure $converter, bool $allowReplace, ?string $targetName = null): void
     {
         if ($converter instanceof \Closure) {
-            $converter = new ClosureConverter($converter);
+            $converter = new ClosureConverter($converter, $targetName);
         }
 
         $targetType = $converter->getOutputType();

@@ -11,40 +11,62 @@ namespace mini\Database;
 interface DatabaseInterface
 {
     /**
-     * Create a PartialQuery from any SELECT query or table name
+     * Execute a SELECT query and return results as ResultSet
      *
-     * Returns an immutable, composable query builder. The query can include
-     * JOINs, WHERE clauses, subqueries - anything valid SQL. Additional
-     * WHERE/ORDER/LIMIT can be added via fluent methods.
+     * Returns a ResultSet that can be iterated, converted to array, or JSON serialized.
+     * Supports hydration to entity classes via withEntityClass() or withHydrator().
      *
-     * For simple table queries, just pass the table name:
-     *   db()->query('users')->eq('active', 1)
+     * Example:
+     * ```php
+     * // Iterate
+     * foreach (db()->query('SELECT * FROM users WHERE active = ?', [1]) as $row) {
+     *     echo $row['name'];
+     * }
      *
-     * For complex queries:
-     *   db()->query('SELECT u.* FROM users u JOIN roles r ON r.id = u.role_id')
+     * // Get all as array
+     * $users = db()->query('SELECT * FROM users')->toArray();
      *
-     * For complex queries that need delete/update support, provide a table name:
-     *   db()->query('SELECT p.* FROM posts p JOIN users u ON ...', [], 'posts')
+     * // JSON serialize (e.g., in route handlers)
+     * return db()->query('SELECT * FROM users');
      *
-     * @param string $sql SELECT query or simple table name
-     * @param array $params Parameters to bind to the query
-     * @param string|null $table Explicit table name for delete/update operations
-     * @return PartialQuery<array> Immutable partial query that can be iterated or further composed
-     */
-    public function query(string $sql, array $params = [], ?string $table = null): PartialQuery;
-
-    /**
-     * Execute raw SQL and return results as iterable
-     *
-     * Low-level method that executes SQL directly without PartialQuery wrapping.
-     * Used internally by PartialQuery. For most use cases, prefer query().
+     * // With hydration
+     * $users = db()->query('SELECT * FROM users')
+     *     ->withEntityClass(User::class)
+     *     ->toArray();
+     * ```
      *
      * @param string $sql SQL query with parameter placeholders
      * @param array $params Parameters to bind to the query
-     * @return iterable<array> Yields associative arrays row by row
-     * @internal
+     * @return ResultSetInterface<array>
      */
-    public function rawQuery(string $sql, array $params = []): iterable;
+    public function query(string $sql, array $params = []): ResultSetInterface;
+
+    /**
+     * Create a PartialQuery for composable query building
+     *
+     * Returns an immutable query builder that can be further refined with
+     * WHERE clauses, ORDER BY, LIMIT, etc. Use this when you need to:
+     * - Build queries compositionally
+     * - Reuse query scopes
+     * - Use delete() or update() with composed conditions
+     *
+     * For simple table queries:
+     * ```php
+     * db()->partialQuery('users')->eq('active', 1)->limit(10)
+     * ```
+     *
+     * For complex base SQL (JOINs, subqueries, etc):
+     * ```php
+     * db()->partialQuery('posts', 'SELECT p.* FROM posts p JOIN users u ON u.id = p.user_id')
+     *     ->eq('u.active', 1)
+     * ```
+     *
+     * @param string $table Table name (required for delete/update operations)
+     * @param string|null $sql Optional base SELECT query (if null, selects from $table)
+     * @param array $params Parameters for placeholders in base SQL
+     * @return PartialQuery<array> Immutable partial query
+     */
+    public function partialQuery(string $table, ?string $sql = null, array $params = []): PartialQuery;
 
     /**
      * Execute query and return first row only as associative array

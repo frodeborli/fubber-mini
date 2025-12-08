@@ -9,6 +9,9 @@ use mini\Parsing\SQL\AST\{
     BinaryOperation,
     UnaryOperation,
     InOperation,
+    IsNullOperation,
+    LikeOperation,
+    SubqueryNode,
     FunctionCallNode,
     SelectStatement,
     ColumnNode
@@ -73,9 +76,32 @@ class AstParameterBinder
         if ($node instanceof InOperation) {
             $new = clone $node;
             $new->left = $this->bindNode($node->left);
-            if (!$node->isSubquery) {
+            if ($node->isSubquery()) {
+                // Bind params inside subquery (params flow through)
+                $new->values = $this->bindNode($node->values);
+            } else {
                 $new->values = array_map(fn($v) => $this->bindNode($v), $node->values);
             }
+            return $new;
+        }
+
+        if ($node instanceof IsNullOperation) {
+            $new = clone $node;
+            $new->expression = $this->bindNode($node->expression);
+            return $new;
+        }
+
+        if ($node instanceof LikeOperation) {
+            $new = clone $node;
+            $new->left = $this->bindNode($node->left);
+            $new->pattern = $this->bindNode($node->pattern);
+            return $new;
+        }
+
+        // SubqueryNode - bind params inside the subquery
+        if ($node instanceof SubqueryNode) {
+            $new = clone $node;
+            $new->query = $this->bindNode($node->query);
             return $new;
         }
 

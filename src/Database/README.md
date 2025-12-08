@@ -5,8 +5,12 @@ Mini's database layer is a thin wrapper over PDO with an immutable query builder
 ## Quick Start
 
 ```php
-// Raw queries
-$users = db()->query("SELECT * FROM users WHERE active = ?", [1]);
+// Raw queries - returns iterable
+foreach (db()->query("SELECT * FROM users WHERE active = ?", [1]) as $row) {
+    echo $row['name'];
+}
+
+// Convenience methods
 $user = db()->queryOne("SELECT * FROM users WHERE id = ?", [123]);
 $count = db()->queryField("SELECT COUNT(*) FROM users");
 $ids = db()->queryColumn("SELECT id FROM users WHERE role = ?", ['admin']);
@@ -32,12 +36,12 @@ PartialQuery is an immutable query builder. Each method returns a NEW instance, 
 
 ```php
 // Basic usage - iterate directly
-foreach (db()->query('users')->eq('active', 1) as $user) {
+foreach (db()->partialQuery('users')->eq('active', 1) as $user) {
     echo $user['name'];
 }
 
 // Composition - original unchanged
-$active = db()->query('users')->eq('active', 1);
+$active = db()->partialQuery('users')->eq('active', 1);
 $admins = $active->eq('role', 'admin');      // New instance
 $mods = $active->eq('role', 'moderator');    // New instance
 
@@ -51,7 +55,7 @@ $query->in('column', [...])       // IN (...)
 $query->in('column', $subquery)   // IN (SELECT ...) via CTE
 $query->where('sql', $params)     // Raw WHERE clause
 $query->order('created_at DESC')  // ORDER BY
-$query->limit(100)                // LIMIT (default: 1000)
+$query->limit(100)                // LIMIT (default: 1000 when iterating)
 $query->offset(50)                // OFFSET
 
 // Execution
@@ -80,7 +84,7 @@ class User
      */
     public static function query(): PartialQuery
     {
-        return db()->query('users')->withEntityClass(self::class, false);
+        return db()->partialQuery('users')->withEntityClass(self::class, false);
     }
 
     /** @return PartialQuery<User> */
@@ -122,7 +126,7 @@ class User
 
     public static function query(): PartialQuery
     {
-        return db()->query('users')->withEntityClass(self::class, false);
+        return db()->partialQuery('users')->withEntityClass(self::class, false);
     }
 
     /**
@@ -149,13 +153,13 @@ class User
      */
     public function friends(): PartialQuery
     {
-        return db()->query('
+        return db()->partialQuery('users', '
             SELECT u.* FROM users u
             INNER JOIN friendships f ON (
                 (f.friend_id = u.id AND f.user_id = ?)
                 OR (f.user_id = u.id AND f.friend_id = ?)
             )
-        ', [$this->id, $this->id], 'users')
+        ', [$this->id, $this->id])
             ->withEntityClass(self::class, false);
     }
 }
@@ -169,7 +173,7 @@ class Post
 
     public static function query(): PartialQuery
     {
-        return db()->query('posts')->withEntityClass(self::class, false);
+        return db()->partialQuery('posts')->withEntityClass(self::class, false);
     }
 
     /** Get the author */
@@ -224,7 +228,7 @@ class Post
 {
     public static function query(): PartialQuery
     {
-        return db()->query('posts')->withEntityClass(self::class, false);
+        return db()->partialQuery('posts')->withEntityClass(self::class, false);
     }
 
     /**
@@ -270,7 +274,7 @@ db()->update(
 );
 ```
 
-The default 1000-row limit protects against accidental mass operations.
+When iterating results (`foreach`, `toArray()`), a default 1000-row limit protects against accidental unbounded queries. Methods like `column()` and `field()` do not apply a default limit, making them suitable for subqueries.
 
 ## Configuration
 

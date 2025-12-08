@@ -3,9 +3,9 @@
 namespace mini\Parsing\SQL\AST;
 
 /**
- * Literal value node (strings, numbers)
+ * Literal value node (strings, numbers, NULL)
  */
-class LiteralNode extends ASTNode
+class LiteralNode extends ASTNode implements ValueNodeInterface
 {
     public string $type = 'LITERAL';
     public mixed $value;

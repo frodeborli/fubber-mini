@@ -14,9 +14,9 @@ namespace mini\Database\Virtual;
  *
  * Example:
  * ```php
- * function selectFn(SelectStatement $ast, CollatorInterface $collator): iterable {
+ * function selectFn(SelectStatement $ast): iterable {
  *     // Optional: yield OrderInfo first
- *     yield new OrderInfo(column: 'id', desc: false, collator: $collator);
+ *     yield new OrderInfo(column: 'id', desc: false);
  *
  *     // Then yield Row instances
  *     foreach ($data as $id => $columns) {

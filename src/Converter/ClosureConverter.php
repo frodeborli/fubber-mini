@@ -18,9 +18,10 @@ class ClosureConverter implements ConverterInterface
 
     /**
      * @param \Closure $closure Must have exactly one typed parameter and typed return
+     * @param ?string $targetName Optional explicit target type (bypasses return type validation)
      * @throws \InvalidArgumentException If closure signature is invalid
      */
-    public function __construct(private \Closure $closure)
+    public function __construct(private \Closure $closure, ?string $targetName = null)
     {
         $this->reflection = new \ReflectionFunction($closure);
 
@@ -56,27 +57,32 @@ class ClosureConverter implements ConverterInterface
         $this->inputTypeString = implode('|', $this->inputTypes);
 
         // Get and validate return type
-        $outputType = $this->reflection->getReturnType();
-        if (!$outputType) {
-            throw new \InvalidArgumentException(
-                'Converter closure must have a return type declaration'
-            );
-        }
+        // If targetName is specified, use it directly (bypasses return type validation)
+        if ($targetName !== null) {
+            $this->outputType = $targetName;
+        } else {
+            $outputType = $this->reflection->getReturnType();
+            if (!$outputType) {
+                throw new \InvalidArgumentException(
+                    'Converter closure must have a return type declaration'
+                );
+            }
 
-        $this->outputType = $outputType->__toString();
+            $this->outputType = $outputType->__toString();
 
-        // Reject null in output type
-        if (str_contains($this->outputType, 'null')) {
-            throw new \InvalidArgumentException(
-                'Converter closure cannot return null'
-            );
-        }
+            // Reject null in output type
+            if (str_contains($this->outputType, 'null')) {
+                throw new \InvalidArgumentException(
+                    'Converter closure cannot return null'
+                );
+            }
 
-        // Reject union output types
-        if (str_contains($this->outputType, '|')) {
-            throw new \InvalidArgumentException(
-                'Converter closure cannot have union return type'
-            );
+            // Reject union output types
+            if (str_contains($this->outputType, '|')) {
+                throw new \InvalidArgumentException(
+                    'Converter closure cannot have union return type'
+                );
+            }
         }
     }
 

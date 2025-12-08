@@ -17,23 +17,23 @@ Mini::$mini->addService(PDO::class, Lifetime::Scoped, function() {
 Mini::$mini->addService(DatabaseInterface::class, Lifetime::Scoped, fn() => Mini::$mini->loadServiceConfig(DatabaseInterface::class));
 
 // Register sql-value converters for common types
-Mini::$mini->onPhase(Phase::Ready, function() {
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     $registry = Mini::$mini->get(ConverterRegistryInterface::class);
 
     // DateTime -> string
     $registry->register(fn(\DateTimeInterface $dt): string => $dt->format('Y-m-d H:i:s'), 'sql-value');
 
-    // BackedEnum -> string|int
-    $registry->register(fn(\BackedEnum $enum): string|int => $enum->value, 'sql-value');
+    // BackedEnum -> its backing value (string or int)
+    $registry->register(fn(\BackedEnum $enum) => $enum->value, 'sql-value');
 
     // UnitEnum -> string (name)
-    $registry->register(fn(\UnitEnum $enum): string => $enum->name, 'sql-value');
+    $registry->register(fn(\UnitEnum $enum) => $enum->name, 'sql-value');
 
     // Stringable -> string
-    $registry->register(fn(\Stringable $obj): string => (string) $obj, 'sql-value');
+    $registry->register(fn(\Stringable $obj) => (string) $obj, 'sql-value');
 
     // SqlValueInterface -> scalar
-    $registry->register(fn(SqlValueInterface $obj): string|int|float|bool|null => $obj->toSqlValue(), 'sql-value');
+    $registry->register(fn(SqlValueInterface $obj) => $obj->toSqlValue(), 'sql-value');
 });
 
 /**

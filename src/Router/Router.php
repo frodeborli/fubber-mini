@@ -39,7 +39,7 @@ use RuntimeException;
  *
  * // _routes/api/users.php - Return array (converted to JSON response)
  * <?php
- * return ['users' => db()->query("SELECT * FROM users")->fetchAll()];
+ * return ['users' => iterator_to_array(db()->query("SELECT * FROM users"))];
  *
  * // _routes/legacy.php - Classical PHP
  * <?php

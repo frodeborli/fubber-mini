@@ -39,17 +39,10 @@ foreach ($vdb->query("SELECT * FROM users WHERE age > ?", [25]) as $row) {
 - **`VirtualDatabase`** - Implements `DatabaseInterface`, parses SQL, coordinates execution
 - **`VirtualTable`** - Closure-based table definition (SELECT/INSERT/UPDATE/DELETE)
 - **`ResultInterface`** - Marker interface for SELECT results (OrderInfo and Row)
-- **`OrderInfo`** - Optional metadata about backend ordering and collation (implements ResultInterface)
+- **`OrderInfo`** - Optional metadata about backend ordering (implements ResultInterface)
 - **`Row`** - Data row with unique ID (implements ResultInterface, required)
-- **`WhereEvaluator`** - Evaluates WHERE clause AST against row data using collation
+- **`WhereEvaluator`** - Evaluates WHERE clause AST against row data
 - **`VirtualTableException`** - Thrown when virtual table violates implementation contract
-- **`Collation`** - Helper functions for creating and comparing with PHP's `\Collator`
-  - `binary()` - Case-sensitive, byte-by-byte (default)
-  - `nocase()` - Case-insensitive ASCII
-  - `locale(string)` - Full Unicode locale-aware (e.g., 'sv_SE', 'de_DE')
-  - `compare()` - Compare two values with NULL and numeric handling
-  - `fromName()` - Create collator from name ('BINARY', 'NOCASE', or locale)
-  - `toName()` - Get collation name from collator instance
 
 ### Execution Model
 
@@ -61,117 +54,9 @@ foreach ($vdb->query("SELECT * FROM users WHERE age > ?", [25]) as $row) {
 4. **Always re-apply WHERE** - Engine guarantees correctness
 5. **Early stop** when LIMIT reached (streaming mode)
 
-## Collation System
-
-VirtualDatabase uses **collation** to determine how text is compared and sorted. This affects WHERE clauses, ORDER BY, and IN operations.
-
-### Why Collation Matters
-
-```php
-// BINARY (default) - Case-sensitive
-'Alice' != 'alice'
-
-// NOCASE - Case-insensitive
-'Alice' == 'alice'
-
-// Swedish locale - ä, ö at end of alphabet
-['Zebra', 'Ärlig', 'Östen'] → ordered as shown (Swedish alphabet)
-```
-
-See **[COLLATION.md](COLLATION.md)** for complete documentation.
-
-### Setting Default Collation
-
-```php
-use mini\Database\VirtualDatabase;
-use mini\Database\Virtual\Collation;
-
-// All tables use case-insensitive comparison by default
-$vdb = new VirtualDatabase(Collation::nocase());
-
-// Now WHERE name = 'ALICE' matches 'alice', 'Alice', 'ALICE'
-```
-
-### Per-Table Collation
-
-```php
-use mini\Database\Virtual\Collation;
-
-$vdb->registerTable('swedish_names', new VirtualTable(
-    defaultCollator: Collation::locale('sv_SE'),
-    selectFn: function($ast, $collator) {
-        // This table uses Swedish sorting rules
-        foreach ($this->getSwedishNames() as $id => $columns) {
-            yield new Row($id, $columns);
-        }
-    }
-));
-```
-
-### Available Collations
-
-| Function | Use Case | Example |
-|----------|----------|---------|
-| `Collation::binary()` | Maximum performance, case matters | Identifiers, codes |
-| `Collation::nocase()` | User-facing text | Names, emails |
-| `Collation::locale('sv_SE')` | International apps | Proper alphabetical sorting |
-
-### Collation in OrderInfo
-
-Tell the engine which collation your backend used:
-
-```php
-selectFn: function($ast, $collator) use ($apiClient) {
-    // API sorts using case-insensitive comparison
-    $data = $apiClient->getUsers(sortBy: 'name');
-
-    yield new OrderInfo(
-        column: 'name',
-        desc: false,
-        collation: 'NOCASE'  // Backend used NOCASE
-    );
-
-    foreach ($data as $item) {
-        yield new Row($item['id'], $item);
-    }
-}
-```
-
-This ensures the engine uses the correct collation for:
-- **Matching ORDER BY** (to enable streaming) - **CRITICAL:** Engine checks collation compatibility!
-- Re-applying WHERE filters
-- Additional sorting if needed
-
-**Collation Compatibility:**
-
-The engine will **only stream results** if ALL of these match:
-1. Column name matches
-2. Direction matches (ASC/DESC)
-3. **Collation matches** (OrderInfo collation name === required collation name)
-
-If collations don't match, the engine **automatically materializes and re-sorts** with the correct collation. This guarantees correctness.
-
-Example:
-```php
-// VirtualDatabase uses NOCASE (case-insensitive)
-$vdb = new VirtualDatabase(Collation::nocase());
-
-// Backend reports BINARY collation (case-sensitive)
-yield new OrderInfo(
-    column: 'name',
-    desc: false,
-    collation: 'BINARY'  // Different from VDB's NOCASE!
-);
-
-// Result: Engine detects collation mismatch
-// → Materializes all rows
-// → Re-sorts with NOCASE
-// → Guarantees correct case-insensitive ordering
-```
-
 ## Creating Virtual Tables
 
-### ⚠️ Row Instances Required
+### Row Instances Required
 
 **All virtual tables MUST yield `Row` instances.** This is enforced at runtime.
 
@@ -181,14 +66,14 @@ use mini\Database\Virtual\{Row, OrderInfo};
 // SELECT functions must return: iterable<ResultInterface>
 // This means: yield OrderInfo (optional) then Row instances (required)
 
-// ✅ CORRECT - yields Row instances (implements ResultInterface)
+// CORRECT - yields Row instances (implements ResultInterface)
 yield new Row($id, ['name' => 'Alice', 'age' => 30]);
 
-// ✅ CORRECT - with optional OrderInfo first
-yield new OrderInfo(column: 'id', desc: false, collator: $collator);
+// CORRECT - with optional OrderInfo first
+yield new OrderInfo(column: 'id', desc: false);
 yield new Row($id, ['name' => 'Alice', 'age' => 30]);
 
-// ❌ WRONG - will throw VirtualTableException
+// WRONG - will throw VirtualTableException
 yield ['name' => 'Alice', 'age' => 30];
 yield $id => ['name' => 'Alice', 'age' => 30];
 ```
@@ -207,7 +92,7 @@ yield $id => ['name' => 'Alice', 'age' => 30];
 use mini\Database\Virtual\Row;
 
 $vdb->registerTable('products', new VirtualTable(
-    selectFn: function(SelectStatement $ast, $collator): iterable {
+    selectFn: function(SelectStatement $ast): iterable {
         // Engine will handle WHERE, ORDER BY, LIMIT
         // Must yield Row instances with unique IDs
         foreach ($this->getAllProducts() as $id => $columns) {
@@ -223,9 +108,9 @@ Tell engine about backend ordering:
 
 ```php
 $vdb->registerTable('products', new VirtualTable(
-    selectFn: function(SelectStatement $ast, $collator): iterable {
+    selectFn: function(SelectStatement $ast): iterable {
         // Data is pre-sorted by 'id' ascending
-        yield new OrderInfo(column: 'id', desc: false, collation: 'BINARY');
+        yield new OrderInfo(column: 'id', desc: false);
 
         // Engine can now stream and early-stop
         // Still must yield Row instances!
@@ -242,7 +127,7 @@ Inspect AST and optimize:
 
 ```php
 $vdb->registerTable('api_data', new VirtualTable(
-    selectFn: function(SelectStatement $ast, $collator): iterable {
+    selectFn: function(SelectStatement $ast): iterable {
         // Inspect AST to optimize API calls
         $filters = $this->extractFilters($ast->where);
         $orderBy = $ast->orderBy[0] ?? null;
@@ -261,8 +146,7 @@ $vdb->registerTable('api_data', new VirtualTable(
         if ($orderBy) {
             yield new OrderInfo(
                 column: $orderBy['column']->name,
-                desc: $orderBy['direction'] === 'DESC',
-                collation: 'BINARY'  // API uses case-sensitive sorting
+                desc: $orderBy['direction'] === 'DESC'
             );
         }
 
@@ -280,37 +164,60 @@ $vdb->registerTable('api_data', new VirtualTable(
 new OrderInfo(
     column: 'birthday',         // Primary sort column
     desc: false,                // true = DESC, false = ASC
-    skipped: 1000,              // Rows already skipped by backend (offset)
-    collation: 'BINARY'         // Collation used by backend (important!)
+    skipped: 0,                 // Backend handled WHERE and OFFSET (see below)
 );
+```
+
+**The `skipped` parameter controls WHERE and OFFSET handling:**
+
+| `skipped` value | WHERE clause | OFFSET |
+|-----------------|--------------|--------|
+| `null` (default) | VirtualDatabase applies | VirtualDatabase handles all |
+| `0` | Backend handled (trusted) | VirtualDatabase handles all |
+| `N` (positive int) | Backend handled (trusted) | Backend skipped N rows, VirtualDatabase skips remainder |
+
+**Why this matters for collation:**
+
+When `skipped` is an integer, VirtualDatabase trusts that the backend correctly evaluated WHERE clauses. This allows table implementations to use custom collation for comparisons:
+
+```php
+// Table implementation with custom collation
+$vdb->registerTable('users', new VirtualTable(
+    selectFn: function(SelectStatement $ast): iterable {
+        $collator = new \Collator('sv_SE');  // Swedish collation
+
+        // Filter rows using custom collation
+        $filtered = [];
+        foreach ($this->getAllRows() as $id => $row) {
+            if ($this->matchesWhere($row, $ast->where, $collator)) {
+                $filtered[$id] = $row;
+            }
+        }
+
+        // Sort using custom collation
+        uasort($filtered, fn($a, $b) => $collator->compare($a['name'], $b['name']));
+
+        // Tell engine: we handled WHERE, skipped 0 rows
+        yield new OrderInfo(column: 'name', desc: false, skipped: 0);
+
+        foreach ($filtered as $id => $row) {
+            yield new Row($id, $row);
+        }
+    }
+));
 ```
 
 **When to yield `OrderInfo`:**
 
 - Backend data is sorted and you want streaming execution
 - Backend applied OFFSET and you want to avoid double-application
-- Backend called remote API with ordering parameters
-- You want to inform engine about backend's collation
+- Backend evaluated WHERE with custom collation (`skipped: 0`)
 
 **When NOT to yield `OrderInfo`:**
 
-- Data is unsorted
-- You want engine to handle all ordering
+- Data is unsorted and unfiltered
+- You want engine to handle all filtering and ordering
 - Simpler is better for your use case
-
-**About the collation parameter:**
-
-The collation tells the engine which text comparison rules the backend used for sorting. This is critical for:
-- **Matching detection** - Engine can only stream if collations match
-- **WHERE re-application** - Engine uses same rules as backend
-- **Additional sorting** - If needed, uses compatible collation
-
-Supported collation names:
-- `'BINARY'` - Case-sensitive, byte-order comparison (default)
-- `'NOCASE'` - Case-insensitive ASCII comparison
-- Locale codes - e.g., `'sv_SE'`, `'de_DE'`, `'en_US'` for locale-specific sorting
-
-If you don't specify collation, it defaults to 'BINARY'.
 
 ## Streaming vs Materialization
 
@@ -352,7 +259,7 @@ The DML API is beautifully simple - **VirtualDatabase handles WHERE evaluation**
 
 ```php
 new VirtualTable(
-    selectFn: function($ast, $collator): iterable {
+    selectFn: function($ast): iterable {
         // IMPORTANT: Must yield Row instances for UPDATE/DELETE to work
         foreach ($this->getData() as $id => $columns) {
             yield new Row($id, $columns);
@@ -393,10 +300,9 @@ new VirtualTable(
 
 **Key Benefits:**
 
-1. **No WHERE parsing needed** - VirtualDatabase does it for you with collation support
+1. **No WHERE parsing needed** - VirtualDatabase evaluates WHERE for you
 2. **Consistent behavior** - Same WHERE evaluation as SELECT
 3. **Simple implementation** - Just handle the row IDs provided
-4. **Automatic collation** - WHERE uses proper text comparison rules
 
 ## Performance Tips
 
@@ -410,14 +316,14 @@ new VirtualTable(
 
 ```php
 use mini\Database\VirtualDatabase;
-use mini\Database\Virtual\{VirtualTable, OrderInfo, DmlResult};
-use mini\Parsing\SQL\AST\{SelectStatement, InsertStatement};
+use mini\Database\Virtual\{VirtualTable, OrderInfo, Row};
+use mini\Parsing\SQL\AST\SelectStatement;
 
 $vdb = new VirtualDatabase();
 
 // Remote API table with full optimization
 $vdb->registerTable('github_repos', new VirtualTable(
-    selectFn: function(SelectStatement $ast, $collator): iterable {
+    selectFn: function(SelectStatement $ast): iterable {
         // Extract filters from WHERE
         $org = null;
         if ($ast->where) {
@@ -441,13 +347,9 @@ $vdb->registerTable('github_repos', new VirtualTable(
 
         $repos = json_decode(file_get_contents($url), true);
 
-        // Tell engine we applied ordering (GitHub API uses case-sensitive sorting)
+        // Tell engine we applied ordering
         if ($sort) {
-            yield new OrderInfo(
-                column: $sort,
-                desc: $desc,
-                collation: 'BINARY'  // GitHub API uses case-sensitive sorting
-            );
+            yield new OrderInfo(column: $sort, desc: $desc);
         }
 
         foreach ($repos as $repo) {
@@ -475,15 +377,6 @@ foreach ($repos as $repo) {
 }
 ```
 
-## Benefits Over src/Tables
-
-1. **Simpler** - Closures instead of class hierarchies
-2. **More powerful** - Full SQL parsing with AST
-3. **Smart execution** - Streaming vs materialization
-4. **Flexible** - Easy to optimize or stay simple
-5. **SQL interface** - Works with PartialQuery automatically
-6. **Collation-aware** - Proper text comparison for international apps
-
 ## Helper Function
 
 Access VirtualDatabase via the `vdb()` helper:
@@ -499,13 +392,32 @@ See `examples/virtual-database.example.php` for configuration examples.
 
 ## Additional Documentation
 
-- **[COLLATION.md](COLLATION.md)** - Complete collation system guide
 - **SQL Parser** - See `src/Parsing/SQL/` for AST structure
 - **Examples** - See `examples/virtual-database.example.php`
 
+## Current Limitations
+
+### Correlated Subqueries Not Supported
+
+Subqueries that reference columns from the outer query are not yet supported:
+
+```sql
+-- Works (non-correlated)
+SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE status = 'active')
+
+-- Doesn't work (correlated - references outer table)
+SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE orders.org_id = users.org_id)
+```
+
 ## Future Enhancements
 
+- **Correlated subqueries** - WhereEvaluator needs row context from outer queries:
+  ```php
+  // Proposed API
+  $evaluator->withRow('users', $usersRow)->withRow('orders', $ordersRow)
+  ```
+  This would allow resolving `table.column` references against provided row contexts.
 - Support for JOIN operations
 - Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
 - GROUP BY and HAVING clauses
-- Subquery support in WHERE clauses
+- Collation support for unindexed table implementations (CsvTable, in-memory arrays)

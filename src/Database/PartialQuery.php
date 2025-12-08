@@ -9,9 +9,9 @@ use mini\Parsing\TextNode;
  * Immutable query builder for composable SQL queries
  *
  * @template T of array|object
- * @implements \IteratorAggregate<int, T>
+ * @implements ResultSetInterface<T>
  */
-final class PartialQuery implements \IteratorAggregate
+final class PartialQuery implements ResultSetInterface
 {
     private DatabaseInterface $db;
 
@@ -54,7 +54,7 @@ final class PartialQuery implements \IteratorAggregate
 
     private ?string $select = null;
     private ?string $orderBy = null;
-    private int $limit = 1000;
+    private ?int $limit = null;
     private int $offset = 0;
 
     private ?\Closure $hydrator = null;
@@ -249,7 +249,8 @@ final class PartialQuery implements \IteratorAggregate
         if ($values instanceof self) {
             // Cross-database or dialect without subquery support: materialize to value list
             if ($this->db !== $values->db || !$this->db->getDialect()->supportsSubquery()) {
-                $list = $values->column();
+                // Use PHP_INT_MAX as default limit to get all values (no artificial limit)
+                $list = $this->db->queryColumn($values->buildSql(PHP_INT_MAX), $values->getAllParams());
                 if ($list === []) {
                     return $this->where('1 = 0');
                 }
@@ -263,8 +264,9 @@ final class PartialQuery implements \IteratorAggregate
 
             // 2) Inline the inner query core as a literal subquery in the WHERE clause
             //    (allows correlation with outer aliases)
-            $subSql    = $values->buildCoreSql();   // private, but callable from same class
-            $subParams = $values->getMainParams();  // base + WHERE params of the inner query
+            //    Use PHP_INT_MAX as default limit (no artificial limit for subqueries)
+            $subSql    = $values->buildCoreSql(PHP_INT_MAX);
+            $subParams = $values->getMainParams();
 
             return $new->where("$col IN ($subSql)", $subParams);
         }
@@ -380,10 +382,12 @@ final class PartialQuery implements \IteratorAggregate
 
     /**
      * Build SQL query string with optional WITH prefix
+     *
+     * @param int|null $defaultLimit Default limit for outer queries (null = no limit)
      */
-    private function buildSql(): string
+    private function buildSql(?int $defaultLimit = null): string
     {
-        $core = $this->buildCoreSql();
+        $core = $this->buildCoreSql($defaultLimit);
 
         if (empty($this->cteList)) {
             return $core;
@@ -399,8 +403,10 @@ final class PartialQuery implements \IteratorAggregate
 
     /**
      * Build core SQL (without WITH prefix)
+     *
+     * @param int|null $defaultLimit Default limit to apply if none set (null = no limit)
      */
-    private function buildCoreSql(): string
+    private function buildCoreSql(?int $defaultLimit = null): string
     {
         $dialect = $this->db->getDialect();
         $select  = $this->select ?? '*';
@@ -424,10 +430,13 @@ final class PartialQuery implements \IteratorAggregate
             $sql .= " ORDER BY {$this->orderBy}";
         } elseif ($dialect === SqlDialect::SqlServer || $dialect === SqlDialect::Oracle) {
             // SQL Server and Oracle require ORDER BY when using OFFSET/FETCH
-            $sql .= " ORDER BY (SELECT 0)";
+            // But only if we have a limit or offset
+            if ($this->limit !== null || $defaultLimit !== null || $this->offset > 0) {
+                $sql .= " ORDER BY (SELECT 0)";
+            }
         }
 
-        $sql .= $this->buildLimitClause($dialect);
+        $sql .= $this->buildLimitClause($dialect, $defaultLimit);
 
         return $sql;
     }
@@ -451,11 +460,24 @@ final class PartialQuery implements \IteratorAggregate
 
     /**
      * Build LIMIT/OFFSET clause according to database dialect
+     *
+     * @param SqlDialect $dialect Database dialect
+     * @param int|null $defaultLimit Default limit to use if none set (null = no limit)
      */
-    private function buildLimitClause(SqlDialect $dialect): string
+    private function buildLimitClause(SqlDialect $dialect, ?int $defaultLimit = null): string
     {
-        $limit  = $this->limit;
+        $limit  = $this->limit ?? $defaultLimit;
         $offset = $this->offset;
+
+        // No limit and no offset -> no clause needed
+        if ($limit === null && $offset === 0) {
+            return '';
+        }
+
+        // If we have offset but no limit, we need a very large limit for some dialects
+        if ($limit === null) {
+            $limit = PHP_INT_MAX;
+        }
 
         return match ($dialect) {
             SqlDialect::MySQL =>
@@ -539,11 +561,47 @@ final class PartialQuery implements \IteratorAggregate
     /**
      * Fetch first column from all rows
      *
+     * Applies default limit of 1000 if no explicit limit was set.
+     *
      * @return array<int, mixed>
      */
     public function column(): array
     {
-        return $this->db->queryColumn($this->buildSql(), $this->getAllParams());
+        return $this->db->queryColumn($this->buildSql(1000), $this->getAllParams());
+    }
+
+    /**
+     * Fetch first column of first row
+     *
+     * Does NOT apply default limit - intended for scalar subquery use cases
+     *
+     * @return mixed
+     */
+    public function field(): mixed
+    {
+        return $this->db->queryField($this->buildSql(), $this->getAllParams());
+    }
+
+    /**
+     * Get all rows as array
+     *
+     * Warning: Materializes all results into memory.
+     *
+     * @return array<int, T>
+     */
+    public function toArray(): array
+    {
+        return iterator_to_array($this);
+    }
+
+    /**
+     * JSON serialize - returns all rows
+     *
+     * @return array<int, T>
+     */
+    public function jsonSerialize(): array
+    {
+        return $this->toArray();
     }
 
     /**
@@ -595,11 +653,14 @@ final class PartialQuery implements \IteratorAggregate
     /**
      * Iterator over results (streaming)
      *
+     * Applies default limit of 1000 if no explicit limit was set.
+     * This protects against accidental unbounded queries.
+     *
      * @return \Traversable<int, T>
      */
     public function getIterator(): \Traversable
     {
-        $rows = $this->db->rawQuery($this->buildSql(), $this->getAllParams());
+        $rows = $this->db->query($this->buildSql(1000), $this->getAllParams());
 
         // No hydration -> yield rows as-is
         if ($this->entityClass === null && $this->hydrator === null) {
@@ -694,8 +755,10 @@ final class PartialQuery implements \IteratorAggregate
 
     /**
      * Get LIMIT value (for DELETE/UPDATE implementations)
+     *
+     * Returns null if no limit was explicitly set.
      */
-    public function getLimit(): int
+    public function getLimit(): ?int
     {
         return $this->limit;
     }

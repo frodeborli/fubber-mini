@@ -7,11 +7,13 @@ use mini\Parsing\SQL\AST\{
     BinaryOperation,
     UnaryOperation,
     InOperation,
+    IsNullOperation,
+    LikeOperation,
     LiteralNode,
     IdentifierNode,
     PlaceholderNode,
     FunctionCallNode,
-    SelectStatement
+    SubqueryNode
 };
 
 /**
@@ -19,22 +21,31 @@ use mini\Parsing\SQL\AST\{
  *
  * Handles:
  * - Binary operations (=, >, <, >=, <=, !=, AND, OR)
- * - IN operations (with lists or subqueries)
+ * - IN / NOT IN operations (value lists and subqueries)
+ * - IS NULL / IS NOT NULL
+ * - LIKE / NOT LIKE (SQL wildcards: % and _)
  * - Unary operations (-, NOT)
  * - Placeholders (? and :name)
- * - NULL comparisons
- * - Collation-aware comparisons
+ * - Subqueries (via lazy evaluation through ValueInterface)
+ *
+ * Uses PHP's native comparison operators.
  */
 class WhereEvaluator
 {
     private array $params;
     private int $positionalIndex = 0;
-    private \Collator $collator;
 
-    public function __construct(array $params = [], ?\Collator $collator = null)
+    /** @var \Closure|null fn(SubqueryNode): ValueInterface */
+    private ?\Closure $subqueryResolver;
+
+    /**
+     * @param array $params Bound parameters (positional or named)
+     * @param \Closure|null $subqueryResolver fn(SubqueryNode): ValueInterface - creates lazy subquery values
+     */
+    public function __construct(array $params = [], ?\Closure $subqueryResolver = null)
     {
         $this->params = $params;
-        $this->collator = $collator ?? Collation::binary();
+        $this->subqueryResolver = $subqueryResolver;
     }
 
     /**
@@ -64,6 +75,14 @@ class WhereEvaluator
             return $this->evaluateInOp($node, $row);
         }
 
+        if ($node instanceof IsNullOperation) {
+            return $this->evaluateIsNull($node, $row);
+        }
+
+        if ($node instanceof LikeOperation) {
+            return $this->evaluateLike($node, $row);
+        }
+
         if ($node instanceof UnaryOperation) {
             return $this->evaluateUnaryOp($node, $row);
         }
@@ -84,42 +103,81 @@ class WhereEvaluator
             return $this->evaluate($node->left, $row) || $this->evaluate($node->right, $row);
         }
 
-        // Comparison operators - use collator for proper comparisons
-        $left = $this->getValue($node->left, $row);
-        $right = $this->getValue($node->right, $row);
+        // Comparison operators - get scalar values
+        $left = $this->getScalarValue($node->left, $row);
+        $right = $this->getScalarValue($node->right, $row);
 
         return match($operator) {
-            '=' => Collation::equals($this->collator, $left, $right),
-            '!=' => !Collation::equals($this->collator, $left, $right),
-            '>' => Collation::compare($this->collator, $left, $right) > 0,
-            '<' => Collation::compare($this->collator, $left, $right) < 0,
-            '>=' => Collation::compare($this->collator, $left, $right) >= 0,
-            '<=' => Collation::compare($this->collator, $left, $right) <= 0,
+            '=' => $left == $right,  // Loose comparison like SQL
+            '!=' => $left != $right,
+            '>' => $left > $right,
+            '<' => $left < $right,
+            '>=' => $left >= $right,
+            '<=' => $left <= $right,
             default => throw new \RuntimeException("Unsupported operator: $operator")
         };
     }
 
     private function evaluateInOp(InOperation $node, array $row): bool
     {
-        $left = $this->getValue($node->left, $row);
+        $left = $this->getScalarValue($node->left, $row);
 
-        if ($node->isSubquery) {
-            // Subquery not yet implemented
-            throw new \RuntimeException("IN subqueries not yet supported in virtual tables");
+        // Get ValueInterface for the IN values
+        $valueSet = $this->getValueSet($node, $row);
+
+        $result = $valueSet->contains($left);
+        return $node->negated ? !$result : $result;
+    }
+
+    /**
+     * Get a ValueInterface for the IN operation's values
+     */
+    private function getValueSet(InOperation $node, array $row): ValueInterface
+    {
+        // Subquery - create lazy subquery value
+        if ($node->isSubquery()) {
+            if ($this->subqueryResolver === null) {
+                throw new \RuntimeException("Subqueries in IN clauses require a subquery resolver");
+            }
+            return ($this->subqueryResolver)($node->values);
         }
 
-        // IN with list of values
+        // Value list - collect into array and wrap
         $values = [];
         foreach ($node->values as $valueNode) {
-            $values[] = $this->getValue($valueNode, $row);
+            $values[] = $this->getScalarValue($valueNode, $row);
         }
 
-        return in_array($left, $values, false); // Loose comparison like SQL
+        return new ValueList($values);
+    }
+
+    private function evaluateIsNull(IsNullOperation $node, array $row): bool
+    {
+        $value = $this->getScalarValue($node->expression, $row);
+        $isNull = $value === null;
+        return $node->negated ? !$isNull : $isNull;
+    }
+
+    private function evaluateLike(LikeOperation $node, array $row): bool
+    {
+        $value = $this->getScalarValue($node->left, $row);
+        $pattern = $this->getScalarValue($node->pattern, $row);
+
+        // Convert SQL LIKE pattern to regex
+        // % matches any sequence of characters, _ matches any single character
+        $regex = '/^' . preg_replace_callback(
+            '/([%_])|([^%_]+)/',
+            fn($m) => $m[1] ? ($m[1] === '%' ? '.*' : '.') : preg_quote($m[2], '/'),
+            $pattern
+        ) . '$/i';
+
+        $matches = (bool) preg_match($regex, (string) $value);
+        return $node->negated ? !$matches : $matches;
     }
 
     private function evaluateUnaryOp(UnaryOperation $node, array $row): mixed
     {
-        $value = $this->getValue($node->expression, $row);
+        $value = $this->getScalarValue($node->expression, $row);
 
         return match($node->operator) {
             '-' => -$value,
@@ -128,7 +186,10 @@ class WhereEvaluator
         };
     }
 
-    private function getValue(ASTNode $node, array $row): mixed
+    /**
+     * Get a scalar PHP value from an AST node
+     */
+    private function getScalarValue(ASTNode $node, array $row): mixed
     {
         if ($node instanceof IdentifierNode) {
             // Handle dotted identifiers (table.column)
@@ -143,6 +204,9 @@ class WhereEvaluator
                 return str_contains($node->value, '.')
                     ? (float)$node->value
                     : (int)$node->value;
+            }
+            if ($node->valueType === 'null') {
+                return null;
             }
             return $node->value; // string
         }
@@ -164,8 +228,8 @@ class WhereEvaluator
 
         if ($node instanceof BinaryOperation) {
             // For expressions like (col1 + col2)
-            $left = $this->getValue($node->left, $row);
-            $right = $this->getValue($node->right, $row);
+            $left = $this->getScalarValue($node->left, $row);
+            $right = $this->getScalarValue($node->right, $row);
 
             return match($node->operator) {
                 '+' => $left + $right,
@@ -177,8 +241,16 @@ class WhereEvaluator
         }
 
         if ($node instanceof FunctionCallNode) {
-            // Simple function support (can be extended)
             throw new \RuntimeException("Function calls in WHERE not yet supported: " . $node->name);
+        }
+
+        if ($node instanceof SubqueryNode) {
+            // Scalar subquery context - must return exactly one value
+            if ($this->subqueryResolver === null) {
+                throw new \RuntimeException("Subqueries require a subquery resolver");
+            }
+            $valueInterface = ($this->subqueryResolver)($node);
+            return $valueInterface->getValue();
         }
 
         throw new \RuntimeException("Cannot get value from " . get_class($node));

@@ -198,6 +198,42 @@ abstract class Test
         }
     }
 
+    protected function assertArrayHasKey(string|int $key, array $array, string $message = ''): void
+    {
+        if (!array_key_exists($key, $array)) {
+            throw new \AssertionError($message ?: "Array does not have key '$key'");
+        }
+    }
+
+    protected function assertIsArray(mixed $value, string $message = ''): void
+    {
+        if (!is_array($value)) {
+            throw new \AssertionError($message ?: "Expected array, got " . gettype($value));
+        }
+    }
+
+    protected function assertIsObject(mixed $value, string $message = ''): void
+    {
+        if (!is_object($value)) {
+            throw new \AssertionError($message ?: "Expected object, got " . gettype($value));
+        }
+    }
+
+    protected function assertJson(string $value, string $message = ''): void
+    {
+        json_decode($value);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \AssertionError($message ?: "Invalid JSON: " . json_last_error_msg());
+        }
+    }
+
+    protected function assertStringContainsString(string $needle, string $haystack, string $message = ''): void
+    {
+        if (!str_contains($haystack, $needle)) {
+            throw new \AssertionError($message ?: "String does not contain '$needle'");
+        }
+    }
+
     protected function fail(string $message = 'Test failed'): void
     {
         throw new \AssertionError($message);

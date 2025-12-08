@@ -10,7 +10,7 @@ namespace mini\Database\Virtual;
  *
  * Usage:
  * ```php
- * selectFn: function($ast, $collator): iterable {
+ * selectFn: function($ast): iterable {
  *     foreach ($data as $id => $columns) {
  *         yield new Row($id, $columns);
  *     }
