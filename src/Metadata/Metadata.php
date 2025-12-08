@@ -91,6 +91,11 @@ class Metadata implements JsonSerializable
     private array $propertyMetadata = [];
 
     /**
+     * @var array<string, class-string> Property class references (for lazy resolution)
+     */
+    private array $propertyRefs = [];
+
+    /**
      * @var Metadata|null Metadata for array items
      */
     private ?Metadata $itemsMetadata = null;
@@ -98,12 +103,39 @@ class Metadata implements JsonSerializable
     /**
      * Magic property access for property metadata
      *
+     * Returns property metadata if explicitly set, otherwise resolves
+     * from class reference if available.
+     *
      * @param string $property Property name
      * @return Metadata|null Property metadata or null if not set
      */
     public function __get(string $property): ?Metadata
     {
-        return $this->propertyMetadata[$property] ?? null;
+        // Return explicit property metadata if set
+        if (isset($this->propertyMetadata[$property])) {
+            return $this->propertyMetadata[$property];
+        }
+
+        // Resolve from class reference if available
+        if (isset($this->propertyRefs[$property])) {
+            return \mini\metadata($this->propertyRefs[$property]);
+        }
+
+        return null;
+    }
+
+    /**
+     * Set a class reference for a property (for lazy metadata resolution)
+     *
+     * @param string $property Property name
+     * @param class-string $class Class to resolve metadata from
+     * @return static
+     */
+    public function ref(string $property, string $class): static
+    {
+        $clone = clone $this;
+        $clone->propertyRefs[$property] = $class;
+        return $clone;
     }
 
     /**
@@ -112,12 +144,15 @@ class Metadata implements JsonSerializable
      * Short, human-readable label for the data. Typically used in UI forms,
      * documentation, and error messages.
      *
+     * Stringable values (like Translatable) are preserved for i18n support
+     * and converted to strings during jsonSerialize().
+     *
      * @param Stringable|string|null $title Short identifier
      * @return static
      */
     public function title(Stringable|string|null $title): static
     {
-        return $this->setAnnotation('title', (string)$title);
+        return $this->setAnnotation('title', $title);
     }
 
     /**
@@ -126,12 +161,15 @@ class Metadata implements JsonSerializable
      * Detailed explanation of the data's purpose, constraints, or usage.
      * More verbose than title.
      *
+     * Stringable values (like Translatable) are preserved for i18n support
+     * and converted to strings during jsonSerialize().
+     *
      * @param Stringable|string|null $description Detailed explanation
      * @return static
      */
     public function description(Stringable|string|null $description): static
     {
-        return $this->setAnnotation('description', (string)$description);
+        return $this->setAnnotation('description', $description);
     }
 
     /**
@@ -297,11 +335,20 @@ class Metadata implements JsonSerializable
             }
         }
 
-        // Add property metadata
-        if (!empty($this->propertyMetadata)) {
+        // Add property metadata (explicit and refs)
+        $allProps = array_unique(array_merge(
+            array_keys($this->propertyMetadata),
+            array_keys($this->propertyRefs)
+        ));
+
+        if (!empty($allProps)) {
             $schema['properties'] = [];
-            foreach ($this->propertyMetadata as $prop => $metadata) {
-                $schema['properties'][$prop] = $metadata;
+            foreach ($allProps as $prop) {
+                // Use __get to resolve refs lazily
+                $propMeta = $this->__get($prop);
+                if ($propMeta !== null) {
+                    $schema['properties'][$prop] = $propMeta;
+                }
             }
         }
 
@@ -314,7 +361,7 @@ class Metadata implements JsonSerializable
     }
 
     /**
-     * Deep clone property metadata
+     * Deep clone property metadata (refs are just class names, no need to clone)
      */
     public function __clone(): void
     {

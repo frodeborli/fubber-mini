@@ -53,8 +53,8 @@ echo json_encode($userMeta, JSON_PRETTY_PRINT);
 Use the `Property` attribute for interfaces or classes without actual properties:
 
 ```php
-#[Meta\Property('username', 'Username', 'User login', null, true)]
-#[Meta\Property('email', 'Email Address', null, null, null, null, null, 'email')]
+#[Meta\Property(name: 'username', title: 'Username', description: 'User login', readOnly: true)]
+#[Meta\Property(name: 'email', title: 'Email Address', format: 'email')]
 interface UserInterface {}
 
 $meta = mini\metadata(UserInterface::class);
@@ -194,6 +194,38 @@ All attributes are in the `mini\Metadata\Attributes` namespace:
 - **`IsDeprecated(bool $value = true)`** - Mark as deprecated (class or property)
 - **`MetaFormat(string $format)`** - Format hint like 'email', 'uri' (property only)
 - **`Property(...)`** - Define property metadata without actual property (class only, repeatable)
+- **`Ref(string $class)`** - Reference another class's metadata (property only)
+
+### Class References and Auto-Resolution
+
+Properties with class/interface type hints automatically resolve to that class's metadata:
+
+```php
+#[Meta\Title('Group')]
+class Group {
+    #[Meta\Title('Name')]
+    public string $name;
+}
+
+class User {
+    public Group $group;  // Auto-resolves to Group metadata
+}
+
+$meta = mini\metadata(User::class);
+$meta->group->name;  // Returns Group's name metadata
+```
+
+Use `Ref` to override the type hint or specify a reference for untyped properties:
+
+```php
+#[Meta\Title('Admin Group')]
+class AdminGroup {}
+
+class User {
+    #[Meta\Ref(AdminGroup::class)]
+    public Group $group;  // Resolves to AdminGroup instead of Group
+}
+```
 
 ### Combining with Validator Attributes
 
@@ -262,11 +294,36 @@ Extends `InstanceStore<Metadata>` and provides:
 - Property access: `$store->User`
 - Methods: `has()`, `get()`, `set()`, `delete()`
 
+## Translation Support (i18n)
+
+String values in attributes are automatically wrapped in `Translatable` for i18n support:
+
+```php
+#[Meta\Title('Username')]  // Automatically translatable
+#[Meta\Description('The unique login identifier')]
+class User {}
+
+// The AttributeMetadataFactory wraps strings in Translatable with the
+// correct source file, enabling translation extraction tools to find them.
+$meta = mini\metadata(User::class);
+// $meta's title is a Translatable with sourceFile = 'src/Entity/User.php'
+```
+
+For programmatic metadata, you can use `t()` directly:
+
+```php
+$meta = mini\metadata()
+    ->title(t('Username'))
+    ->description(t('The unique login identifier'));
+```
+
+Both approaches preserve translation context until JSON serialization, when strings are resolved to the current locale.
+
 ## Design Philosophy
 
 1. **Non-validating**: Metadata provides documentation, not validation
 2. **Composable**: Can be nested for complex structures
-3. **Translatable**: Accepts `Translatable` instances for i18n support
+3. **Translatable**: Strings in attributes are auto-wrapped for i18n; accepts `Translatable` instances
 4. **Permissive**: All fields optional, add only what's needed
 5. **Immutable**: Methods return cloned instances
 6. **JSON Schema compliant**: Maps directly to JSON Schema annotation keywords

@@ -16,11 +16,11 @@ class Translatable implements \Stringable
     private array $vars;
     private string $sourceFile;
 
-    public function __construct(string $text, array $vars = [])
+    public function __construct(string $text, array $vars = [], ?string $sourceFile = null)
     {
         $this->sourceText = $text;
         $this->vars = $vars;
-        $this->sourceFile = $this->getCallingFile();
+        $this->sourceFile = $sourceFile ?? $this->getCallingFile();
     }
 
     /**
