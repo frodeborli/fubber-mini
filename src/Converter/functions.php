@@ -51,10 +51,10 @@ use Psr\Http\Message\ResponseInterface;
  * // Convert string to text response
  * $response = convert("Hello World", ResponseInterface::class);
  *
- * // Returns null if no converter found
- * $result = convert($unknownType, ResponseInterface::class);
- * if ($result === null) {
- *     // Handle missing converter
+ * // Check if conversion happened (distinguishes null result from no converter)
+ * $result = convert($value, 'string', $found);
+ * if (!$found) {
+ *     // No converter registered for this type
  * }
  *
  * // Custom domain objects
@@ -70,12 +70,13 @@ use Psr\Http\Message\ResponseInterface;
  * @template O
  * @param mixed $input The value to convert
  * @param class-string<O> $targetType The desired output type
+ * @param bool|null &$found Set to true if a converter was found and executed, false otherwise
  * @return O|null The converted value, or null if no converter found
  * @see ConverterRegistryInterface::register() For registering custom converters
  */
-function convert(mixed $input, string $targetType): mixed
+function convert(mixed $input, string $targetType, ?bool &$found = null): mixed
 {
-    return Mini::$mini->get(ConverterRegistryInterface::class)->convert($input, $targetType);
+    return Mini::$mini->get(ConverterRegistryInterface::class)->convert($input, $targetType, $found);
 }
 
 /**

@@ -41,15 +41,15 @@ class ClosureConverter implements ConverterInterface
             );
         }
 
-        // Parse input type (handles union types)
-        $this->inputTypes = array_map('trim', explode('|', $inputType->__toString()));
-
-        // Reject null in input types
-        if (in_array('null', $this->inputTypes)) {
+        // Reject nullable input types
+        if ($inputType->allowsNull()) {
             throw new \InvalidArgumentException(
                 'Converter closure parameter cannot accept null'
             );
         }
+
+        // Parse input type (handles union types)
+        $this->inputTypes = array_map('trim', explode('|', $inputType->__toString()));
 
         // Normalize union string (sort alphabetically for canonical form)
         // So "string|array" and "array|string" are treated as the same
@@ -68,14 +68,14 @@ class ClosureConverter implements ConverterInterface
                 );
             }
 
-            $this->outputType = $outputType->__toString();
-
-            // Reject null in output type
-            if (str_contains($this->outputType, 'null')) {
+            // Reject nullable return types - converters should always produce a value
+            if ($outputType->allowsNull()) {
                 throw new \InvalidArgumentException(
                     'Converter closure cannot return null'
                 );
             }
+
+            $this->outputType = $outputType->__toString();
 
             // Reject union output types
             if (str_contains($this->outputType, '|')) {

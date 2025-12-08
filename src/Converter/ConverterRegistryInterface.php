@@ -128,10 +128,21 @@ interface ConverterRegistryInterface
      * Finds the most specific converter and performs the conversion.
      * Returns null if no suitable converter found (does not throw exceptions).
      *
+     * To distinguish "converted to null" from "no converter found", pass
+     * a variable for the $found parameter:
+     *
+     * ```php
+     * $result = $registry->convert($value, 'string', $found);
+     * if (!$found) {
+     *     // No converter registered for this type
+     * }
+     * ```
+     *
      * @template O
      * @param mixed $input The value to convert
      * @param class-string<O> $targetType The desired output type
+     * @param bool|null &$found Set to true if a converter was found and executed, false otherwise
      * @return O|null The converted value, or null if no converter found
      */
-    public function convert(mixed $input, string $targetType): mixed;
+    public function convert(mixed $input, string $targetType, ?bool &$found = null): mixed;
 }
