@@ -52,19 +52,21 @@ $test = new class extends Test {
     // No converter found
     // ========================================
 
-    public function testConvertReturnsNullWhenNoConverter(): void
+    public function testConvertThrowsWhenNoConverter(): void
     {
         // No converter registered for float -> array
-        $result = \mini\convert(3.14, 'array');
-
-        $this->assertNull($result);
+        $this->assertThrows(
+            fn() => \mini\convert(3.14, 'array'),
+            \RuntimeException::class
+        );
     }
 
-    public function testConvertReturnsNullForUnknownTargetType(): void
+    public function testConvertThrowsForUnknownTargetType(): void
     {
-        $result = \mini\convert('hello', 'SomeUnknownType');
-
-        $this->assertNull($result);
+        $this->assertThrows(
+            fn() => \mini\convert('hello', 'SomeUnknownType'),
+            \RuntimeException::class
+        );
     }
 
     // ========================================
@@ -77,28 +79,6 @@ $test = new class extends Test {
         $result = \mini\convert(new \RuntimeException('runtime error'), 'array');
 
         $this->assertSame(['error' => 'runtime error'], $result);
-    }
-
-    // ========================================
-    // &$found parameter
-    // ========================================
-
-    public function testConvertFoundParameterTrue(): void
-    {
-        $found = null;
-        $result = \mini\convert('hello', 'array', $found);
-
-        $this->assertTrue($found);
-        $this->assertSame(['text' => 'hello'], $result);
-    }
-
-    public function testConvertFoundParameterFalse(): void
-    {
-        $found = null;
-        $result = \mini\convert(3.14, 'array', $found);
-
-        $this->assertFalse($found);
-        $this->assertNull($result);
     }
 };
 

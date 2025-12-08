@@ -10,7 +10,7 @@ Mini provides **automatic type conversion** with reflection-based type matching.
 - **Union input types** - Single converter handles multiple input types
 - **Specificity resolution** - Most specific converter wins (single > union, class > interface > parent)
 - **Extensible** - Applications can register custom converters
-- **Returns null** - No exceptions when conversion impossible
+- **Fail-fast** - Throws if no converter found (catches bugs early)
 
 ## Setup
 
@@ -25,12 +25,11 @@ $registry = Mini::$mini->get(ConverterRegistryInterface::class);
 
 // Use convert() helper function
 $response = convert($value, ResponseInterface::class);
-// Returns null if no converter registered for this type
+// Throws RuntimeException if no converter registered
 
-// Distinguish "no converter" from "converted to null value"
-$result = convert($value, 'string', $found);
-if (!$found) {
-    // No converter was registered for this input→target combination
+// Check if converter exists before converting
+if ($registry->has($value, ResponseInterface::class)) {
+    $response = $registry->convert($value, ResponseInterface::class);
 }
 ```
 
@@ -73,9 +72,9 @@ use mini\Converter\ConverterRegistry;
 
 // Custom registry with logging
 return new class extends ConverterRegistry {
-    public function convert(mixed $input, string $targetType, ?bool &$found = null): mixed {
+    public function convert(mixed $input, string $targetType): mixed {
         error_log("Converting " . get_debug_type($input) . " to $targetType");
-        return parent::convert($input, $targetType, $found);
+        return parent::convert($input, $targetType);
     }
 };
 ```

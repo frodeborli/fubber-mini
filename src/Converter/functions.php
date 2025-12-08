@@ -34,7 +34,7 @@ use Psr\Http\Message\ResponseInterface;
  * Convert a value to a target type
  *
  * Uses the converter registry to find an appropriate converter for the given
- * input and target type. Returns null if no suitable converter found.
+ * input and target type. Throws if no suitable converter is found.
  *
  * The converter system uses reflection-based type matching to find the most
  * specific converter. Resolution order: direct single-type converter, union
@@ -51,12 +51,6 @@ use Psr\Http\Message\ResponseInterface;
  * // Convert string to text response
  * $response = convert("Hello World", ResponseInterface::class);
  *
- * // Check if conversion happened (distinguishes null result from no converter)
- * $result = convert($value, 'string', $found);
- * if (!$found) {
- *     // No converter registered for this type
- * }
- *
  * // Custom domain objects
  * $response = convert($userModel, ResponseInterface::class);
  * ```
@@ -70,13 +64,13 @@ use Psr\Http\Message\ResponseInterface;
  * @template O
  * @param mixed $input The value to convert
  * @param class-string<O> $targetType The desired output type
- * @param bool|null &$found Set to true if a converter was found and executed, false otherwise
- * @return O|null The converted value, or null if no converter found
+ * @return O The converted value
+ * @throws \RuntimeException If no converter is registered for this input→target combination
  * @see ConverterRegistryInterface::register() For registering custom converters
  */
-function convert(mixed $input, string $targetType, ?bool &$found = null): mixed
+function convert(mixed $input, string $targetType): mixed
 {
-    return Mini::$mini->get(ConverterRegistryInterface::class)->convert($input, $targetType, $found);
+    return Mini::$mini->get(ConverterRegistryInterface::class)->convert($input, $targetType);
 }
 
 /**

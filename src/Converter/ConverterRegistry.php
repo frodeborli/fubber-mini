@@ -191,18 +191,20 @@ class ConverterRegistry implements ConverterRegistryInterface
      * @template O
      * @param mixed $input The value to convert
      * @param class-string<O> $targetType The desired output type
-     * @param bool|null &$found Set to true if a converter was found and executed, false otherwise
-     * @return O|null The converted value, or null if no converter found
+     * @return O The converted value
+     * @throws \RuntimeException If no converter is registered for this input→target combination
      */
-    public function convert(mixed $input, string $targetType, ?bool &$found = null): mixed
+    public function convert(mixed $input, string $targetType): mixed
     {
         $converter = $this->findConverter($input, $targetType);
         if ($converter === null) {
-            $found = false;
-            return null;
+            throw new \RuntimeException(sprintf(
+                'No converter registered for %s → %s',
+                get_debug_type($input),
+                $targetType
+            ));
         }
 
-        $found = true;
         return $converter->convert($input, $targetType);
     }
 

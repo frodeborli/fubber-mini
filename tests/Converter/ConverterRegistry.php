@@ -61,10 +61,13 @@ $test = new class extends Test {
         $this->assertFalse($registry->has('value', 'NonExistentType'));
     }
 
-    public function testConvertReturnsNullWhenNoConverter(): void
+    public function testConvertThrowsWhenNoConverter(): void
     {
         $registry = $this->createRegistry();
-        $this->assertNull($registry->convert('value', 'NonExistentType'));
+        $this->assertThrows(
+            fn() => $registry->convert('value', 'NonExistentType'),
+            \RuntimeException::class
+        );
     }
 
     public function testGetReturnsNullWhenNoConverter(): void
@@ -103,7 +106,12 @@ $test = new class extends Test {
 
         // float is not in the union
         $this->assertFalse($registry->has(3.14, 'string'));
-        $this->assertNull($registry->convert(3.14, 'string'));
+
+        // Attempting to convert should throw
+        $this->assertThrows(
+            fn() => $registry->convert(3.14, 'string'),
+            \RuntimeException::class
+        );
     }
 
     // ========================================
@@ -329,8 +337,11 @@ $test = new class extends Test {
         // Register converter for Throwable -> string
         $registry->register(fn(\Throwable $e): string => $e->getMessage());
 
-        // stdClass is not Throwable
-        $this->assertNull($registry->convert(new \stdClass(), 'string'));
+        // stdClass is not Throwable - should throw, not silently return null
+        $this->assertThrows(
+            fn() => $registry->convert(new \stdClass(), 'string'),
+            \RuntimeException::class
+        );
     }
 
     public function testBooleanTypes(): void
@@ -351,40 +362,20 @@ $test = new class extends Test {
     }
 
     // ========================================
-    // &$found parameter
+    // Error messages
     // ========================================
 
-    public function testFoundParameterTrueWhenConverterExists(): void
-    {
-        $registry = $this->createRegistry();
-        $registry->register(fn(string $s): string => strtoupper($s));
-
-        $found = null;
-        $result = $registry->convert('hello', 'string', $found);
-
-        $this->assertTrue($found);
-        $this->assertSame('HELLO', $result);
-    }
-
-    public function testFoundParameterFalseWhenNoConverter(): void
+    public function testThrowsDescriptiveErrorMessage(): void
     {
         $registry = $this->createRegistry();
 
-        $found = null;
-        $result = $registry->convert('hello', 'string', $found);
-
-        $this->assertFalse($found);
-        $this->assertNull($result);
-    }
-
-    public function testFoundParameterWorksWithoutPassingIt(): void
-    {
-        $registry = $this->createRegistry();
-        $registry->register(fn(string $s): string => strtoupper($s));
-
-        // Should work without passing the parameter (backward compatible)
-        $result = $registry->convert('hello', 'string');
-        $this->assertSame('HELLO', $result);
+        try {
+            $registry->convert('hello', 'SomeTarget');
+            $this->fail('Expected RuntimeException');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('string', $e->getMessage());
+            $this->assertStringContainsString('SomeTarget', $e->getMessage());
+        }
     }
 };
 
