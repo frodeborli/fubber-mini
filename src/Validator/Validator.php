@@ -123,7 +123,14 @@ class Validator implements \JsonSerializable
     public function isInvalid(mixed $value, mixed $context = null): null|array|string|Stringable
     {
         // Check required first
-        $isEmpty = $value === null || $value === '' || $value === [];
+        // Note: For validators with property rules or array item rules, [] is not "empty" -
+        // it needs validation (some properties/items may be required, or minItems may apply).
+        $hasStructureRules = !empty($this->propertyValidators)
+            || !empty($this->patternPropertyValidators)
+            || isset($this->rules['items'])
+            || isset($this->rules['minItems'])
+            || isset($this->rules['maxItems']);
+        $isEmpty = $value === null || $value === '' || ($value === [] && !$hasStructureRules);
 
         if ($this->isRequired && $isEmpty) {
             return $this->requiredMessage ?? \mini\t("This field is required.");
@@ -858,7 +865,10 @@ class Validator implements \JsonSerializable
      */
     private function isObjectLike(mixed $value): bool
     {
-        return is_object($value) || (is_array($value) && !array_is_list($value));
+        // In PHP, an empty array [] is ambiguous - it could be an empty list or empty object.
+        // For validation purposes, we treat [] as object-like (valid for type: 'object')
+        // since JSON's {} maps to PHP's [] when decoded.
+        return is_object($value) || (is_array($value) && ($value === [] || !array_is_list($value)));
     }
 
     /**
@@ -908,7 +918,9 @@ class Validator implements \JsonSerializable
             'email' => filter_var($value, FILTER_VALIDATE_EMAIL) !== false,
             'uri' => filter_var($value, FILTER_VALIDATE_URL) !== false,
             'date-time' => (bool)preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/', $value),
-            'date' => (bool)preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) && checkdate(...array_map('intval', explode('-', $value))),
+            'date' => (bool)preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) && (function($parts) {
+                return checkdate((int)$parts[1], (int)$parts[2], (int)$parts[0]);
+            })(explode('-', $value)),
             'time' => (bool)preg_match('/^([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(\.\d+)?$/', $value),
             'ipv4' => filter_var($value, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false,
             'ipv6' => filter_var($value, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false,

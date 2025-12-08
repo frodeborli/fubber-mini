@@ -384,6 +384,8 @@ The `x-error` object contains custom error messages that can be used by client-s
 ->patternProperties(string $pattern, Validator $validator)
 ->additionalProperties(Validator|bool)
 ->dependentRequired(string $property, array $requiredProps)
+->withFields(array $fields)                // Clone with only these properties
+->withoutFields(array $fields)             // Clone excluding these properties
 ```
 
 ### Other Validators
@@ -472,6 +474,21 @@ $orderValidator = validator()
                     ->forProperty('quantity', validator()->type('integer')->minimum(1))
             )
     );
+```
+
+### Partial Validation
+
+Create validators for update operations by excluding or selecting specific fields:
+
+```php
+// Full user validator from attributes
+$userValidator = validator(User::class);
+
+// For update: exclude password (not required for profile updates)
+$profileUpdateValidator = $userValidator->withoutFields(['password']);
+
+// For password change: only validate password fields
+$passwordChangeValidator = $userValidator->withFields(['password', 'password_confirmation']);
 ```
 
 ## Immutability

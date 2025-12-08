@@ -26,7 +26,6 @@ class AttributeValidatorFactory
         $validator = (new Validator())->type('object');
 
         $properties = [];
-        $required = [];
 
         // First, process Field attributes on the class itself
         foreach ($reflection->getAttributes(Attributes\Field::class) as $attribute) {
@@ -35,10 +34,6 @@ class AttributeValidatorFactory
 
             if ($fieldValidator !== null) {
                 $properties[$field->name] = $fieldValidator;
-
-                if ($field->required) {
-                    $required[] = $field->name;
-                }
             }
         }
 
@@ -48,11 +43,6 @@ class AttributeValidatorFactory
 
             if ($propertyValidator !== null) {
                 $properties[$property->getName()] = $propertyValidator;
-
-                // Check if property is required
-                if ($this->isRequired($property)) {
-                    $required[] = $property->getName();
-                }
             }
         }
 
@@ -61,10 +51,9 @@ class AttributeValidatorFactory
             $validator = $validator->properties($properties);
         }
 
-        // Mark required properties
-        if (!empty($required)) {
-            $validator = $validator->required(...$required);
-        }
+        // Note: Required properties are marked via the Required attribute
+        // on the property validators themselves. The jsonSerialize() method
+        // derives the JSON Schema 'required' array from $validator->isRequired.
 
         return $validator;
     }
@@ -217,18 +206,5 @@ class AttributeValidatorFactory
             Attributes\Enum::class => $validator->enum($attribute->values, $attribute->message),
             default => $validator
         };
-    }
-
-    /**
-     * Check if a property has the Required attribute
-     */
-    private function isRequired(ReflectionProperty $property): bool
-    {
-        foreach ($property->getAttributes() as $attribute) {
-            if ($attribute->getName() === Attributes\Required::class) {
-                return true;
-            }
-        }
-        return false;
     }
 }
