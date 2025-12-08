@@ -21,6 +21,9 @@ Desktop.ini
 /tests/cache/
 /tests/tmp/
 
+# Default SQLite database (created by bootstrap when no DATABASE_URL set)
+_database.sqlite3
+
 # Example/debug files
 /examples/*.sqlite3
 /examples/cache/
