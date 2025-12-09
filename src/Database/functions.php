@@ -53,16 +53,22 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     }, null, 'sql-value');
 
     // sql-value -> DateTimeImmutable
-    // Handles: string dates, unix seconds, unix milliseconds, floats
+    // Assumes database stores UTC. Converts to application timezone.
     $registry->register(function(string|int|float $v): \DateTimeImmutable {
+        $utc = new \DateTimeZone('UTC');
+        $appTz = new \DateTimeZone(date_default_timezone_get());
+
         if (is_string($v)) {
-            return new \DateTimeImmutable($v);
+            // Parse as UTC, convert to app timezone
+            $dt = new \DateTimeImmutable($v, $utc);
+            return $dt->setTimezone($appTz);
         }
         if (is_float($v)) {
-            // Float: seconds with microsecond precision
+            // Float: seconds with microsecond precision (always UTC)
             $sec = (int) $v;
             $usec = (int) (($v - $sec) * 1_000_000);
-            return \DateTimeImmutable::createFromFormat('U u', "$sec $usec") ?: new \DateTimeImmutable("@$sec");
+            $dt = \DateTimeImmutable::createFromFormat('U u', "$sec $usec") ?: new \DateTimeImmutable("@$sec");
+            return $dt->setTimezone($appTz);
         }
         // Integer: detect seconds vs milliseconds
         // Timestamps < 100 billion are seconds (covers until year ~5138)
@@ -70,28 +76,42 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
         if ($v >= 100_000_000_000) {
             $sec = intdiv($v, 1000);
             $usec = ($v % 1000) * 1000;
-            return \DateTimeImmutable::createFromFormat('U u', "$sec $usec") ?: new \DateTimeImmutable("@$sec");
+            $dt = \DateTimeImmutable::createFromFormat('U u', "$sec $usec") ?: new \DateTimeImmutable("@$sec");
+            return $dt->setTimezone($appTz);
         }
-        return new \DateTimeImmutable("@$v");
+        $dt = new \DateTimeImmutable("@$v");
+        return $dt->setTimezone($appTz);
     }, null, 'sql-value');
 
     // sql-value -> DateTime
-    // Handles: string dates, unix seconds, unix milliseconds, floats
+    // Assumes database stores UTC. Converts to application timezone.
     $registry->register(function(string|int|float $v): \DateTime {
+        $utc = new \DateTimeZone('UTC');
+        $appTz = new \DateTimeZone(date_default_timezone_get());
+
         if (is_string($v)) {
-            return new \DateTime($v);
+            // Parse as UTC, convert to app timezone
+            $dt = new \DateTime($v, $utc);
+            $dt->setTimezone($appTz);
+            return $dt;
         }
         if (is_float($v)) {
             $sec = (int) $v;
             $usec = (int) (($v - $sec) * 1_000_000);
-            return \DateTime::createFromFormat('U u', "$sec $usec") ?: new \DateTime("@$sec");
+            $dt = \DateTime::createFromFormat('U u', "$sec $usec") ?: new \DateTime("@$sec");
+            $dt->setTimezone($appTz);
+            return $dt;
         }
         if ($v >= 100_000_000_000) {
             $sec = intdiv($v, 1000);
             $usec = ($v % 1000) * 1000;
-            return \DateTime::createFromFormat('U u', "$sec $usec") ?: new \DateTime("@$sec");
+            $dt = \DateTime::createFromFormat('U u', "$sec $usec") ?: new \DateTime("@$sec");
+            $dt->setTimezone($appTz);
+            return $dt;
         }
-        return new \DateTime("@$v");
+        $dt = new \DateTime("@$v");
+        $dt->setTimezone($appTz);
+        return $dt;
     }, null, 'sql-value');
 
     // =========================================================================

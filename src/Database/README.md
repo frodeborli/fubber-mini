@@ -147,13 +147,12 @@ enum Status: string {
 ```
 
 **DateTime conversion** supports multiple formats:
-- **String**: `"2024-01-15 10:30:00"` - parsed using PHP's default timezone
-- **String with TZ**: `"2024-01-15 10:30:00+02:00"` - timezone preserved
-- **Integer (seconds)**: `1705315800` - Unix timestamp, always UTC
-- **Integer (milliseconds)**: `1705315800123` - auto-detected when >= 100 billion, always UTC
-- **Float**: `1705315800.123456` - seconds with microsecond precision, always UTC
+- **String**: `"2024-01-15 10:30:00"` - interpreted as UTC
+- **Integer (seconds)**: `1705315800` - Unix timestamp
+- **Integer (milliseconds)**: `1705315800123` - auto-detected when >= 100 billion
+- **Float**: `1705315800.123456` - seconds with microsecond precision
 
-**Timezone behavior**: Unix timestamps are always interpreted as UTC. String dates use PHP's default timezone unless the string includes timezone info. If your database stores UTC strings without timezone suffix, ensure `date_default_timezone_set('UTC')` is set, or include the timezone in your SQL (`datetime || '+00:00'`).
+**Timezone behavior**: Database values are assumed to be UTC and automatically converted to the application timezone (`date_default_timezone_get()`). This means hydrated DateTime objects display in the user's expected timezone while the database remains in UTC.
 
 ### Custom Row Hydration with SqlRowHydrator
 
