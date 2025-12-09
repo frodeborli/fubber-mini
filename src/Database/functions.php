@@ -26,8 +26,14 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     // Target type: 'sql-value'
     // =========================================================================
 
-    // DateTime -> string
-    $registry->register(fn(\DateTimeInterface $dt): string => $dt->format('Y-m-d H:i:s'), 'sql-value');
+    // DateTime -> string (converted to sqlTimezone)
+    $registry->register(function(\DateTimeInterface $dt): string {
+        $dbTz = new \DateTimeZone(Mini::$mini->sqlTimezone);
+        if ($dt instanceof \DateTime) {
+            $dt = \DateTimeImmutable::createFromMutable($dt);
+        }
+        return $dt->setTimezone($dbTz)->format('Y-m-d H:i:s');
+    }, 'sql-value');
 
     // BackedEnum -> its backing value (string or int)
     $registry->register(fn(\BackedEnum $enum) => $enum->value, 'sql-value');
@@ -53,18 +59,19 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     }, null, 'sql-value');
 
     // sql-value -> DateTimeImmutable
-    // Assumes database stores UTC. Converts to application timezone.
+    // Interprets DB values in sqlTimezone, converts to application timezone.
     $registry->register(function(string|int|float $v): \DateTimeImmutable {
-        $utc = new \DateTimeZone('UTC');
+        $dbTz = new \DateTimeZone(Mini::$mini->sqlTimezone);
         $appTz = new \DateTimeZone(date_default_timezone_get());
 
         if (is_string($v)) {
-            // Parse as UTC, convert to app timezone
-            $dt = new \DateTimeImmutable($v, $utc);
+            // Parse in database timezone, convert to app timezone
+            $dt = new \DateTimeImmutable($v, $dbTz);
             return $dt->setTimezone($appTz);
         }
+        // Unix timestamps are always UTC regardless of sqlTimezone setting
         if (is_float($v)) {
-            // Float: seconds with microsecond precision (always UTC)
+            // Float: seconds with microsecond precision
             $sec = (int) $v;
             $usec = (int) (($v - $sec) * 1_000_000);
             $dt = \DateTimeImmutable::createFromFormat('U u', "$sec $usec") ?: new \DateTimeImmutable("@$sec");
@@ -84,17 +91,18 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
     }, null, 'sql-value');
 
     // sql-value -> DateTime
-    // Assumes database stores UTC. Converts to application timezone.
+    // Interprets DB values in sqlTimezone, converts to application timezone.
     $registry->register(function(string|int|float $v): \DateTime {
-        $utc = new \DateTimeZone('UTC');
+        $dbTz = new \DateTimeZone(Mini::$mini->sqlTimezone);
         $appTz = new \DateTimeZone(date_default_timezone_get());
 
         if (is_string($v)) {
-            // Parse as UTC, convert to app timezone
-            $dt = new \DateTime($v, $utc);
+            // Parse in database timezone, convert to app timezone
+            $dt = new \DateTime($v, $dbTz);
             $dt->setTimezone($appTz);
             return $dt;
         }
+        // Unix timestamps are always UTC regardless of sqlTimezone setting
         if (is_float($v)) {
             $sec = (int) $v;
             $usec = (int) (($v - $sec) * 1_000_000);

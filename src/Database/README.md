@@ -147,12 +147,14 @@ enum Status: string {
 ```
 
 **DateTime conversion** supports multiple formats:
-- **String**: `"2024-01-15 10:30:00"` - interpreted as UTC
-- **Integer (seconds)**: `1705315800` - Unix timestamp
+- **String**: `"2024-01-15 10:30:00"` - interpreted in `sqlTimezone`
+- **Integer (seconds)**: `1705315800` - Unix timestamp (always UTC)
 - **Integer (milliseconds)**: `1705315800123` - auto-detected when >= 100 billion
 - **Float**: `1705315800.123456` - seconds with microsecond precision
 
-**Timezone behavior**: Database values are assumed to be UTC and automatically converted to the application timezone (`date_default_timezone_get()`). This means hydrated DateTime objects display in the user's expected timezone while the database remains in UTC.
+**Timezone behavior**: String dates from the database are interpreted in `Mini::$mini->sqlTimezone` (defaults to `'+00:00'` UTC) and automatically converted to the application timezone. Configure via `SQL_TIMEZONE` or `MINI_SQL_TIMEZONE` environment variable using offset format (e.g., `'+00:00'`, `'-05:00'`).
+
+For SQL Server (which cannot set session timezone), Mini verifies the server's timezone matches `sqlTimezone` and throws if it doesn't.
 
 ### Custom Row Hydration with SqlRowHydrator
 

@@ -53,41 +53,62 @@ class PDOService
         $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
         $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
 
-        // Configure charset (UTF-8) and timezone (UTC) based on driver
+        $sqlTimezone = Mini::$mini->sqlTimezone;
+
+        // Configure charset (UTF-8) and timezone based on driver
         switch ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME)) {
             case 'mysql':
-                $pdo->exec("SET NAMES utf8mb4, time_zone = '+00:00'");
+                $pdo->exec("SET NAMES utf8mb4, time_zone = '{$sqlTimezone}'");
                 break;
             case 'pgsql':
-                $pdo->exec("SET client_encoding TO 'UTF8', timezone TO 'UTC'");
+                $pdo->exec("SET client_encoding TO 'UTF8', timezone TO '{$sqlTimezone}'");
                 break;
             case 'oci':
-                $pdo->exec("ALTER SESSION SET TIME_ZONE = 'UTC'");
+                $pdo->exec("ALTER SESSION SET TIME_ZONE = '{$sqlTimezone}'");
                 break;
             case 'sqlite':
                 $pdo->exec("PRAGMA encoding = 'UTF-8'");
+                // SQLite has no timezone concept - stores raw values
                 break;
             case 'sqlsrv':
             case 'dblib':
                 // SQL Server has no session timezone - uses server OS timezone.
-                // Verify the server is running in UTC (cached briefly to avoid per-request query).
+                // Verify the server timezone matches sqlTimezone (cached briefly).
                 // Short TTL (30s) because server timezone offset can change with DST transitions.
-                $cacheKey = 'mini:sqlsrv_utc:' . md5($pdo->getAttribute(\PDO::ATTR_CONNECTION_STATUS) ?? 'default');
-                $isUtc = apcu_fetch($cacheKey, $found);
+                $cacheKey = 'mini:sqlsrv_tz:' . md5(($pdo->getAttribute(\PDO::ATTR_CONNECTION_STATUS) ?? 'default') . $sqlTimezone);
+                $matches = apcu_fetch($cacheKey, $found);
                 if (!$found) {
-                    $offset = (int)$pdo->query("SELECT DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())")->fetchColumn();
-                    $isUtc = ($offset === 0);
-                    apcu_store($cacheKey, $isUtc, 30);
+                    $serverOffset = (int)$pdo->query("SELECT DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())")->fetchColumn();
+                    $expectedOffset = self::parseTimezoneOffset($sqlTimezone);
+                    $matches = ($serverOffset === $expectedOffset);
+                    apcu_store($cacheKey, $matches, 30);
                 }
-                if (!$isUtc) {
+                if (!$matches) {
                     throw new \RuntimeException(
-                        "SQL Server is not configured for UTC. " .
-                        "Mini requires UTC for consistent datetime handling. " .
-                        "Configure the server OS timezone to UTC."
+                        "SQL Server timezone does not match configured sqlTimezone '{$sqlTimezone}'. " .
+                        "SQL Server uses the OS timezone and cannot be changed per-connection. " .
+                        "Either configure the server OS timezone or set SQL_TIMEZONE to match the server."
                     );
                 }
                 break;
         }
+    }
+
+    /**
+     * Parse timezone offset string to minutes
+     *
+     * @param string $offset Offset like '+00:00', '-05:00', '+05:30'
+     * @return int Offset in minutes from UTC
+     */
+    private static function parseTimezoneOffset(string $offset): int
+    {
+        if (!preg_match('/^([+-])(\d{2}):(\d{2})$/', $offset, $m)) {
+            throw new \InvalidArgumentException(
+                "Invalid sqlTimezone format '{$offset}'. Use offset format like '+00:00', '-05:00'."
+            );
+        }
+        $minutes = ((int)$m[2] * 60) + (int)$m[3];
+        return $m[1] === '-' ? -$minutes : $minutes;
     }
 
     /**

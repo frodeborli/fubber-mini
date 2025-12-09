@@ -102,6 +102,20 @@ final class Mini implements ContainerInterface {
     public readonly string $timezone;
 
     /**
+     * Database timezone for datetime storage (offset format, e.g., '+00:00').
+     *
+     * Configured via MINI_SQL_TIMEZONE or SQL_TIMEZONE environment variable, defaults to '+00:00' (UTC).
+     * PDO connections are configured to use this timezone. DateTime values from the database are
+     * interpreted in this timezone and converted to the application timezone for display.
+     *
+     * For SQL Server (which cannot set session timezone), Mini verifies the server's timezone
+     * matches this setting and throws RuntimeException if it doesn't.
+     *
+     * Use offset format ('+00:00', '+01:00', '-05:00') to avoid DST ambiguity issues.
+     */
+    public readonly string $sqlTimezone;
+
+    /**
      * Default language code for translations.
      *
      * Configured via MINI_LANG environment variable or defaults to 'en'.
@@ -537,6 +551,9 @@ final class Mini implements ContainerInterface {
         // Application default timezone (respects PHP default, can override with MINI_TIMEZONE)
         $this->timezone = $_ENV['MINI_TIMEZONE'] ?? \date_default_timezone_get();
         \date_default_timezone_set($this->timezone);
+
+        // Database timezone in offset format (MINI_SQL_TIMEZONE takes precedence over SQL_TIMEZONE)
+        $this->sqlTimezone = $_ENV['MINI_SQL_TIMEZONE'] ?? $_ENV['SQL_TIMEZONE'] ?? '+00:00';
 
         // Application default language for translations (can override with MINI_LANG)
         $this->defaultLanguage = $_ENV['MINI_LANG'] ?? 'en';
