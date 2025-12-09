@@ -67,7 +67,9 @@ class PDOService
             case 'sqlite':
                 $pdo->exec("PRAGMA encoding = 'UTF-8'");
                 break;
-            // sqlsrv/dblib: charset via connection string, no session timezone
+            // sqlsrv/dblib: charset via connection string
+            // SQL Server has no session timezone - uses server OS timezone.
+            // Ensure your SQL Server runs in UTC or use GETUTCDATE()/AT TIME ZONE.
         }
     }
 
