@@ -38,13 +38,13 @@ namespace mini\Database;
  *
  * $user = new User();
  * $user->name = 'John';
- * Users::persist($user); // INSERT
+ * Users::save($user); // INSERT
  *
  * $found = Users::find(1);
  * $found->name = 'Updated';
- * Users::persist($found); // UPDATE
+ * Users::save($found); // UPDATE
  *
- * Users::remove($found);
+ * Users::delete($found);
  * ```
  */
 trait RepositoryTrait {
@@ -56,7 +56,7 @@ trait RepositoryTrait {
      * @param object $entity Entity to save
      * @return int Number of affected rows
      */
-    public static function persist(object $entity): int {
+    public static function save(object $entity): int {
         return static::persistEntity($entity);
     }
 
@@ -66,7 +66,7 @@ trait RepositoryTrait {
      * @param object $entity Entity to delete
      * @return int Number of affected rows
      */
-    public static function remove(object $entity): int {
+    public static function delete(object $entity): int {
         return static::removeEntity($entity);
     }
 }
