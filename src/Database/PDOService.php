@@ -70,11 +70,17 @@ class PDOService
             case 'sqlsrv':
             case 'dblib':
                 // SQL Server has no session timezone - uses server OS timezone.
-                // Verify the server is running in UTC.
-                $offset = $pdo->query("SELECT DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())")->fetchColumn();
-                if ((int)$offset !== 0) {
+                // Verify the server is running in UTC (cached in L1 to avoid per-request query).
+                $cacheKey = 'mini:sqlsrv_utc:' . md5($pdo->getAttribute(\PDO::ATTR_CONNECTION_STATUS) ?? 'default');
+                $isUtc = apcu_fetch($cacheKey, $found);
+                if (!$found) {
+                    $offset = (int)$pdo->query("SELECT DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())")->fetchColumn();
+                    $isUtc = ($offset === 0);
+                    apcu_store($cacheKey, $isUtc, 3600); // Cache for 1 hour
+                }
+                if (!$isUtc) {
                     throw new \RuntimeException(
-                        "SQL Server is not configured for UTC (offset: {$offset} minutes). " .
+                        "SQL Server is not configured for UTC. " .
                         "Mini requires UTC for consistent datetime handling. " .
                         "Configure the server OS timezone to UTC."
                     );
