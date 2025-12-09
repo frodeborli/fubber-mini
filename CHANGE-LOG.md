@@ -74,7 +74,7 @@ Added convenient methods for inserting and upserting rows, plus an Eloquent-styl
   - Returns affected rows (1 for insert/update, 0 for no change)
 - **ModelTrait**: Eloquent-style Active Record pattern with generic template support
   - **Entity pattern**: `$user->save()`, `$user->delete()` - instance methods
-  - **Repository pattern**: `Users::persist($user)`, `Users::remove($user)` - static methods on POPO
+  - **Repository pattern**: `Users::save($user)`, `Users::delete($user)` - static methods on POPO
   - `User::find($id)` - Find by primary key with typed return (`User|null`)
   - `User::query()` - Returns typed `PartialQuery<User>` for composable scopes
   - `@template T of object` - Full PHPDoc generic support for type safety
@@ -157,13 +157,13 @@ class Users {
 
 $user = new User();
 $user->name = 'John';
-Users::persist($user); // INSERT
+Users::save($user); // INSERT
 
 $found = Users::find(1);
 $found->name = 'Updated';
-Users::persist($found); // UPDATE
+Users::save($found); // UPDATE
 
-Users::remove($found);
+Users::delete($found);
 ```
 
 See `examples/upsert.php`, `examples/model-trait.php`, and `examples/model-trait-repository.php` for complete examples.

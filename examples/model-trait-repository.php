@@ -218,9 +218,9 @@ $user->name = 'John Doe';
 $user->email = 'john@example.com';
 $user->status = 'active';
 
-$affected = Users::persist($user);
+$affected = Users::save($user);
 echo "   Affected rows: $affected\n";
-echo "   User ID after persist: {$user->id}\n";
+echo "   User ID after save: {$user->id}\n";
 echo "   Created at: {$user->created_at}\n\n";
 
 // Example 2: Find by ID (returns typed object)
@@ -232,7 +232,7 @@ echo "   Is active: " . ($found->isActive() ? 'yes' : 'no') . "\n\n";
 // Example 3: Update and persist
 echo "3. Update existing user:\n";
 $found->name = 'John Updated';
-$affected = Users::persist($found);
+$affected = Users::save($found);
 echo "   Affected rows: $affected\n";
 echo "   ID unchanged: {$found->id}\n";
 
@@ -247,13 +247,13 @@ $user2 = new User();
 $user2->name = 'Jane Smith';
 $user2->email = 'jane@example.com';
 $user2->status = 'active';
-Users::persist($user2);
+Users::save($user2);
 
 $user3 = new User();
 $user3->name = 'Bob Inactive';
 $user3->email = 'bob@example.com';
 $user3->status = 'inactive';
-Users::persist($user3);
+Users::save($user3);
 
 echo "   All users: " . Users::query()->count() . "\n";
 echo "   Active users: " . Users::active()->count() . "\n";
@@ -270,7 +270,7 @@ echo "\n";
 echo "6. Remove user:\n";
 $toDelete = Users::find($user3->id);
 echo "   Removing: {$toDelete->name}\n";
-$affected = Users::remove($toDelete);
+$affected = Users::delete($toDelete);
 echo "   Affected rows: $affected\n";
 echo "   Remaining users: " . Users::query()->count() . "\n\n";
 
