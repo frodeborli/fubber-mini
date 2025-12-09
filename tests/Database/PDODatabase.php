@@ -173,20 +173,29 @@ $test = new class extends Test {
         $this->assertNull($row);
     }
 
-    public function testNestedTransactions(): void
+    public function testNestedTransactionsThrow(): void
     {
         $this->cleanTable();
-        \mini\db()->transaction(function($db) {
-            $db->exec("INSERT INTO test_db (name) VALUES ('Outer')");
 
-            $db->transaction(function($db2) {
-                $db2->exec("INSERT INTO test_db (name) VALUES ('Inner')");
+        $thrown = false;
+        try {
+            \mini\db()->transaction(function($db) {
+                $db->exec("INSERT INTO test_db (name) VALUES ('Outer')");
+
+                // This should throw - nested transactions not supported
+                $db->transaction(function($db2) {
+                    $db2->exec("INSERT INTO test_db (name) VALUES ('Inner')");
+                });
             });
-        });
+        } catch (\RuntimeException $e) {
+            $thrown = true;
+            $this->assertTrue(str_contains($e->getMessage(), 'Already in a transaction'));
+        }
 
-        // Both should be committed
-        $this->assertNotNull(\mini\db()->queryOne("SELECT * FROM test_db WHERE name = 'Outer'"));
-        $this->assertNotNull(\mini\db()->queryOne("SELECT * FROM test_db WHERE name = 'Inner'"));
+        $this->assertTrue($thrown, 'Expected RuntimeException for nested transaction');
+
+        // Outer insert should have been rolled back
+        $this->assertNull(\mini\db()->queryOne("SELECT * FROM test_db WHERE name = 'Outer'"));
     }
 
     public function testDeleteWithPartialQuery(): void

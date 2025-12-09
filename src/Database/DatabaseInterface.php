@@ -130,7 +130,6 @@ interface DatabaseInterface
      *
      * Starts a transaction, executes the closure, and commits if successful.
      * If the closure throws an exception, the transaction is rolled back.
-     * Supports nested transactions by maintaining a transaction depth counter.
      *
      * The closure receives the DatabaseInterface as its first parameter.
      *
@@ -144,7 +143,9 @@ interface DatabaseInterface
      *
      * @param \Closure $task The task to execute within the transaction
      * @return mixed The return value of the closure
-     * @throws \Exception If the transaction fails or the closure throws
+     * @throws \RuntimeException If the backend doesn't support transactions
+     * @throws \RuntimeException If called while already in a transaction (nested transactions not supported)
+     * @throws \Throwable Re-throws any exception from the closure after rollback
      */
     public function transaction(\Closure $task): mixed;
 

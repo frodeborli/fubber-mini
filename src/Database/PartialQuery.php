@@ -259,11 +259,18 @@ final class PartialQuery implements ResultSetInterface
             }
 
             // Same database with subquery support:
+            // Require explicit single-column select for subqueries
+            if ($values->getSelect() === null) {
+                throw new \InvalidArgumentException(
+                    "Subquery for IN() must have an explicit select(). " .
+                    "Use ->select('column_name') to specify which column to match."
+                );
+            }
+
             // 1) Merge CTEs from the inner query into this query
             $new = $this->withCTEsFrom($values);
 
             // 2) Inline the inner query core as a literal subquery in the WHERE clause
-            //    (allows correlation with outer aliases)
             //    Use PHP_INT_MAX as default limit (no artificial limit for subqueries)
             $subSql    = $values->buildCoreSql(PHP_INT_MAX);
             $subParams = $values->getMainParams();
@@ -562,6 +569,8 @@ final class PartialQuery implements ResultSetInterface
      * Fetch first column from all rows
      *
      * Applies default limit of 1000 if no explicit limit was set.
+     * Note: When using a PartialQuery as subquery via in(), the limit
+     * is bypassed automatically.
      *
      * @return array<int, mixed>
      */
@@ -670,15 +679,25 @@ final class PartialQuery implements ResultSetInterface
             return;
         }
 
-        // Entity class hydration with reflection
+        // Entity class hydration
         if ($this->entityClass !== null) {
             $class = $this->entityClass;
             $args  = $this->entityConstructorArgs;
 
+            // Check if class implements SqlRowHydrator for custom hydration
+            if (is_subclass_of($class, SqlRowHydrator::class)) {
+                foreach ($rows as $row) {
+                    yield $class::fromSqlRow($row);
+                }
+                return;
+            }
+
+            // Default: reflection-based hydration
             try {
                 $refClass = new \ReflectionClass($class);
-                /** @var array<string, \ReflectionProperty> $reflectionCache */
+                /** @var array<string, array{prop: \ReflectionProperty, type: ?string}> $reflectionCache */
                 $reflectionCache = [];
+                $converterRegistry = null;
 
                 foreach ($rows as $row) {
                     // Create instance with or without constructor
@@ -697,10 +716,35 @@ final class PartialQuery implements ResultSetInterface
                             }
                             $prop = $refClass->getProperty($propertyName);
                             $prop->setAccessible(true);
-                            $reflectionCache[$propertyName] = $prop;
+
+                            // Get target type name for conversion
+                            $targetType = null;
+                            $refType = $prop->getType();
+                            if ($refType instanceof \ReflectionNamedType && !$refType->isBuiltin()) {
+                                $targetType = $refType->getName();
+                            }
+
+                            $reflectionCache[$propertyName] = ['prop' => $prop, 'type' => $targetType];
                         }
 
-                        $reflectionCache[$propertyName]->setValue($obj, $value);
+                        $cached = $reflectionCache[$propertyName];
+
+                        // Convert value if target is a class and value needs conversion
+                        if ($value !== null && $cached['type'] !== null && !($value instanceof $cached['type'])) {
+                            // Lazy-load converter registry
+                            if ($converterRegistry === null) {
+                                $converterRegistry = \mini\Mini::$mini->get(\mini\Converter\ConverterRegistryInterface::class);
+                            }
+                            // Use 'sql-value' as source type for database hydration
+                            // tryConvert checks both registered converters and fallback handlers
+                            $found = false;
+                            $converted = $converterRegistry->tryConvert($value, $cached['type'], 'sql-value', $found);
+                            if ($found) {
+                                $value = $converted;
+                            }
+                        }
+
+                        $cached['prop']->setValue($obj, $value);
                     }
 
                     yield $obj;
@@ -761,6 +805,35 @@ final class PartialQuery implements ResultSetInterface
     public function getLimit(): ?int
     {
         return $this->limit;
+    }
+
+    /**
+     * Get CTE (Common Table Expression) prefix for DELETE/UPDATE
+     *
+     * Returns the WITH clause if CTEs are present, empty string otherwise.
+     * Also returns the parameters needed for the CTEs.
+     *
+     * @return array{sql: string, params: array<int, mixed>}
+     */
+    public function getCTEs(): array
+    {
+        if (empty($this->cteList)) {
+            return ['sql' => '', 'params' => []];
+        }
+
+        $withParts = [];
+        $params = [];
+        foreach ($this->cteList as $cte) {
+            $withParts[] = $cte['name'] . ' AS (' . $cte['sql'] . ')';
+            foreach ($cte['params'] as $p) {
+                $params[] = $p;
+            }
+        }
+
+        return [
+            'sql' => 'WITH ' . implode(', ', $withParts) . ' ',
+            'params' => $params,
+        ];
     }
 
     /**

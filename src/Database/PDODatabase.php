@@ -19,7 +19,7 @@ use function mini\sqlval;
 class PDODatabase implements DatabaseInterface
 {
     private ?PDO $pdo = null;
-    private int $transactionDepth = 0;
+    private bool $inTransaction = false;
 
     /**
      * Get PDO instance from container (lazy initialization)
@@ -159,48 +159,37 @@ class PDODatabase implements DatabaseInterface
     /**
      * Execute a closure within a database transaction
      *
-     * Handles nested transactions by maintaining a transaction depth counter.
-     * Only the outermost transaction actually commits/rollbacks with the database.
-     * Inner transactions are "fake" - they just track depth.
+     * @throws \RuntimeException If called while already in a transaction
      */
     public function transaction(\Closure $task): mixed
     {
-        $this->transactionDepth++;
-
-        // Only start a real transaction on the outermost level
-        if ($this->transactionDepth === 1) {
-            try {
-                $this->lazyPdo()->beginTransaction();
-            } catch (PDOException $e) {
-                $this->transactionDepth--;
-                throw new Exception("Failed to start transaction: " . $e->getMessage());
-            }
+        if ($this->inTransaction) {
+            throw new \RuntimeException(
+                "Already in a transaction. Nested transactions are not supported. " .
+                "Restructure your code to use a single transaction block."
+            );
         }
 
         try {
-            // Execute the task with $this as parameter
+            $this->lazyPdo()->beginTransaction();
+            $this->inTransaction = true;
+        } catch (PDOException $e) {
+            throw new \RuntimeException("Failed to start transaction: " . $e->getMessage(), 0, $e);
+        }
+
+        try {
             $result = $task($this);
-
-            // Only commit on the outermost transaction
-            if ($this->transactionDepth === 1) {
-                $this->lazyPdo()->commit();
-            }
-
-            $this->transactionDepth--;
+            $this->lazyPdo()->commit();
+            $this->inTransaction = false;
             return $result;
 
         } catch (\Throwable $e) {
-            // Rollback on any exception (but only if we're at the outermost level)
-            if ($this->transactionDepth === 1) {
-                try {
-                    $this->lazyPdo()->rollBack();
-                } catch (PDOException $rollbackException) {
-                    // Log rollback failure but throw original exception
-                    error_log("Transaction rollback failed: " . $rollbackException->getMessage());
-                }
+            try {
+                $this->lazyPdo()->rollBack();
+            } catch (PDOException $rollbackException) {
+                error_log("Transaction rollback failed: " . $rollbackException->getMessage());
             }
-
-            $this->transactionDepth = max(0, $this->transactionDepth - 1);
+            $this->inTransaction = false;
             throw $e;
         }
     }
@@ -271,6 +260,7 @@ class PDODatabase implements DatabaseInterface
     public function delete(PartialQuery $query): int
     {
         $table = $query->getTable();
+        $ctes = $query->getCTEs();
         $where = $query->getWhere();
 
         // Require WHERE clause for safety
@@ -281,16 +271,18 @@ class PDODatabase implements DatabaseInterface
             );
         }
 
-        $sql = "DELETE FROM {$table}";
+        $sql = $ctes['sql'] . "DELETE FROM {$table}";
         $sql .= " WHERE {$where['sql']}";
         $limit = $query->getLimit();
         if ($limit !== null) {
             $sql .= " LIMIT {$limit}";
         }
 
+        $params = array_merge($ctes['params'], $where['params']);
+
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute($where['params']);
+            $stmt->execute($params);
             return $stmt->rowCount();
         } catch (PDOException $e) {
             throw new Exception("Delete failed: " . $e->getMessage());
@@ -303,12 +295,13 @@ class PDODatabase implements DatabaseInterface
     public function update(PartialQuery $query, string|array $set, array $params = []): int
     {
         $table = $query->getTable();
+        $ctes = $query->getCTEs();
         $where = $query->getWhere();
 
         if (is_string($set)) {
             // Raw SQL expression with optional params
-            $sql = "UPDATE {$table} SET {$set}";
-            $params = array_merge($params, $where['params']);
+            $sql = $ctes['sql'] . "UPDATE {$table} SET {$set}";
+            $params = array_merge($ctes['params'], $params, $where['params']);
         } else {
             // Array of column => value assignments
             $setParts = [];
@@ -319,8 +312,8 @@ class PDODatabase implements DatabaseInterface
                 $setParams[] = $value;
             }
 
-            $sql = "UPDATE {$table} SET " . implode(', ', $setParts);
-            $params = array_merge($setParams, $where['params']);
+            $sql = $ctes['sql'] . "UPDATE {$table} SET " . implode(', ', $setParts);
+            $params = array_merge($ctes['params'], $setParams, $where['params']);
         }
 
         if ($where['sql']) {

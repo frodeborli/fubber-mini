@@ -59,7 +59,7 @@ class UUID7Factory implements FactoryInterface {
         $uuid[13] = '-';
         $uuid[14] = '7';                             // Version 7
         $uuid[18] = '-';
-        $uuid[19] = '89ab'[ord($uuid[19]) >> 6];     // RFC 4122 variant
+        $uuid[19] = '89ab'[ord($uuid[19]) & 3];       // RFC 4122 variant
         $uuid[23] = '-';
 
         return $uuid;

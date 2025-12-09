@@ -63,14 +63,18 @@ interface ConverterRegistryInterface
      *
      * // Named target (bypasses return type validation for closures)
      * $registry->register(fn(\BackedEnum $e) => $e->value, 'sql-value');
+     *
+     * // Named source and target (for bidirectional conversions like database values)
+     * $registry->register(fn(string $s): \DateTimeImmutable => new \DateTimeImmutable($s), null, 'sql-value');
      * ```
      *
      * @param ConverterInterface|\Closure $converter Converter instance or typed closure
      * @param ?string $targetName Optional explicit target name (bypasses return type validation for closures)
+     * @param ?string $sourceName Optional explicit source name (for named source types like 'sql-value')
      * @throws \InvalidArgumentException If converter conflicts with existing registration
      * @throws \InvalidArgumentException If closure signature is invalid
      */
-    public function register(ConverterInterface|\Closure $converter, ?string $targetName = null): void;
+    public function register(ConverterInterface|\Closure $converter, ?string $targetName = null, ?string $sourceName = null): void;
 
     /**
      * Replace an existing converter
@@ -94,18 +98,20 @@ interface ConverterRegistryInterface
      *
      * @param ConverterInterface|\Closure $converter Converter instance or typed closure
      * @param ?string $targetName Optional explicit target name (bypasses return type validation for closures)
+     * @param ?string $sourceName Optional explicit source name (for named source types like 'sql-value')
      * @throws \InvalidArgumentException If closure signature is invalid
      */
-    public function replace(ConverterInterface|\Closure $converter, ?string $targetName = null): void;
+    public function replace(ConverterInterface|\Closure $converter, ?string $targetName = null, ?string $sourceName = null): void;
 
     /**
      * Check if a converter exists for input to target type
      *
      * @param mixed $input The value to convert
      * @param class-string $targetType The desired output type
+     * @param ?string $sourceType Optional named source type (e.g., 'sql-value') instead of inferring from $input
      * @return bool True if a suitable converter exists
      */
-    public function has(mixed $input, string $targetType): bool;
+    public function has(mixed $input, string $targetType, ?string $sourceType = null): bool;
 
     /**
      * Get the converter for input to target type
@@ -118,9 +124,10 @@ interface ConverterRegistryInterface
      *
      * @param mixed $input The value to convert
      * @param class-string $targetType The desired output type
+     * @param ?string $sourceType Optional named source type (e.g., 'sql-value') instead of inferring from $input
      * @return ConverterInterface|null The converter, or null if none found
      */
-    public function get(mixed $input, string $targetType): ?ConverterInterface;
+    public function get(mixed $input, string $targetType, ?string $sourceType = null): ?ConverterInterface;
 
     /**
      * Convert a value to target type
@@ -133,13 +140,41 @@ interface ConverterRegistryInterface
      * if ($registry->has($value, ResponseInterface::class)) {
      *     $response = $registry->convert($value, ResponseInterface::class);
      * }
+     *
+     * // With named source type for database hydration
+     * $datetime = $registry->convert($dbString, \DateTimeImmutable::class, 'sql-value');
      * ```
      *
      * @template O
      * @param mixed $input The value to convert
      * @param class-string<O> $targetType The desired output type
+     * @param ?string $sourceType Optional named source type (e.g., 'sql-value') instead of inferring from $input
      * @return O The converted value
      * @throws \RuntimeException If no converter is registered for this input→target combination
      */
-    public function convert(mixed $input, string $targetType): mixed;
+    public function convert(mixed $input, string $targetType, ?string $sourceType = null): mixed;
+
+    /**
+     * Try to convert a value, returning null if no converter handles it
+     *
+     * Unlike convert(), this method doesn't throw. Use the $found out-parameter
+     * to distinguish between "converted to null" and "no converter found".
+     *
+     * This method also checks fallback handlers, which has() does not.
+     *
+     * ```php
+     * $result = $registry->tryConvert($value, SomeEnum::class, 'sql-value', $found);
+     * if ($found) {
+     *     // $result is the converted value (may be null if converter returned null)
+     * }
+     * ```
+     *
+     * @template O
+     * @param mixed $input The value to convert
+     * @param class-string<O> $targetType The desired output type
+     * @param ?string $sourceType Optional named source type (e.g., 'sql-value') instead of inferring from $input
+     * @param bool $found Set to true if conversion succeeded, false otherwise
+     * @return O|null The converted value, or null if no converter found
+     */
+    public function tryConvert(mixed $input, string $targetType, ?string $sourceType = null, bool &$found = false): mixed;
 }

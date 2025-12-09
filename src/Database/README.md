@@ -23,7 +23,7 @@ db()->exec("DELETE FROM users WHERE id = ?", [123]);
 // Last insert ID
 $userId = db()->lastInsertId();
 
-// Transactions (auto rollback on exception)
+// Transactions (auto rollback on exception, nested transactions throw)
 db()->transaction(function() {
     db()->exec("INSERT INTO users ...");
     db()->exec("INSERT INTO activity_log ...");
@@ -54,8 +54,8 @@ $query->gte('column', $value)     // >=
 $query->in('column', [...])       // IN (...)
 $query->in('column', $subquery)   // IN (SELECT ...) via CTE
 $query->where('sql', $params)     // Raw WHERE clause (ANDed with existing)
-$query->order('created_at DESC')  // ORDER BY
-$query->limit(100)                // LIMIT (default: 1000 when iterating)
+$query->order('created_at DESC')  // ORDER BY (replaces previous)
+$query->limit(100)                // LIMIT (see "Default Limit" section)
 $query->offset(50)                // OFFSET
 
 // Execution
@@ -113,6 +113,124 @@ foreach (User::admins()->order('name')->limit(10) as $user) {
 $user = User::find(123);
 $count = User::active()->count();
 ```
+
+### Hydration with `withEntityClass()`
+
+The second parameter controls instantiation:
+
+```php
+->withEntityClass(User::class, false)  // Skip constructor (default)
+->withEntityClass(User::class, [])     // Call constructor with no args
+->withEntityClass(User::class, [$arg]) // Call constructor with args
+```
+
+### Automatic Type Conversion
+
+Hydration automatically converts database values to PHP types using the converter registry. Built-in conversions:
+
+```php
+class Post
+{
+    public int $id;                           // INTEGER → int (PDO native)
+    public string $title;                     // TEXT → string (PDO native)
+    public ?string $summary;                  // NULL preserved
+    public bool $published;                   // 0/1/"0"/"1"/"" → bool
+    public \DateTimeImmutable $created_at;    // See datetime formats below
+    public \DateTime $updated_at;             // See datetime formats below
+    public Status $status;                    // TEXT/INTEGER → BackedEnum (auto)
+}
+
+enum Status: string {
+    case Draft = 'draft';
+    case Published = 'published';
+}
+```
+
+**DateTime conversion** supports multiple formats:
+- **String**: `"2024-01-15 10:30:00"` - parsed using PHP's default timezone
+- **String with TZ**: `"2024-01-15 10:30:00+02:00"` - timezone preserved
+- **Integer (seconds)**: `1705315800` - Unix timestamp, always UTC
+- **Integer (milliseconds)**: `1705315800123` - auto-detected when >= 100 billion, always UTC
+- **Float**: `1705315800.123456` - seconds with microsecond precision, always UTC
+
+**Timezone behavior**: Unix timestamps are always interpreted as UTC. String dates use PHP's default timezone unless the string includes timezone info. If your database stores UTC strings without timezone suffix, ensure `date_default_timezone_set('UTC')` is set, or include the timezone in your SQL (`datetime || '+00:00'`).
+
+### Custom Row Hydration with SqlRowHydrator
+
+For complex hydration (computed properties, column renaming, nested objects), implement `SqlRowHydrator`:
+
+```php
+use mini\Database\SqlRowHydrator;
+
+class User implements SqlRowHydrator
+{
+    public int $id;
+    public string $fullName;
+    public Address $address;
+
+    public static function fromSqlRow(array $row): static
+    {
+        $user = new static();
+        $user->id = $row['id'];
+        $user->fullName = $row['first_name'] . ' ' . $row['last_name'];
+        $user->address = new Address($row['street'], $row['city'], $row['zip']);
+        return $user;
+    }
+}
+
+// Hydration uses fromSqlRow() automatically
+$users = User::query()->limit(10);
+```
+
+### Custom Value Objects with SqlValueHydrator
+
+For value objects that map to a single column, implement `SqlValueHydrator`:
+
+```php
+use mini\Database\SqlValue;
+use mini\Database\SqlValueHydrator;
+
+class Money implements SqlValue, SqlValueHydrator
+{
+    public function __construct(public readonly int $cents) {}
+
+    // SQL column → PHP (hydration)
+    public static function fromSqlValue(string|int|float|bool $value): static
+    {
+        return new static((int) $value);
+    }
+
+    // PHP → SQL column (queries)
+    public function toSqlValue(): int
+    {
+        return $this->cents;
+    }
+}
+
+// Now works automatically in entities
+class Order {
+    public int $id;
+    public Money $total;  // Hydrated from INTEGER column
+}
+```
+
+### Custom Converters
+
+For types you don't control, register a converter:
+
+```php
+// In bootstrap.php
+$registry = Mini::$mini->get(ConverterRegistryInterface::class);
+
+// sql-value → SomeLibraryType
+$registry->register(
+    fn(string $v): SomeType => SomeType::parse($v),
+    null,        // target: infer from return type
+    'sql-value'  // source: database values
+);
+```
+
+For types without registered converters, raw PDO values are assigned directly.
 
 ## Relationships
 
@@ -219,9 +337,57 @@ $commentCount = $post?->comments()->count();
 - **Customizable** - Add filtering, ordering, or joins as needed
 - **Write once** - You define each relationship once, use it everywhere
 
-## Authorization Pattern: `::mine()`
+## Row-Level Access Control
 
-Use `::mine()` as a security boundary for user-facing queries where authorization matters.
+Define scoped query methods that embed authorization rules. The WHERE clause *is* the authorization - no separate permission checks needed.
+
+```php
+class User
+{
+    public static function query(): PartialQuery
+    {
+        return db()->partialQuery('users')->withEntityClass(self::class, false);
+    }
+
+    /** Users the current user can read */
+    public static function readable(): PartialQuery
+    {
+        return self::query()->eq('organization_id', Auth::orgId());
+    }
+
+    /** Users the current user can update */
+    public static function updatable(): PartialQuery
+    {
+        return self::readable()->where('role != ?', ['admin']); // Can't edit admins
+    }
+
+    /** Users the current user can delete */
+    public static function deletable(): PartialQuery
+    {
+        return self::updatable()->where('id != ?', [Auth::userId()]); // Can't delete self
+    }
+
+    public static function find(int $id): ?User
+    {
+        return self::readable()->eq('id', $id)->one();
+    }
+}
+
+// Read - returns null if not authorized
+$user = User::find(123);
+
+// Update - returns 0 rows affected if not authorized
+db()->update(User::updatable()->eq('id', 123), ['name' => 'Frode']);
+
+// Delete - returns 0 rows affected if not authorized
+db()->delete(User::deletable()->eq('id', 456));
+```
+
+Authorization failures are silent (0 rows affected) rather than throwing exceptions. This makes the pattern simple to use and test.
+
+### Simple `::mine()` Pattern
+
+For simpler cases, use `::mine()` as a single security boundary:
 
 ```php
 class Post
@@ -231,30 +397,23 @@ class Post
         return db()->partialQuery('posts')->withEntityClass(self::class, false);
     }
 
-    /**
-     * Posts accessible to current user
-     * @return PartialQuery<Post>
-     */
+    /** Posts accessible to current user */
     public static function mine(): PartialQuery
     {
-        $userId = auth()->getUserId();
-
-        return self::query()->where('
-            user_id = ? OR visibility = "public"
-        ', [$userId]);
+        return self::query()->where('user_id = ? OR visibility = ?', [Auth::userId(), 'public']);
     }
 
     public static function find(int $id): ?Post
     {
-        return self::mine()->eq('id', $id)->one();  // Includes auth check
+        return self::mine()->eq('id', $id)->one();
     }
 }
 
-// User-facing queries should use ::mine()
+// User-facing queries use ::mine()
 $posts = Post::mine()->order('created_at DESC')->limit(20);
 $post = Post::find(123);  // Returns null if not authorized
 
-// Admin/internal queries can use ::query() directly
+// Admin/internal queries bypass with ::query()
 $allPosts = Post::query()->eq('status', 'spam');  // For moderation
 ```
 
@@ -277,7 +436,62 @@ db()->update(
 );
 ```
 
-When iterating results (`foreach`, `toArray()`), a default 1000-row limit protects against accidental unbounded queries. Methods like `column()` and `field()` do not apply a default limit, making them suitable for subqueries.
+Subqueries work with DELETE and UPDATE:
+
+```php
+// Delete users who have no posts
+$usersWithPosts = Post::query()->select('user_id');
+db()->delete(User::query()->in('id', $usersWithPosts));
+
+// Update users who ordered a specific product
+$buyers = Order::query()->eq('product_id', 123)->select('user_id');
+db()->update(User::query()->in('id', $buyers), ['vip' => 1]);
+```
+
+**Note:** Subqueries in `in()` require an explicit `->select('column')` to specify which column to match.
+
+## Default Limit: 1000 Rows
+
+Mini applies a default limit of 1000 rows to bulk fetch methods. This is a deliberate safety measure:
+
+- **Prevents accidental full-table scans** - Forgetting a LIMIT won't fetch millions of rows
+- **Encourages pagination as a first-class concern** - Developers should design for pagination from the start, not as an afterthought
+- **Follows BigTable/NoSQL best practices** - Use indexed cursors for efficient paging
+
+```php
+// These apply default 1000-row limit:
+foreach ($query as $row) { }     // Stops at 1000
+$query->toArray();               // Max 1000 elements
+$query->column();                // Max 1000 values
+
+// These do NOT apply default limit:
+$query->field();                 // Single scalar value
+$query->one();                   // Single row
+$query->count();                 // Aggregate, no row data
+$query->in('col', $subquery)     // Subqueries bypass limit automatically
+
+// Override when needed:
+$query->limit(5000);             // Explicit limit
+$query->limit(PHP_INT_MAX);      // Fetch all rows (bypass default)
+```
+
+**For pagination**, use index-based cursors rather than OFFSET:
+
+```php
+// Good: cursor-based (efficient at any page)
+$posts = Post::query()
+    ->gt('id', $lastSeenId)
+    ->order('id')
+    ->limit(50);
+
+// Avoid: offset-based (slow on deep pages)
+$posts = Post::query()
+    ->order('id')
+    ->offset(10000)
+    ->limit(50);
+```
+
+The limit applies only to the root query execution - subqueries used with `in()` are not limited since they're part of a larger query.
 
 ## Configuration
 

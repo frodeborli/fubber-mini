@@ -2,6 +2,8 @@
 
 namespace mini\Converter;
 
+use mini\Hooks\Handler;
+
 /**
  * Registry for type converters
  *
@@ -13,12 +15,14 @@ namespace mini\Converter;
  * - Single-type converters can override union members (more specific wins)
  * - Detects conflicting registrations (overlapping unions, duplicates)
  * - Type hierarchy resolution for objects (class → interfaces → parent → parent interfaces)
+ * - Fallback handler for type families (e.g., all BackedEnums)
  *
  * Resolution order:
  * - Direct single-type converter (most specific)
  * - Union type converter via alias (less specific)
  * - Parent class converters
  * - Interface converters
+ * - Fallback handler (if registered)
  *
  * @see ConverterRegistryInterface For the public API documentation
  */
@@ -39,15 +43,31 @@ class ConverterRegistry implements ConverterRegistryInterface
     private array $converters = [];
 
     /**
+     * Fallback handler for conversions without registered converters
+     *
+     * Listeners receive (mixed $input, string $targetType, ?string $sourceType)
+     * and should return the converted value or null if they can't handle it.
+     *
+     * @var Handler<mixed, mixed>
+     */
+    public readonly Handler $fallback;
+
+    public function __construct()
+    {
+        $this->fallback = new Handler('converter-fallback');
+    }
+
+    /**
      * Register a converter
      *
      * @param ConverterInterface|\Closure $converter Converter instance or typed closure
      * @param ?string $targetName Optional explicit target name (bypasses return type validation for closures)
+     * @param ?string $sourceName Optional explicit source name (for named source types like 'sql-value')
      * @throws \InvalidArgumentException If converter conflicts with existing registration
      */
-    public function register(ConverterInterface|\Closure $converter, ?string $targetName = null): void
+    public function register(ConverterInterface|\Closure $converter, ?string $targetName = null, ?string $sourceName = null): void
     {
-        $this->doRegister($converter, false, $targetName);
+        $this->doRegister($converter, false, $targetName, $sourceName);
     }
 
     /**
@@ -55,11 +75,12 @@ class ConverterRegistry implements ConverterRegistryInterface
      *
      * @param ConverterInterface|\Closure $converter Converter instance or typed closure
      * @param ?string $targetName Optional explicit target name (bypasses return type validation for closures)
+     * @param ?string $sourceName Optional explicit source name (for named source types like 'sql-value')
      * @throws \InvalidArgumentException If closure signature is invalid
      */
-    public function replace(ConverterInterface|\Closure $converter, ?string $targetName = null): void
+    public function replace(ConverterInterface|\Closure $converter, ?string $targetName = null, ?string $sourceName = null): void
     {
-        $this->doRegister($converter, true, $targetName);
+        $this->doRegister($converter, true, $targetName, $sourceName);
     }
 
     /**
@@ -68,12 +89,13 @@ class ConverterRegistry implements ConverterRegistryInterface
      * @param ConverterInterface|\Closure $converter Converter instance or typed closure
      * @param bool $allowReplace Whether to allow replacing existing converters
      * @param ?string $targetName Optional explicit target name (bypasses return type validation for closures)
+     * @param ?string $sourceName Optional explicit source name (for named source types like 'sql-value')
      * @throws \InvalidArgumentException If converter conflicts with existing registration
      */
-    private function doRegister(ConverterInterface|\Closure $converter, bool $allowReplace, ?string $targetName = null): void
+    private function doRegister(ConverterInterface|\Closure $converter, bool $allowReplace, ?string $targetName = null, ?string $sourceName = null): void
     {
         if ($converter instanceof \Closure) {
-            $converter = new ClosureConverter($converter, $targetName);
+            $converter = new ClosureConverter($converter, $targetName, $sourceName);
         }
 
         $targetType = $converter->getOutputType();
@@ -166,11 +188,12 @@ class ConverterRegistry implements ConverterRegistryInterface
      *
      * @param mixed $input The value to convert
      * @param class-string $targetType The desired output type
+     * @param ?string $sourceType Optional named source type instead of inferring from $input
      * @return bool
      */
-    public function has(mixed $input, string $targetType): bool
+    public function has(mixed $input, string $targetType, ?string $sourceType = null): bool
     {
-        return $this->findConverter($input, $targetType) !== null;
+        return $this->findConverter($input, $targetType, $sourceType) !== null;
     }
 
     /**
@@ -178,11 +201,12 @@ class ConverterRegistry implements ConverterRegistryInterface
      *
      * @param mixed $input The value to convert
      * @param class-string $targetType The desired output type
+     * @param ?string $sourceType Optional named source type instead of inferring from $input
      * @return ConverterInterface|null
      */
-    public function get(mixed $input, string $targetType): ?ConverterInterface
+    public function get(mixed $input, string $targetType, ?string $sourceType = null): ?ConverterInterface
     {
-        return $this->findConverter($input, $targetType);
+        return $this->findConverter($input, $targetType, $sourceType);
     }
 
     /**
@@ -191,21 +215,55 @@ class ConverterRegistry implements ConverterRegistryInterface
      * @template O
      * @param mixed $input The value to convert
      * @param class-string<O> $targetType The desired output type
+     * @param ?string $sourceType Optional named source type instead of inferring from $input
      * @return O The converted value
      * @throws \RuntimeException If no converter is registered for this input→target combination
      */
-    public function convert(mixed $input, string $targetType): mixed
+    public function convert(mixed $input, string $targetType, ?string $sourceType = null): mixed
     {
-        $converter = $this->findConverter($input, $targetType);
-        if ($converter === null) {
-            throw new \RuntimeException(sprintf(
-                'No converter registered for %s → %s',
-                get_debug_type($input),
-                $targetType
-            ));
+        $found = false;
+        $result = $this->tryConvert($input, $targetType, $sourceType, $found);
+        if ($found) {
+            return $result;
         }
 
-        return $converter->convert($input, $targetType);
+        throw new \RuntimeException(sprintf(
+            'No converter registered for %s → %s',
+            $sourceType ?? get_debug_type($input),
+            $targetType
+        ));
+    }
+
+    /**
+     * Try to convert a value, returning null if no converter handles it
+     *
+     * Unlike convert(), this method doesn't throw - it returns null and sets
+     * $found to false if no converter (including fallbacks) can handle the conversion.
+     *
+     * @template O
+     * @param mixed $input The value to convert
+     * @param class-string<O> $targetType The desired output type
+     * @param ?string $sourceType Optional named source type instead of inferring from $input
+     * @param bool $found Set to true if conversion succeeded, false otherwise
+     * @return O|null The converted value, or null if no converter found
+     */
+    public function tryConvert(mixed $input, string $targetType, ?string $sourceType = null, bool &$found = false): mixed
+    {
+        $converter = $this->findConverter($input, $targetType, $sourceType);
+        if ($converter !== null) {
+            $found = true;
+            return $converter->convert($input, $targetType);
+        }
+
+        // Try fallback handler
+        $result = $this->fallback->trigger($input, $targetType, $sourceType);
+        if ($result !== null) {
+            $found = true;
+            return $result;
+        }
+
+        $found = false;
+        return null;
     }
 
     /**
@@ -213,12 +271,18 @@ class ConverterRegistry implements ConverterRegistryInterface
      *
      * @param mixed $input
      * @param class-string $targetType
+     * @param ?string $sourceType Optional named source type instead of inferring from $input
      * @return ConverterInterface|null
      */
-    private function findConverter(mixed $input, string $targetType): ?ConverterInterface
+    private function findConverter(mixed $input, string $targetType, ?string $sourceType = null): ?ConverterInterface
     {
         if (!isset($this->converters[$targetType])) {
             return null;
+        }
+
+        // Named source type takes precedence
+        if ($sourceType !== null) {
+            return $this->lookupConverterForType($sourceType, $targetType, $input);
         }
 
         // Scalars: only one "type"

@@ -15,13 +15,15 @@ class ClosureConverter implements ConverterInterface
     private string $outputType;
     /** @var list<string> */
     private array $inputTypes;
+    private bool $hasNamedSource = false;
 
     /**
      * @param \Closure $closure Must have exactly one typed parameter and typed return
      * @param ?string $targetName Optional explicit target type (bypasses return type validation)
+     * @param ?string $sourceName Optional explicit source type (bypasses parameter type for lookup)
      * @throws \InvalidArgumentException If closure signature is invalid
      */
-    public function __construct(private \Closure $closure, ?string $targetName = null)
+    public function __construct(private \Closure $closure, ?string $targetName = null, ?string $sourceName = null)
     {
         $this->reflection = new \ReflectionFunction($closure);
 
@@ -48,13 +50,20 @@ class ClosureConverter implements ConverterInterface
             );
         }
 
-        // Parse input type (handles union types)
-        $this->inputTypes = array_map('trim', explode('|', $inputType->__toString()));
+        // If sourceName is specified, use it directly (for named source types like 'sql-value')
+        if ($sourceName !== null) {
+            $this->inputTypeString = $sourceName;
+            $this->inputTypes = [$sourceName];
+            $this->hasNamedSource = true;
+        } else {
+            // Parse input type (handles union types)
+            $this->inputTypes = array_map('trim', explode('|', $inputType->__toString()));
 
-        // Normalize union string (sort alphabetically for canonical form)
-        // So "string|array" and "array|string" are treated as the same
-        sort($this->inputTypes);
-        $this->inputTypeString = implode('|', $this->inputTypes);
+            // Normalize union string (sort alphabetically for canonical form)
+            // So "string|array" and "array|string" are treated as the same
+            sort($this->inputTypes);
+            $this->inputTypeString = implode('|', $this->inputTypes);
+        }
 
         // Get and validate return type
         // If targetName is specified, use it directly (bypasses return type validation)
@@ -98,6 +107,13 @@ class ClosureConverter implements ConverterInterface
 
     public function supports(mixed $input, string $targetType): bool
     {
+        // For named source types, skip value type checking - the caller is responsible
+        // for ensuring the source type is correct via the $sourceType parameter
+        if ($this->hasNamedSource) {
+            return $this->outputType === $targetType
+                || is_subclass_of($this->outputType, $targetType);
+        }
+
         // Check if input matches any of the accepted input types
         foreach ($this->inputTypes as $acceptedType) {
             if ($this->valueMatchesType($input, $acceptedType)) {

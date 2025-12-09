@@ -228,13 +228,16 @@ $layout = $user['role'] === 'admin' ? 'admin-layout.php' : 'layout.php';
 
 ### Escaping Output
 
-Always escape user-provided data:
+Always escape user-provided data. Use the `mini\h()` helper for concise escaping:
 
 ```php
-<?= htmlspecialchars($user['name']) ?>
+<?= mini\h($user['name']) ?>
+
+<!-- Equivalent to: -->
+<?= htmlspecialchars($user['name'], ENT_QUOTES, 'UTF-8') ?>
 
 <!-- For HTML attributes -->
-<input value="<?= htmlspecialchars($user['email'], ENT_QUOTES) ?>">
+<input value="<?= mini\h($user['email']) ?>">
 
 <!-- For JSON in inline scripts -->
 <script>
@@ -269,6 +272,53 @@ Mini::$mini->paths->views->addPath('/path/to/theme/views');
 ```
 
 Templates are found using first-match from the path registry.
+
+### Resolution Order
+
+Templates are resolved using PathRegistry:
+
+1. **Application**: `_views/` (or `MINI_VIEWS_ROOT` env var) - always first (primary path)
+2. **Third-party packages**: Their `_views/` directories (most recently added first)
+3. **Framework**: `vendor/fubber/mini/_views/` - always last
+
+### Composer Package Integration
+
+Third-party Composer packages can provide templates by calling `addPath()` during bootstrap. Since Composer loads `autoload.files` in dependency graph order (framework → packages → application), and `addPath()` inserts new paths before earlier fallbacks, the resolution order naturally allows packages to override framework templates.
+
+**Package composer.json:**
+
+```json
+{
+    "name": "vendor/my-package",
+    "autoload": {
+        "files": ["src/bootstrap.php"]
+    }
+}
+```
+
+**Package bootstrap.php:**
+
+```php
+use mini\Mini;
+
+Mini::$mini->paths->views->addPath(__DIR__ . '/../_views');
+```
+
+**Package structure:**
+
+```
+my-package/
+├── _views/
+│   └── my-package/
+│       ├── widget.php
+│       └── partials/
+└── src/
+    └── bootstrap.php
+```
+
+Templates become available as `my-package/widget.php` etc.
+
+To override a package's template, place your version at the same relative path in your application's `_views/` directory.
 
 ### Custom Renderer
 

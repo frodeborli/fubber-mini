@@ -9,7 +9,7 @@ namespace mini\Database;
  * to database queries. PartialQuery will call toSqlValue() automatically.
  *
  * ```php
- * class Money implements SqlValueInterface
+ * class Money implements SqlValue
  * {
  *     public function __construct(public readonly int $cents) {}
  *
@@ -29,8 +29,10 @@ namespace mini\Database;
  *     return $dt->format('Y-m-d H:i:s');
  * }, 'sql-value');
  * ```
+ *
+ * @see SqlValueHydrator For the reverse direction (SQL → PHP)
  */
-interface SqlValueInterface
+interface SqlValue
 {
     /**
      * Convert to a SQL-bindable scalar value

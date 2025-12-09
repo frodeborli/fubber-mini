@@ -137,11 +137,29 @@ final class Mini implements ContainerInterface {
     /**
      * Application lifecycle state machine
      *
-     * Tracks transitions between Initializing → Bootstrap → Ready → Shutdown phases with validation.
-     * Use $mini->phase->trigger(Phase::Ready) to transition between phases.
+     * Tracks transitions between Initializing → Bootstrap → Ready → Shutdown phases.
      * The Ready phase handles all request processing (one or many concurrent requests).
      *
-     * @var Hooks\StateMachine
+     * ## Phase Lifecycle Hooks
+     *
+     * Hook into lifecycle transitions using the StateMachine methods:
+     *
+     * ```php
+     * use mini\Mini;
+     * use mini\Phase;
+     *
+     * // Before Ready phase (before error handlers, output buffering)
+     * Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
+     *     // Authentication, CORS headers, rate limiting
+     * });
+     *
+     * // After Ready phase entered (after bootstrap completes)
+     * Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
+     *     // Output buffering, response processing
+     * });
+     * ```
+     *
+     * @var Hooks\StateMachine<Phase>
      */
     public readonly Hooks\StateMachine $phase;
 

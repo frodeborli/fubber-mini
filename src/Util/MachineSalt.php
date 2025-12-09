@@ -46,6 +46,7 @@ class MachineSalt
             PHP_BINARY,      // PHP binary path
             phpversion(),    // PHP version
             __DIR__,         // Framework installation path
+            getmyuid(),      // Process owner UID (per-user uniqueness)
         ];
         return hash('sha256', implode('|', $parts));
     }
