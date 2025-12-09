@@ -67,9 +67,19 @@ class PDOService
             case 'sqlite':
                 $pdo->exec("PRAGMA encoding = 'UTF-8'");
                 break;
-            // sqlsrv/dblib: charset via connection string
-            // SQL Server has no session timezone - uses server OS timezone.
-            // Ensure your SQL Server runs in UTC or use GETUTCDATE()/AT TIME ZONE.
+            case 'sqlsrv':
+            case 'dblib':
+                // SQL Server has no session timezone - uses server OS timezone.
+                // Verify the server is running in UTC.
+                $offset = $pdo->query("SELECT DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())")->fetchColumn();
+                if ((int)$offset !== 0) {
+                    throw new \RuntimeException(
+                        "SQL Server is not configured for UTC (offset: {$offset} minutes). " .
+                        "Mini requires UTC for consistent datetime handling. " .
+                        "Configure the server OS timezone to UTC."
+                    );
+                }
+                break;
         }
     }
 
