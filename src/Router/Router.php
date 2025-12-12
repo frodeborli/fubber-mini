@@ -33,7 +33,8 @@ use RuntimeException;
  *
  * Example controllers:
  * ```php
- * // _routes/ping.php - Return string (converted to response)
+ * // _routes/ping.php - Return string (converted to JSON response 
+ * // like all scalars and JsonSerializable that don't have a specific converter)
  * <?php
  * return "pong";
  *
