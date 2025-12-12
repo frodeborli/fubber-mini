@@ -37,6 +37,9 @@ abstract class AbstractTable implements TableInterface
     /** @var array<string, true>|null Lazy membership index for has() */
     protected ?array $membershipIndex = null;
 
+    /** @var bool Whether membershipIndex was built using row keys */
+    private bool $membershipIndexUsesRowKeys = false;
+
     public function __construct(ColumnDef ...$columns)
     {
         $defs = [];
@@ -54,6 +57,20 @@ abstract class AbstractTable implements TableInterface
         $this->cachedCount = null;
         $this->cachedExists = null;
         $this->membershipIndex = null;
+        $this->membershipIndexUsesRowKeys = false;
+    }
+
+    /**
+     * Get column name(s) that the row key represents
+     *
+     * If non-empty, the row keys from iteration are the values of these columns.
+     * This enables optimizations when checking membership on exactly these columns.
+     *
+     * @return string[] Column names that form the row key (typically primary key)
+     */
+    public function getRowKeyColumns(): array
+    {
+        return [];
     }
 
     /**
@@ -274,11 +291,16 @@ abstract class AbstractTable implements TableInterface
 
         // Build membership index lazily (also captures count)
         if ($this->membershipIndex === null) {
-            $this->membershipIndex = [];
             $colNames = array_keys($cols);
+            $rowKeyColumns = $this->getRowKeyColumns();
+
+            // Optimization: if checking exactly the row key columns, use row keys directly
+            $this->membershipIndexUsesRowKeys = ($colNames === $rowKeyColumns && count($colNames) === 1);
+
+            $this->membershipIndex = [];
             $count = 0;
-            foreach ($this as $row) {
-                $key = $this->membershipKey($row, $colNames);
+            foreach ($this as $id => $row) {
+                $key = $this->membershipIndexUsesRowKeys ? $id : $this->membershipKey($row, $colNames);
                 $this->membershipIndex[$key] = true;
                 $count++;
             }
@@ -287,6 +309,12 @@ abstract class AbstractTable implements TableInterface
                 $this->cachedCount = $count;
                 $this->cachedExists = $count > 0;
             }
+        }
+
+        if ($this->membershipIndexUsesRowKeys) {
+            // Direct key lookup when checking row key column
+            $colName = array_keys($cols)[0];
+            return isset($this->membershipIndex[$member->$colName ?? null]);
         }
 
         return isset($this->membershipIndex[$this->membershipKey($member, array_keys($cols))]);
