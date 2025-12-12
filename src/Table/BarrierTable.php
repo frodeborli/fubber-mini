@@ -111,6 +111,30 @@ final class BarrierTable extends AbstractTableWrapper
         return new FilteredTable($this, $column, Operator::Like, $pattern);
     }
 
+    public function or(TableInterface ...$predicates): TableInterface
+    {
+        // If any predicate is a bare Predicate (matches everything), OR is redundant
+        foreach ($predicates as $p) {
+            if ($p instanceof Predicate) {
+                return $this;
+            }
+        }
+
+        // Filter out EmptyTable predicates (match nothing)
+        $predicates = array_values(array_filter(
+            $predicates,
+            fn($p) => !$p instanceof EmptyTable
+        ));
+
+        // No predicates → nothing matches
+        if (empty($predicates)) {
+            return EmptyTable::from($this);
+        }
+
+        // Don't push down - use OrTable for single-pass evaluation
+        return new OrTable($this, ...$predicates);
+    }
+
     // -------------------------------------------------------------------------
     // Order/limit/offset - return wrappers, don't modify source
     // -------------------------------------------------------------------------

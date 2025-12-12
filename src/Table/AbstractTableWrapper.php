@@ -26,6 +26,14 @@ abstract class AbstractTableWrapper extends AbstractTable
         $this->source = $source;
     }
 
+    /**
+     * Get the source table this wrapper delegates to
+     */
+    public function getSource(): AbstractTable
+    {
+        return $this->source;
+    }
+
     // -------------------------------------------------------------------------
     // Delegation - override in subclasses as needed
     // -------------------------------------------------------------------------
@@ -118,6 +126,13 @@ abstract class AbstractTableWrapper extends AbstractTable
     {
         $c = clone $this;
         $c->source = $this->source->order($spec);
+        return $c;
+    }
+
+    public function or(TableInterface ...$predicates): TableInterface
+    {
+        $c = clone $this;
+        $c->source = $this->source->or(...$predicates);
         return $c;
     }
 

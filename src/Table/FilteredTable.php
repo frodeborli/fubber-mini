@@ -16,7 +16,7 @@ use Traversable;
  * new FilteredTable($source, 'id', Operator::In, $setOfIds)
  * ```
  */
-class FilteredTable extends AbstractTableWrapper
+class FilteredTable extends AbstractTableWrapper implements PredicateInterface
 {
     public function __construct(
         AbstractTable $source,
@@ -37,6 +37,41 @@ class FilteredTable extends AbstractTableWrapper
         }
 
         parent::__construct($source);
+    }
+
+    // -------------------------------------------------------------------------
+    // Accessors for predicate inspection
+    // -------------------------------------------------------------------------
+
+    public function getFilterColumn(): string
+    {
+        return $this->column;
+    }
+
+    public function getFilterOperator(): Operator
+    {
+        return $this->operator;
+    }
+
+    public function getFilterValue(): mixed
+    {
+        return $this->value;
+    }
+
+    public function test(object $row): bool
+    {
+        // Check our condition
+        if (!$this->matches($row->{$this->column} ?? null)) {
+            return false;
+        }
+
+        // Delegate to source if it's also a predicate
+        $source = $this->getSource();
+        if ($source instanceof PredicateInterface) {
+            return $source->test($row);
+        }
+
+        return true;
     }
 
     protected function materialize(string ...$additionalColumns): Traversable

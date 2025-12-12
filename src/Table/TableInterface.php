@@ -133,6 +133,26 @@ interface TableInterface extends SetInterface, IteratorAggregate, Countable
     public function union(TableInterface $other): TableInterface;
 
     /**
+     * Filter rows matching any of the given predicates (OR semantics)
+     *
+     * Each predicate is a filter chain built on a Predicate table:
+     *
+     * ```php
+     * $p = Predicate::from($users);
+     *
+     * // WHERE status = 'active' OR status = 'pending'
+     * $users->or($p->eq('status', 'active'), $p->eq('status', 'pending'));
+     *
+     * // WHERE (age < 18) OR (age >= 65 AND status = 'retired')
+     * $users->or(
+     *     $p->lt('age', 18),
+     *     $p->gte('age', 65)->eq('status', 'retired')
+     * );
+     * ```
+     */
+    public function or(TableInterface ...$predicates): TableInterface;
+
+    /**
      * Return rows that are in this table but NOT in the other set (set difference)
      *
      * Enables all negation operations:

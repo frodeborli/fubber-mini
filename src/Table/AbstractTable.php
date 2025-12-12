@@ -127,6 +127,97 @@ abstract class AbstractTable implements TableInterface
         return new ExceptTable($this, $other);
     }
 
+    /**
+     * Filter rows matching any of the given predicates (OR semantics)
+     *
+     * Each predicate is a filter chain built on a Predicate table:
+     *
+     * ```php
+     * $p = Predicate::from($users);
+     *
+     * // WHERE status = 'active' OR status = 'pending'
+     * $users->or($p->eq('status', 'active'), $p->eq('status', 'pending'));
+     *
+     * // WHERE (age < 18) OR (age >= 65 AND status = 'retired')
+     * $users->or(
+     *     $p->lt('age', 18),
+     *     $p->gte('age', 65)->eq('status', 'retired')
+     * );
+     * ```
+     */
+    public function or(TableInterface ...$predicates): TableInterface
+    {
+        // If any predicate is a bare Predicate (matches everything), OR is redundant
+        foreach ($predicates as $p) {
+            if ($p instanceof Predicate) {
+                return $this;
+            }
+        }
+
+        // Filter out EmptyTable predicates (they match nothing)
+        $predicates = array_values(array_filter(
+            $predicates,
+            fn($p) => !$p instanceof EmptyTable
+        ));
+
+        // No predicates → nothing matches
+        if (empty($predicates)) {
+            return EmptyTable::from($this);
+        }
+
+        // Single predicate → apply directly without union overhead
+        if (count($predicates) === 1) {
+            return $this->applyPredicateChain($predicates[0], $this);
+        }
+
+        // Multiple predicates → union branches
+        $result = $this->applyPredicateChain($predicates[0], $this);
+        for ($i = 1; $i < count($predicates); $i++) {
+            $branch = $this->applyPredicateChain($predicates[$i], $this);
+            $result = $result->union($branch);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Apply a predicate chain to a target table
+     *
+     * Recursively unwraps the predicate chain and replays operations on target.
+     */
+    private function applyPredicateChain(TableInterface $predicate, TableInterface $target): TableInterface
+    {
+        // Base case: hit the Predicate root
+        if ($predicate instanceof Predicate) {
+            return $target;
+        }
+
+        // Recursive: unwrap and replay
+        if ($predicate instanceof AbstractTableWrapper) {
+            $inner = $this->applyPredicateChain($predicate->getSource(), $target);
+
+            if ($predicate instanceof FilteredTable) {
+                $col = $predicate->getFilterColumn();
+                $val = $predicate->getFilterValue();
+
+                return match ($predicate->getFilterOperator()) {
+                    Operator::Eq => $inner->eq($col, $val),
+                    Operator::Lt => $inner->lt($col, $val),
+                    Operator::Lte => $inner->lte($col, $val),
+                    Operator::Gt => $inner->gt($col, $val),
+                    Operator::Gte => $inner->gte($col, $val),
+                    Operator::In => $inner->in($col, $val),
+                    Operator::Like => $inner->like($col, $val),
+                };
+            }
+        }
+
+        throw new \InvalidArgumentException(
+            'Predicate chain contains unsupported wrapper: ' . get_class($predicate)
+            . '. Only filter operations (eq, lt, gt, etc.) are allowed.'
+        );
+    }
+
     public function exists(): bool
     {
         return $this->limit(1)->count() > 0;

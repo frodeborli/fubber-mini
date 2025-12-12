@@ -65,6 +65,14 @@ class SortedTable extends AbstractTableWrapper
         return $this->source->order($spec);
     }
 
+    /**
+     * Get the order specification for predicate inspection
+     */
+    public function getOrderSpec(): ?string
+    {
+        return empty($this->orderBy) ? null : OrderDef::toSpec($this->orderBy);
+    }
+
     protected function materialize(string ...$additionalColumns): Traversable
     {
         $orderColumns = OrderDef::columns($this->orderBy);

@@ -127,4 +127,28 @@ class GeneratorTable extends AbstractTable
         }
         return new SortedTable($this, ...$orders);
     }
+
+    public function or(TableInterface ...$predicates): TableInterface
+    {
+        // If any predicate is a bare Predicate (matches everything), OR is redundant
+        foreach ($predicates as $p) {
+            if ($p instanceof Predicate) {
+                return $this;
+            }
+        }
+
+        // Filter out EmptyTable predicates (match nothing)
+        $predicates = array_values(array_filter(
+            $predicates,
+            fn($p) => !$p instanceof EmptyTable
+        ));
+
+        // No predicates → nothing matches
+        if (empty($predicates)) {
+            return EmptyTable::from($this);
+        }
+
+        // In-memory table - use OrTable for single-pass evaluation
+        return new OrTable($this, ...$predicates);
+    }
 }
