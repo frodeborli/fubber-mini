@@ -98,6 +98,15 @@ class OrTable extends AbstractTableWrapper implements PredicateInterface
         return $this->cachedCount = $count;
     }
 
+    public function has(object $member): bool
+    {
+        // Short-circuit: if member doesn't match any OR predicate, it's not in result
+        if (!$this->test($member)) {
+            return false;
+        }
+        return parent::has($member);
+    }
+
     // -------------------------------------------------------------------------
     // Limit/offset stored locally, not pushed to source
     // -------------------------------------------------------------------------

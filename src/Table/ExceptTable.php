@@ -106,4 +106,22 @@ class ExceptTable extends AbstractTableWrapper
         }
         return $this->cachedCount = $count;
     }
+
+    public function has(object $member): bool
+    {
+        // Short-circuit: if member is in excluded set, it's not in result
+        $excludedCols = array_keys($this->excluded->getColumns());
+        $excludedMember = new \stdClass();
+        foreach ($excludedCols as $col) {
+            if (!property_exists($member, $col)) {
+                // Can't check exclusion - fall back to parent
+                return parent::has($member);
+            }
+            $excludedMember->$col = $member->$col;
+        }
+        if ($this->excluded->has($excludedMember)) {
+            return false;
+        }
+        return parent::has($member);
+    }
 }

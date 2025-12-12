@@ -60,8 +60,18 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
 
     public function test(object $row): bool
     {
+        // If column doesn't exist, we can't determine - return true (open world)
+        if (!property_exists($row, $this->column)) {
+            // Still need to check source predicates
+            $source = $this->getSource();
+            if ($source instanceof PredicateInterface) {
+                return $source->test($row);
+            }
+            return true;
+        }
+
         // Check our condition
-        if (!$this->matches($row->{$this->column} ?? null)) {
+        if (!$this->matches($row->{$this->column})) {
             return false;
         }
 
@@ -186,6 +196,15 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
             $count++;
         }
         return $this->cachedCount = $count;
+    }
+
+    public function has(object $member): bool
+    {
+        // Short-circuit: if member doesn't match our filter, it's not in the result
+        if (!$this->test($member)) {
+            return false;
+        }
+        return parent::has($member);
     }
 
     // -------------------------------------------------------------------------
