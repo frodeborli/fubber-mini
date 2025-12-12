@@ -2,21 +2,26 @@
 
 namespace mini\Database;
 
+use stdClass;
+
 /**
  * Simple result set wrapper for raw SQL queries
  *
  * Wraps an iterable of rows and provides the ResultSetInterface API.
  * Supports hydration to entity classes or custom closures.
  *
+ * Rows can be arrays or stdClass objects. When hydration is not configured,
+ * rows are returned as-is (array or stdClass depending on source).
+ *
  * @template T of array|object
  * @implements ResultSetInterface<T>
  */
 class ResultSet implements ResultSetInterface
 {
-    /** @var iterable<array> */
+    /** @var iterable<array|stdClass> */
     private iterable $rows;
 
-    /** @var array<array>|null Materialized rows (lazy) */
+    /** @var array<array|stdClass>|null Materialized rows (lazy) */
     private ?array $materialized = null;
 
     /** @var \Closure|null */
@@ -29,7 +34,7 @@ class ResultSet implements ResultSetInterface
     private array|false $constructorArgs = false;
 
     /**
-     * @param iterable<array> $rows Raw database rows
+     * @param iterable<array|stdClass> $rows Raw database rows
      */
     public function __construct(iterable $rows)
     {
@@ -77,7 +82,7 @@ class ResultSet implements ResultSetInterface
     {
         $result = [];
         foreach ($this->rows as $row) {
-            $result[] = array_values($row)[0] ?? null;
+            $result[] = $this->getFirstValue($row);
         }
         return $result;
     }
@@ -85,9 +90,21 @@ class ResultSet implements ResultSetInterface
     public function field(): mixed
     {
         foreach ($this->rows as $row) {
-            return array_values($row)[0] ?? null;
+            return $this->getFirstValue($row);
         }
         return null;
+    }
+
+    /**
+     * Get first value from a row (works with both array and stdClass)
+     */
+    private function getFirstValue(array|stdClass $row): mixed
+    {
+        if ($row instanceof stdClass) {
+            $vars = get_object_vars($row);
+            return $vars ? reset($vars) : null;
+        }
+        return $row ? reset($row) : null;
     }
 
     public function withEntityClass(string $class, array|false $constructorArgs = false): self
@@ -123,10 +140,10 @@ class ResultSet implements ResultSetInterface
     /**
      * Apply hydration to a single row
      *
-     * @param array $row
+     * @param array|stdClass $row
      * @return T
      */
-    private function hydrateRow(array $row): mixed
+    private function hydrateRow(array|stdClass $row): mixed
     {
         if ($this->hydrator !== null) {
             return ($this->hydrator)($row);
@@ -140,9 +157,17 @@ class ResultSet implements ResultSetInterface
     }
 
     /**
+     * Convert row to array if needed
+     */
+    private function rowToArray(array|stdClass $row): array
+    {
+        return $row instanceof stdClass ? get_object_vars($row) : $row;
+    }
+
+    /**
      * Hydrate row into entity class
      */
-    private function hydrateEntity(array $row): object
+    private function hydrateEntity(array|stdClass $row): object
     {
         $class = $this->entityClass;
         $refClass = new \ReflectionClass($class);

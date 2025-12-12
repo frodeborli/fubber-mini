@@ -42,7 +42,7 @@ class PDODatabase implements DatabaseInterface
                 $stmt = $this->lazyPdo()->prepare($sql);
                 $stmt->execute(array_map(sqlval(...), $params));
 
-                while ($row = $stmt->fetch()) {
+                while ($row = $stmt->fetch(PDO::FETCH_OBJ)) {
                     yield $row;
                 }
             } catch (PDOException $e) {
@@ -60,14 +60,14 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Execute query and return first row only as associative array
+     * Execute query and return first row only as object
      */
-    public function queryOne(string $sql, array $params = []): ?array
+    public function queryOne(string $sql, array $params = []): ?object
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
             $stmt->execute(array_map(sqlval(...), $params));
-            $result = $stmt->fetch();
+            $result = $stmt->fetch(PDO::FETCH_OBJ);
             return $result ?: null;
         } catch (PDOException $e) {
             throw new Exception("Query one failed: " . $e->getMessage());
@@ -82,8 +82,7 @@ class PDODatabase implements DatabaseInterface
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
             $stmt->execute(array_map(sqlval(...), $params));
-            $result = $stmt->fetch();
-            return $result ? array_values($result)[0] : null;
+            return $stmt->fetchColumn();
         } catch (PDOException $e) {
             throw new Exception("Query field failed: " . $e->getMessage());
         }

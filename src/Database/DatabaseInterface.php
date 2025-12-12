@@ -14,13 +14,14 @@ interface DatabaseInterface
      * Execute a SELECT query and return results as ResultSet
      *
      * Returns a ResultSet that can be iterated, converted to array, or JSON serialized.
+     * Rows are returned as stdClass objects with column names as properties.
      * Supports hydration to entity classes via withEntityClass() or withHydrator().
      *
      * Example:
      * ```php
      * // Iterate
      * foreach (db()->query('SELECT * FROM users WHERE active = ?', [1]) as $row) {
-     *     echo $row['name'];
+     *     echo $row->name;
      * }
      *
      * // Get all as array
@@ -37,7 +38,7 @@ interface DatabaseInterface
      *
      * @param string $sql SQL query with parameter placeholders
      * @param array $params Parameters to bind to the query
-     * @return ResultSetInterface<array>
+     * @return ResultSetInterface<object>
      */
     public function query(string $sql, array $params = []): ResultSetInterface;
 
@@ -69,13 +70,13 @@ interface DatabaseInterface
     public function partialQuery(string $table, ?string $sql = null, array $params = []): PartialQuery;
 
     /**
-     * Execute query and return first row only as associative array
+     * Execute query and return first row only as object
      *
      * @param string $sql SQL query with parameter placeholders
      * @param array $params Parameters to bind to the query
-     * @return array|null Associative array for the row, or null if no results
+     * @return object|null Row as object, or null if no results
      */
-    public function queryOne(string $sql, array $params = []): ?array;
+    public function queryOne(string $sql, array $params = []): ?object;
 
     /**
      * Execute query and return first column of first row

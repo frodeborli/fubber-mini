@@ -2,8 +2,11 @@
 
 namespace mini\Database;
 
+use mini\Table\SetInterface;
+use mini\Table\TableInterface;
 use mini\Parsing\GenericParser;
 use mini\Parsing\TextNode;
+use stdClass;
 
 /**
  * Immutable query builder for composable SQL queries
@@ -11,7 +14,7 @@ use mini\Parsing\TextNode;
  * @template T of array|object
  * @implements ResultSetInterface<T>
  */
-final class PartialQuery implements ResultSetInterface
+final class PartialQuery implements ResultSetInterface, TableInterface
 {
     private DatabaseInterface $db;
 
@@ -227,25 +230,13 @@ final class PartialQuery implements ResultSetInterface
     /**
      * Add WHERE column IN (...) clause
      *
-     * @param string                 $column
-     * @param array<int, mixed>|self $values
+     * Accepts SetInterface (including TableInterface for subqueries)
      */
-    public function in(string $column, array|self $values): self
+    public function in(string $column, SetInterface $values): self
     {
         $col = $this->db->quoteIdentifier($column);
 
-        // Array case -> parameterized IN (?, ?, ?)
-        if (is_array($values)) {
-            // Empty IN -> false
-            if ($values === []) {
-                return $this->where('1 = 0');
-            }
-
-            $placeholders = implode(', ', array_fill(0, count($values), '?'));
-            return $this->where("$col IN ($placeholders)", array_values($values));
-        }
-
-        // Subquery case
+        // PartialQuery subquery case - can potentially use SQL subquery
         if ($values instanceof self) {
             // Cross-database or dialect without subquery support: materialize to value list
             if ($this->db !== $values->db || !$this->db->getDialect()->supportsSubquery()) {
@@ -262,8 +253,8 @@ final class PartialQuery implements ResultSetInterface
             // Require explicit single-column select for subqueries
             if ($values->getSelect() === null) {
                 throw new \InvalidArgumentException(
-                    "Subquery for IN() must have an explicit select(). " .
-                    "Use ->select('column_name') to specify which column to match."
+                    "Subquery for IN() must have an explicit select() or columns(). " .
+                    "Use ->select('column_name') or ->columns('column_name') to specify which column to match."
                 );
             }
 
@@ -278,9 +269,110 @@ final class PartialQuery implements ResultSetInterface
             return $new->where("$col IN ($subSql)", $subParams);
         }
 
-        throw new \InvalidArgumentException(
-            'Values for IN() must be an array or PartialQuery instance.'
-        );
+        // Other SetInterface - materialize by iterating
+        $list = [];
+        foreach ($values as $value) {
+            // If iterating yields arrays (from TableInterface with columns), extract first column
+            if (is_array($value)) {
+                $list[] = reset($value);
+            } else {
+                $list[] = $value;
+            }
+        }
+
+        if ($list === []) {
+            return $this->where('1 = 0');
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($list), '?'));
+        return $this->where("$col IN ($placeholders)", $list);
+    }
+
+    /**
+     * Add WHERE column LIKE pattern clause
+     */
+    public function like(string $column, string $pattern): self
+    {
+        $col = $this->db->quoteIdentifier($column);
+        return $this->where("$col LIKE ?", [$pattern]);
+    }
+
+    /**
+     * Union with another query (OR semantics, deduplicated)
+     *
+     * For SQL databases, uses UNION. Results are deduplicated by full row.
+     */
+    public function union(TableInterface $other): TableInterface
+    {
+        if (!($other instanceof self)) {
+            throw new \InvalidArgumentException("PartialQuery::union() requires another PartialQuery");
+        }
+
+        if ($this->db !== $other->db) {
+            throw new \InvalidArgumentException("Cannot union PartialQueries from different databases");
+        }
+
+        // Build UNION query as new base SQL
+        $leftSql = $this->buildCoreSql();
+        $rightSql = $other->buildCoreSql();
+        $unionSql = "($leftSql) UNION ($rightSql)";
+
+        // Merge params: left params, then right params
+        $params = array_merge($this->getAllParams(), $other->getAllParams());
+
+        // Create new PartialQuery with union as base
+        $new = new self($this->db, $this->table, $unionSql, $params);
+
+        // Merge CTEs from both sides
+        foreach ($this->cteList as $cte) {
+            $new->cteList[] = $cte;
+        }
+        $new = $new->withCTEsFrom($other);
+
+        return $new;
+    }
+
+    /**
+     * Difference from another query (NOT IN semantics)
+     *
+     * For SQL databases, uses NOT IN subquery or EXCEPT where supported.
+     */
+    public function except(TableInterface $other): TableInterface
+    {
+        if (!($other instanceof self)) {
+            throw new \InvalidArgumentException("PartialQuery::except() requires another PartialQuery");
+        }
+
+        if ($this->db !== $other->db) {
+            throw new \InvalidArgumentException("Cannot except PartialQueries from different databases");
+        }
+
+        $dialect = $this->db->getDialect();
+
+        // Most databases support EXCEPT
+        if ($dialect !== SqlDialect::MySQL) {
+            $leftSql = $this->buildCoreSql();
+            $rightSql = $other->buildCoreSql();
+            $exceptSql = "($leftSql) EXCEPT ($rightSql)";
+
+            $params = array_merge($this->getAllParams(), $other->getAllParams());
+            $new = new self($this->db, $this->table, $exceptSql, $params);
+
+            foreach ($this->cteList as $cte) {
+                $new->cteList[] = $cte;
+            }
+            return $new->withCTEsFrom($other);
+        }
+
+        // MySQL doesn't support EXCEPT - use NOT IN with primary key
+        // This requires knowing the primary key, fall back to NOT EXISTS
+        $new = $this->withCTEsFrom($other);
+        $subSql = $other->buildCoreSql(PHP_INT_MAX);
+        $subParams = $other->getMainParams();
+
+        // Use NOT EXISTS with correlated subquery matching all columns
+        // This is the safest fallback but may be slow
+        return $new->where("NOT EXISTS (SELECT 1 FROM ($subSql) AS _exc WHERE _exc.* = {$this->table}.*)", $subParams);
     }
 
     /**
@@ -347,6 +439,35 @@ final class PartialQuery implements ResultSetInterface
         $new         = clone $this;
         $new->select = $selectPart;
         return $new;
+    }
+
+    /**
+     * Project to specific columns (TableInterface method)
+     *
+     * Alias for select() with column quoting, enables use as SetInterface
+     */
+    public function columns(string ...$columns): self
+    {
+        $quoted = array_map(fn($c) => $this->db->quoteIdentifier($c), $columns);
+        return $this->select(implode(', ', $quoted));
+    }
+
+    /**
+     * Check if value(s) exist in the table (SetInterface method)
+     *
+     * Requires columns() to be called first to specify which columns to check.
+     */
+    public function has(stdClass $member): bool
+    {
+        if ($this->select === null) {
+            throw new \RuntimeException("has() requires columns() or select() to be called first");
+        }
+
+        $query = $this;
+        foreach (get_object_vars($member) as $col => $value) {
+            $query = $query->eq($col, $value);
+        }
+        return $query->limit(1)->one() !== null;
     }
 
     /**
@@ -763,7 +884,7 @@ final class PartialQuery implements ResultSetInterface
         if ($this->hydrator !== null) {
             $hydrator = $this->hydrator;
             foreach ($rows as $row) {
-                yield $hydrator(...array_values($row));
+                yield $hydrator(...array_values(get_object_vars($row)));
             }
             return;
         }

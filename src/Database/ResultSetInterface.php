@@ -2,13 +2,17 @@
 
 namespace mini\Database;
 
+use stdClass;
+
 /**
  * Interface for database query results
  *
  * Provides a consistent API for consuming query results whether from
  * raw SQL queries (ResultSet) or composed queries (PartialQuery).
  *
- * @template T of array|object
+ * Rows are returned as stdClass objects with column names as properties.
+ *
+ * @template T of object
  */
 interface ResultSetInterface extends \IteratorAggregate, \JsonSerializable, \Countable
 {
@@ -56,7 +60,7 @@ interface ResultSetInterface extends \IteratorAggregate, \JsonSerializable, \Cou
      * Hydrate results using a custom closure
      *
      * @template E
-     * @param \Closure(array): E $hydrator Function that converts row array to desired type
+     * @param \Closure(stdClass): E $hydrator Function that converts row to desired type
      * @return ResultSetInterface<E>
      */
     public function withHydrator(\Closure $hydrator): self;
