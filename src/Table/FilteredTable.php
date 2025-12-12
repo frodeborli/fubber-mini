@@ -178,11 +178,14 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
 
     public function count(): int
     {
+        if ($this->cachedCount !== null) {
+            return $this->cachedCount;
+        }
         $count = 0;
         foreach ($this as $_) {
             $count++;
         }
-        return $count;
+        return $this->cachedCount = $count;
     }
 
     // -------------------------------------------------------------------------

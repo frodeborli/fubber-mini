@@ -145,7 +145,10 @@ class UnionTable extends AbstractTable
 
     public function count(): int
     {
-        return iterator_count($this);
+        if ($this->cachedCount !== null) {
+            return $this->cachedCount;
+        }
+        return $this->cachedCount = iterator_count($this);
     }
 
     public function order(?string $spec): TableInterface

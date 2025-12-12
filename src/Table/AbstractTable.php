@@ -28,6 +28,12 @@ abstract class AbstractTable implements TableInterface
     protected ?int $limit = null;
     protected int $offset = 0;
 
+    /** @var int|null Cached count result (cleared on clone) */
+    protected ?int $cachedCount = null;
+
+    /** @var bool|null Cached exists result (cleared on clone) */
+    protected ?bool $cachedExists = null;
+
     public function __construct(ColumnDef ...$columns)
     {
         $defs = [];
@@ -35,6 +41,15 @@ abstract class AbstractTable implements TableInterface
             $defs[$col->name] = $col;
         }
         $this->columnDefs = $defs;
+    }
+
+    /**
+     * Clear cached values on clone (immutable operations clone)
+     */
+    public function __clone()
+    {
+        $this->cachedCount = null;
+        $this->cachedExists = null;
     }
 
     /**
@@ -220,7 +235,14 @@ abstract class AbstractTable implements TableInterface
 
     public function exists(): bool
     {
-        return $this->limit(1)->count() > 0;
+        if ($this->cachedExists !== null) {
+            return $this->cachedExists;
+        }
+        // If count is already cached, use it
+        if ($this->cachedCount !== null) {
+            return $this->cachedExists = $this->cachedCount > 0;
+        }
+        return $this->cachedExists = $this->limit(1)->count() > 0;
     }
 
     /**
