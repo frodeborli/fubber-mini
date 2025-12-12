@@ -34,6 +34,9 @@ abstract class AbstractTable implements TableInterface
     /** @var bool|null Cached exists result (cleared on clone) */
     protected ?bool $cachedExists = null;
 
+    /** @var array<string, true>|null Lazy membership index for has() */
+    protected ?array $membershipIndex = null;
+
     public function __construct(ColumnDef ...$columns)
     {
         $defs = [];
@@ -50,6 +53,7 @@ abstract class AbstractTable implements TableInterface
     {
         $this->cachedCount = null;
         $this->cachedExists = null;
+        $this->membershipIndex = null;
     }
 
     /**
@@ -248,7 +252,7 @@ abstract class AbstractTable implements TableInterface
     /**
      * Check if value(s) exist in the table's projected columns
      *
-     * Uses chained eq() filters + exists() to leverage storage engine optimizations.
+     * Builds a membership index lazily on first call for O(1) subsequent lookups.
      * Returns false if the member's properties don't exactly match the table's columns.
      *
      * @param object $member Object with properties matching getColumns()
@@ -268,13 +272,38 @@ abstract class AbstractTable implements TableInterface
             }
         }
 
-        // Build query by chaining eq() for each column
-        $table = $this;
-        foreach (array_keys($cols) as $col) {
-            $table = $table->eq($col, $member->$col ?? null);
+        // Build membership index lazily (also captures count)
+        if ($this->membershipIndex === null) {
+            $this->membershipIndex = [];
+            $colNames = array_keys($cols);
+            $count = 0;
+            foreach ($this as $row) {
+                $key = $this->membershipKey($row, $colNames);
+                $this->membershipIndex[$key] = true;
+                $count++;
+            }
+            // Cache count since we iterated anyway
+            if ($this->cachedCount === null) {
+                $this->cachedCount = $count;
+                $this->cachedExists = $count > 0;
+            }
         }
 
-        return $table->exists();
+        return isset($this->membershipIndex[$this->membershipKey($member, array_keys($cols))]);
+    }
+
+    /**
+     * Generate a membership key for index lookup
+     */
+    private function membershipKey(object $row, array $colNames): string
+    {
+        $parts = [];
+        foreach ($colNames as $col) {
+            $val = $row->$col ?? null;
+            // Prefix with type to distinguish null from "null" string
+            $parts[] = ($val === null ? 'n:' : 's:') . $val;
+        }
+        return implode("\x00", $parts);
     }
 
     /**
