@@ -346,10 +346,15 @@ final class Mini implements ContainerInterface {
      * @throws \LogicException If service was already instantiated and cached
      */
     public function set(string $id, mixed $instance): void {
+        $isTesting = ($_ENV['MINI_TESTING'] ?? $_SERVER['MINI_TESTING'] ?? false);
+
         // Check if already instantiated in singleton cache
         $singletonCache = $this->instanceCache[$this] ?? null;
         if ($singletonCache !== null && property_exists($singletonCache, $id)) {
-            throw new \LogicException("Cannot shadow service '$id': already instantiated");
+            if (!$isTesting) {
+                throw new \LogicException("Cannot shadow service '$id': already instantiated");
+            }
+            // In testing mode, allow replacing - just update the cached instance
         }
 
         // Check scoped cache if in Ready phase (scope exists)
@@ -359,11 +364,17 @@ final class Mini implements ContainerInterface {
                 $scopedCache = $this->instanceCache[$scopeObject];
                 $cacheKey = 'service:' . $id;
                 if (property_exists($scopedCache, $cacheKey)) {
-                    throw new \LogicException("Cannot shadow service '$id': already instantiated in current scope");
+                    if (!$isTesting) {
+                        throw new \LogicException("Cannot shadow service '$id': already instantiated in current scope");
+                    }
+                    // In testing mode, clear scoped cache entry
+                    unset($scopedCache->{$cacheKey});
                 }
             }
 
-            trigger_error("set('$id') called during Ready phase - intended for testing only", E_USER_WARNING);
+            if (!$isTesting) {
+                trigger_error("set('$id') called during Ready phase - intended for testing only", E_USER_WARNING);
+            }
         }
 
         // Store in singleton cache
