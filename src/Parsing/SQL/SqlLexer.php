@@ -7,11 +7,12 @@ namespace mini\Parsing\SQL;
  *
  * Features:
  * - Case-insensitive keywords
- * - String escaping (' ' and \')
+ * - String escaping ('' and \')
  * - Positional (?) and named (:name) placeholders
  * - Comments (-- and # and /* *\/)
  * - Quoted identifiers (backticks)
- * - Dotted identifiers (table.column)
+ * - Dot tokens for qualified names (table.column parsed in parser)
+ * - Numbers with at most one decimal point
  */
 class SqlLexer
 {
@@ -35,18 +36,35 @@ class SqlLexer
     public const T_ORDER  = 'ORDER';
     public const T_BY     = 'BY';
     public const T_LIMIT  = 'LIMIT';
+    public const T_OFFSET = 'OFFSET';
     public const T_AS     = 'AS';
     public const T_ASC    = 'ASC';
     public const T_DESC   = 'DESC';
     public const T_NOT    = 'NOT';
     public const T_IS     = 'IS';
     public const T_NULL   = 'NULL';
+    public const T_TRUE   = 'TRUE';
+    public const T_FALSE  = 'FALSE';
     public const T_LIKE   = 'LIKE';
+    public const T_JOIN   = 'JOIN';
+    public const T_LEFT   = 'LEFT';
+    public const T_RIGHT  = 'RIGHT';
+    public const T_INNER  = 'INNER';
+    public const T_OUTER  = 'OUTER';
+    public const T_FULL   = 'FULL';
+    public const T_CROSS  = 'CROSS';
+    public const T_ON     = 'ON';
+    public const T_DISTINCT = 'DISTINCT';
+    public const T_GROUP  = 'GROUP';
+    public const T_HAVING = 'HAVING';
+    public const T_BETWEEN = 'BETWEEN';
     public const T_IDENTIFIER = 'IDENTIFIER';
     public const T_STRING = 'STRING';
     public const T_NUMBER = 'NUMBER';
     public const T_PLACEHOLDER = 'PLACEHOLDER';
     public const T_COMMA  = 'COMMA';
+    public const T_DOT    = 'DOT';
+    public const T_STAR   = 'STAR';
     public const T_LPAREN = 'LPAREN';
     public const T_RPAREN = 'RPAREN';
     public const T_OP     = 'OPERATOR';
@@ -100,12 +118,22 @@ class SqlLexer
                 continue;
             }
 
-            // Numbers
+            // Numbers (allow at most one decimal point)
             if (is_numeric($char)) {
                 $num = '';
-                while ($this->cursor < $this->length &&
-                       (is_numeric($this->sql[$this->cursor]) || $this->sql[$this->cursor] === '.')) {
-                    $num .= $this->sql[$this->cursor++];
+                $hasDot = false;
+                while ($this->cursor < $this->length) {
+                    $c = $this->sql[$this->cursor];
+                    if (is_numeric($c)) {
+                        $num .= $c;
+                        $this->cursor++;
+                    } elseif ($c === '.' && !$hasDot) {
+                        $num .= $c;
+                        $hasDot = true;
+                        $this->cursor++;
+                    } else {
+                        break;
+                    }
                 }
                 $tokens[] = ['type' => self::T_NUMBER, 'value' => $num, 'pos' => $start];
                 continue;
@@ -177,11 +205,13 @@ class SqlLexer
             }
 
             // Operators / Punctuation
-            if (in_array($char, ['(', ')', ',', '*', '=', '>', '<', '!'])) {
+            if (in_array($char, ['(', ')', ',', '.', '*', '/', '=', '>', '<', '!'])) {
                 $type = match($char) {
                     '(' => self::T_LPAREN,
                     ')' => self::T_RPAREN,
                     ',' => self::T_COMMA,
+                    '.' => self::T_DOT,
+                    '*' => self::T_STAR,
                     default => self::T_OP
                 };
 
@@ -212,8 +242,9 @@ class SqlLexer
                             break;
                         }
                     } else {
-                        // Allow dots in identifiers (e.g. table.column)
-                        if (!ctype_alnum($c) && $c !== '_' && $c !== '.') {
+                        // Simple identifiers - alphanumeric and underscores only
+                        // Dots are handled as separate tokens for table.column syntax
+                        if (!ctype_alnum($c) && $c !== '_') {
                             break;
                         }
                     }
@@ -241,13 +272,28 @@ class SqlLexer
                         'ORDER' => self::T_ORDER,
                         'BY' => self::T_BY,
                         'LIMIT' => self::T_LIMIT,
+                        'OFFSET' => self::T_OFFSET,
                         'AS' => self::T_AS,
                         'ASC' => self::T_ASC,
                         'DESC' => self::T_DESC,
                         'NOT' => self::T_NOT,
                         'IS' => self::T_IS,
                         'NULL' => self::T_NULL,
+                        'TRUE' => self::T_TRUE,
+                        'FALSE' => self::T_FALSE,
                         'LIKE' => self::T_LIKE,
+                        'JOIN' => self::T_JOIN,
+                        'LEFT' => self::T_LEFT,
+                        'RIGHT' => self::T_RIGHT,
+                        'INNER' => self::T_INNER,
+                        'OUTER' => self::T_OUTER,
+                        'FULL' => self::T_FULL,
+                        'CROSS' => self::T_CROSS,
+                        'ON' => self::T_ON,
+                        'DISTINCT' => self::T_DISTINCT,
+                        'GROUP' => self::T_GROUP,
+                        'HAVING' => self::T_HAVING,
+                        'BETWEEN' => self::T_BETWEEN,
                         default => self::T_IDENTIFIER
                     };
                 }

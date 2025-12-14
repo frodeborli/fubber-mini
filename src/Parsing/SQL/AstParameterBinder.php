@@ -11,10 +11,15 @@ use mini\Parsing\SQL\AST\{
     InOperation,
     IsNullOperation,
     LikeOperation,
+    BetweenOperation,
     SubqueryNode,
     FunctionCallNode,
     SelectStatement,
-    ColumnNode
+    InsertStatement,
+    UpdateStatement,
+    DeleteStatement,
+    ColumnNode,
+    JoinNode
 };
 
 /**
@@ -98,6 +103,14 @@ class AstParameterBinder
             return $new;
         }
 
+        if ($node instanceof BetweenOperation) {
+            $new = clone $node;
+            $new->expression = $this->bindNode($node->expression);
+            $new->low = $this->bindNode($node->low);
+            $new->high = $this->bindNode($node->high);
+            return $new;
+        }
+
         // SubqueryNode - bind params inside the subquery
         if ($node instanceof SubqueryNode) {
             $new = clone $node;
@@ -113,11 +126,55 @@ class AstParameterBinder
 
         if ($node instanceof SelectStatement) {
             $new = clone $node;
+
+            // Bind columns (may contain placeholders in expressions)
+            $new->columns = array_map(fn($col) => $this->bindNode($col), $node->columns);
+
+            // Bind JOINs
+            $new->joins = array_map(fn($join) => $this->bindNode($join), $node->joins);
+
             if ($node->where) {
                 $new->where = $this->bindNode($node->where);
             }
-            // Note: We don't bind other parts of SELECT (columns, orderBy, etc)
-            // because those typically don't contain placeholders
+
+            // Bind GROUP BY expressions
+            if ($node->groupBy) {
+                $new->groupBy = array_map(fn($expr) => $this->bindNode($expr), $node->groupBy);
+            }
+
+            // Bind HAVING
+            if ($node->having) {
+                $new->having = $this->bindNode($node->having);
+            }
+
+            // Bind ORDER BY expressions
+            if ($node->orderBy) {
+                $new->orderBy = array_map(function ($item) {
+                    return [
+                        'column' => $this->bindNode($item['column']),
+                        'direction' => $item['direction']
+                    ];
+                }, $node->orderBy);
+            }
+
+            // Bind LIMIT (may be placeholder)
+            if ($node->limit) {
+                $new->limit = $this->bindNode($node->limit);
+            }
+
+            // Bind OFFSET (may be placeholder)
+            if ($node->offset) {
+                $new->offset = $this->bindNode($node->offset);
+            }
+
+            return $new;
+        }
+
+        if ($node instanceof JoinNode) {
+            $new = clone $node;
+            if ($node->condition) {
+                $new->condition = $this->bindNode($node->condition);
+            }
             return $new;
         }
 
@@ -127,7 +184,40 @@ class AstParameterBinder
             return $new;
         }
 
-        // Return unchanged for other node types
+        if ($node instanceof InsertStatement) {
+            $new = clone $node;
+            // Bind each row of values
+            $new->values = array_map(function ($row) {
+                return array_map(fn($v) => $this->bindNode($v), $row);
+            }, $node->values);
+            return $new;
+        }
+
+        if ($node instanceof UpdateStatement) {
+            $new = clone $node;
+            // Bind SET values
+            $new->updates = array_map(function ($update) {
+                return [
+                    'column' => $update['column'],
+                    'value' => $this->bindNode($update['value'])
+                ];
+            }, $node->updates);
+            // Bind WHERE
+            if ($node->where) {
+                $new->where = $this->bindNode($node->where);
+            }
+            return $new;
+        }
+
+        if ($node instanceof DeleteStatement) {
+            $new = clone $node;
+            if ($node->where) {
+                $new->where = $this->bindNode($node->where);
+            }
+            return $new;
+        }
+
+        // Return unchanged for other node types (identifiers, literals)
         return $node;
     }
 
@@ -146,7 +236,7 @@ class AstParameterBinder
 
         // Create LiteralNode with appropriate type
         if ($value === null) {
-            return new LiteralNode('NULL', 'null');
+            return new LiteralNode(null, 'null');
         }
 
         if (is_int($value) || is_float($value)) {

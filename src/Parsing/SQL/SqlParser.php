@@ -15,10 +15,12 @@ use mini\Parsing\SQL\AST\{
     InOperation,
     IsNullOperation,
     LikeOperation,
+    BetweenOperation,
     SubqueryNode,
     LiteralNode,
     IdentifierNode,
-    PlaceholderNode
+    PlaceholderNode,
+    JoinNode
 };
 
 /**
@@ -137,13 +139,47 @@ class SqlParser
         $this->expect(SqlLexer::T_SELECT);
         $stmt = new SelectStatement();
 
+        // Handle DISTINCT
+        if ($this->match(SqlLexer::T_DISTINCT)) {
+            $stmt->distinct = true;
+        }
+
         $stmt->columns = $this->parseColumnList();
 
         $this->expect(SqlLexer::T_FROM);
         $stmt->from = $this->parseIdentifier();
 
+        // Optional table alias
+        if ($this->match(SqlLexer::T_AS)) {
+            $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+            $stmt->fromAlias = $aliasToken['value'];
+        } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+            // Implicit alias (without AS)
+            $stmt->fromAlias = $this->current()['value'];
+            $this->pos++;
+        }
+
+        // Parse JOINs
+        while ($this->isJoinStart()) {
+            $stmt->joins[] = $this->parseJoin();
+        }
+
         if ($this->match(SqlLexer::T_WHERE)) {
             $stmt->where = $this->parseExpression();
+        }
+
+        // GROUP BY
+        if ($this->match(SqlLexer::T_GROUP)) {
+            $this->expect(SqlLexer::T_BY);
+            $stmt->groupBy = [];
+            do {
+                $stmt->groupBy[] = $this->parseExpression();
+            } while ($this->match(SqlLexer::T_COMMA));
+        }
+
+        // HAVING (only valid after GROUP BY)
+        if ($this->match(SqlLexer::T_HAVING)) {
+            $stmt->having = $this->parseExpression();
         }
 
         if ($this->match(SqlLexer::T_ORDER)) {
@@ -163,8 +199,37 @@ class SqlParser
         }
 
         if ($this->match(SqlLexer::T_LIMIT)) {
-            $val = $this->expect(SqlLexer::T_NUMBER);
-            $stmt->limit = (int)$val['value'];
+            $token = $this->current();
+            if ($token['type'] === SqlLexer::T_NUMBER) {
+                $this->pos++;
+                $stmt->limit = new LiteralNode($token['value'], 'number');
+            } elseif ($token['type'] === SqlLexer::T_PLACEHOLDER) {
+                $this->pos++;
+                $stmt->limit = new PlaceholderNode($token['value']);
+            } else {
+                throw new SqlSyntaxException(
+                    "LIMIT requires a number or placeholder",
+                    $this->sql,
+                    $token['pos']
+                );
+            }
+        }
+
+        if ($this->match(SqlLexer::T_OFFSET)) {
+            $token = $this->current();
+            if ($token['type'] === SqlLexer::T_NUMBER) {
+                $this->pos++;
+                $stmt->offset = new LiteralNode($token['value'], 'number');
+            } elseif ($token['type'] === SqlLexer::T_PLACEHOLDER) {
+                $this->pos++;
+                $stmt->offset = new PlaceholderNode($token['value']);
+            } else {
+                throw new SqlSyntaxException(
+                    "OFFSET requires a number or placeholder",
+                    $this->sql,
+                    $token['pos']
+                );
+            }
         }
 
         return $stmt;
@@ -243,8 +308,7 @@ class SqlParser
     {
         $columns = [];
         do {
-            if ($this->current()['value'] === '*') {
-                $this->pos++;
+            if ($this->match(SqlLexer::T_STAR)) {
                 $columns[] = new ColumnNode(new IdentifierNode('*'));
             } else {
                 $expr = $this->parseExpression();
@@ -288,12 +352,21 @@ class SqlParser
         return $left;
     }
 
+    private const COMPARISON_OPS = ['=', '!=', '<>', '<', '<=', '>', '>='];
+
     private function parseComparison(): ASTNode
     {
+        // Handle generic NOT (e.g., NOT is_active, NOT (a = b))
+        if ($this->match(SqlLexer::T_NOT)) {
+            $expr = $this->parseComparison();
+            return new UnaryOperation('NOT', $expr);
+        }
+
         $left = $this->parseAdditive();
 
-        // Handle Standard Operators
-        if ($this->current()['type'] === SqlLexer::T_OP) {
+        // Handle comparison operators only (not arithmetic)
+        if ($this->current()['type'] === SqlLexer::T_OP &&
+            in_array($this->current()['value'], self::COMPARISON_OPS, true)) {
             $op = $this->current()['value'];
             $this->pos++;
             $right = $this->parseAdditive();
@@ -307,7 +380,7 @@ class SqlParser
             return new IsNullOperation($left, $negated);
         }
 
-        // Handle NOT IN / NOT LIKE
+        // Handle NOT IN / NOT LIKE / NOT BETWEEN
         if ($this->match(SqlLexer::T_NOT)) {
             if ($this->match(SqlLexer::T_IN)) {
                 return $this->parseInOperation($left, negated: true);
@@ -316,8 +389,11 @@ class SqlParser
                 $pattern = $this->parseAdditive();
                 return new LikeOperation($left, $pattern, negated: true);
             }
+            if ($this->match(SqlLexer::T_BETWEEN)) {
+                return $this->parseBetweenOperation($left, negated: true);
+            }
             throw new SqlSyntaxException(
-                "Expected IN or LIKE after NOT",
+                "Expected IN, LIKE, or BETWEEN after NOT",
                 $this->sql,
                 $this->current()['pos']
             );
@@ -334,7 +410,20 @@ class SqlParser
             return new LikeOperation($left, $pattern, negated: false);
         }
 
+        // Handle BETWEEN clause
+        if ($this->match(SqlLexer::T_BETWEEN)) {
+            return $this->parseBetweenOperation($left, negated: false);
+        }
+
         return $left;
+    }
+
+    private function parseBetweenOperation(ASTNode $left, bool $negated): BetweenOperation
+    {
+        $low = $this->parseAdditive();
+        $this->expect(SqlLexer::T_AND);
+        $high = $this->parseAdditive();
+        return new BetweenOperation($left, $low, $high, $negated);
     }
 
     private function parseInOperation(ASTNode $left, bool $negated): InOperation
@@ -347,10 +436,10 @@ class SqlParser
             $this->expect(SqlLexer::T_RPAREN);
             return new InOperation($left, new SubqueryNode($subquery), $negated);
         } else {
-            // Simple List
+            // Simple List - only scalar/additive expressions, not comparisons or boolean
             $values = [];
             do {
-                $values[] = $this->parseExpression();
+                $values[] = $this->parseAdditive();
             } while ($this->match(SqlLexer::T_COMMA));
             $this->expect(SqlLexer::T_RPAREN);
             return new InOperation($left, $values, $negated);
@@ -359,7 +448,39 @@ class SqlParser
 
     private function parseAdditive(): ASTNode
     {
-        return $this->parseAtom();
+        $left = $this->parseMultiplicative();
+
+        while ($this->current()['type'] === SqlLexer::T_OP &&
+               in_array($this->current()['value'], ['+', '-'], true)) {
+            $op = $this->current()['value'];
+            $this->pos++;
+            $right = $this->parseMultiplicative();
+            $left = new BinaryOperation($left, $op, $right);
+        }
+
+        return $left;
+    }
+
+    private function parseMultiplicative(): ASTNode
+    {
+        $left = $this->parseAtom();
+
+        while (true) {
+            $token = $this->current();
+            if ($token['type'] === SqlLexer::T_STAR) {
+                $this->pos++;
+                $right = $this->parseAtom();
+                $left = new BinaryOperation($left, '*', $right);
+            } elseif ($token['type'] === SqlLexer::T_OP && $token['value'] === '/') {
+                $this->pos++;
+                $right = $this->parseAtom();
+                $left = new BinaryOperation($left, '/', $right);
+            } else {
+                break;
+            }
+        }
+
+        return $left;
     }
 
     private function parseAtom(): ASTNode
@@ -380,14 +501,15 @@ class SqlParser
             return $expr;
         }
 
-        // Handle Identifiers and Function Calls
+        // Handle Identifiers, Qualified Names (table.column), and Function Calls
         if ($token['type'] === SqlLexer::T_IDENTIFIER) {
             $next = $this->peek();
             if ($next['type'] === SqlLexer::T_LPAREN) {
                 return $this->parseFunctionCall();
             }
-            $this->pos++;
-            return new IdentifierNode($token['value']);
+
+            // Delegate to parseIdentifier for qualified names (DRY)
+            return $this->parseIdentifier();
         }
 
         // Handle Literals
@@ -397,6 +519,18 @@ class SqlParser
 
         if ($this->match(SqlLexer::T_NUMBER)) {
             return new LiteralNode($token['value'], 'number');
+        }
+
+        if ($this->match(SqlLexer::T_NULL)) {
+            return new LiteralNode(null, 'null');
+        }
+
+        if ($this->match(SqlLexer::T_TRUE)) {
+            return new LiteralNode(true, 'boolean');
+        }
+
+        if ($this->match(SqlLexer::T_FALSE)) {
+            return new LiteralNode(false, 'boolean');
         }
 
         // Handle Placeholders
@@ -419,8 +553,7 @@ class SqlParser
 
         if ($this->current()['type'] !== SqlLexer::T_RPAREN) {
             do {
-                if ($this->current()['value'] === '*') {
-                    $this->pos++;
+                if ($this->match(SqlLexer::T_STAR)) {
                     $args[] = new IdentifierNode('*');
                 } else {
                     $args[] = $this->parseExpression();
@@ -435,6 +568,123 @@ class SqlParser
     private function parseIdentifier(): IdentifierNode
     {
         $token = $this->expect(SqlLexer::T_IDENTIFIER);
-        return new IdentifierNode($token['value']);
+        $parts = [$token['value']];
+
+        // Handle qualified identifiers (schema.table.column or table.*)
+        while ($this->current()['type'] === SqlLexer::T_DOT) {
+            $this->pos++; // consume dot
+            $nextToken = $this->current();
+
+            if ($nextToken['type'] === SqlLexer::T_IDENTIFIER) {
+                $parts[] = $nextToken['value'];
+                $this->pos++;
+            } elseif ($nextToken['type'] === SqlLexer::T_STAR) {
+                // Handle table.* wildcard
+                $parts[] = '*';
+                $this->pos++;
+                break; // table.* is terminal - no further qualification allowed
+            } else {
+                throw new SqlSyntaxException(
+                    "Expected identifier or * after dot",
+                    $this->sql,
+                    $nextToken['pos']
+                );
+            }
+        }
+
+        return new IdentifierNode($parts);
+    }
+
+    // --- JOIN Parsing ---
+
+    private const JOIN_TYPE_TOKENS = [
+        SqlLexer::T_JOIN,
+        SqlLexer::T_LEFT,
+        SqlLexer::T_RIGHT,
+        SqlLexer::T_INNER,
+        SqlLexer::T_FULL,
+        SqlLexer::T_CROSS,
+    ];
+
+    private function isJoinStart(): bool
+    {
+        return in_array($this->current()['type'], self::JOIN_TYPE_TOKENS, true);
+    }
+
+    private function parseJoin(): JoinNode
+    {
+        $joinType = $this->parseJoinType();
+        $table = $this->parseIdentifier();
+
+        // Optional alias
+        $alias = null;
+        if ($this->match(SqlLexer::T_AS)) {
+            $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+            $alias = $aliasToken['value'];
+        } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+            // Implicit alias - but be careful not to consume ON
+            $alias = $this->current()['value'];
+            $this->pos++;
+        }
+
+        // ON condition (required for all except CROSS JOIN)
+        $condition = null;
+        if ($this->match(SqlLexer::T_ON)) {
+            $condition = $this->parseExpression();
+        } elseif ($joinType !== 'CROSS') {
+            throw new SqlSyntaxException(
+                "Expected ON after JOIN",
+                $this->sql,
+                $this->current()['pos']
+            );
+        }
+
+        return new JoinNode($joinType, $table, $condition, $alias);
+    }
+
+    private function parseJoinType(): string
+    {
+        // Simple: JOIN or INNER JOIN
+        if ($this->match(SqlLexer::T_JOIN)) {
+            return 'INNER';
+        }
+
+        if ($this->match(SqlLexer::T_INNER)) {
+            $this->expect(SqlLexer::T_JOIN);
+            return 'INNER';
+        }
+
+        // LEFT [OUTER] JOIN
+        if ($this->match(SqlLexer::T_LEFT)) {
+            $this->match(SqlLexer::T_OUTER); // optional
+            $this->expect(SqlLexer::T_JOIN);
+            return 'LEFT';
+        }
+
+        // RIGHT [OUTER] JOIN
+        if ($this->match(SqlLexer::T_RIGHT)) {
+            $this->match(SqlLexer::T_OUTER); // optional
+            $this->expect(SqlLexer::T_JOIN);
+            return 'RIGHT';
+        }
+
+        // FULL [OUTER] JOIN
+        if ($this->match(SqlLexer::T_FULL)) {
+            $this->match(SqlLexer::T_OUTER); // optional
+            $this->expect(SqlLexer::T_JOIN);
+            return 'FULL';
+        }
+
+        // CROSS JOIN
+        if ($this->match(SqlLexer::T_CROSS)) {
+            $this->expect(SqlLexer::T_JOIN);
+            return 'CROSS';
+        }
+
+        throw new SqlSyntaxException(
+            "Expected JOIN keyword",
+            $this->sql,
+            $this->current()['pos']
+        );
     }
 }

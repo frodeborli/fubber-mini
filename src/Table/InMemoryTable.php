@@ -61,6 +61,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
 
         $this->db = new SQLite3(':memory:');
         $this->db->enableExceptions(true);
+        $this->bufferingDisabled = true;
 
         $this->createTable($columns);
     }
@@ -684,10 +685,6 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
 
     public function count(): int
     {
-        if ($this->cachedCount !== null) {
-            return $this->cachedCount;
-        }
-
         $sql = "SELECT COUNT(*) FROM {$this->tableName}";
 
         [$whereSql, $whereParams] = $this->buildWhereClause();
@@ -713,6 +710,6 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         $result = $stmt->execute();
         $row = $result->fetchArray(SQLITE3_NUM);
 
-        return $this->cachedCount = (int) $row[0];
+        return (int) $row[0];
     }
 }

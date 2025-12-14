@@ -40,6 +40,9 @@ abstract class AbstractTable implements TableInterface
     /** @var array<int|string, object>|null Cached rows for small result sets */
     protected ?array $cachedRows = null;
 
+    /** @var int Cache version when rows were cached (for mutation tracking) */
+    protected int $cacheVersion = 0;
+
     /** @var bool Whether optimistic buffering was disabled (result set too large) */
     protected bool $bufferingDisabled = false;
 
@@ -434,9 +437,15 @@ abstract class AbstractTable implements TableInterface
     final public function getIterator(): Traversable
     {
         // If we have cached rows from a previous iteration, yield from them
-        if ($this->cachedRows !== null) {
+        // But only if the cache is still valid (no mutations since caching)
+        if ($this->cachedRows !== null && $this->cacheVersion === $this->getDataVersion()) {
             yield from $this->cachedRows;
             return;
+        }
+
+        // Invalidate stale cache
+        if ($this->cachedRows !== null) {
+            $this->cachedRows = null;
         }
 
         $visibleCols = $this->getColumns();
@@ -464,6 +473,7 @@ abstract class AbstractTable implements TableInterface
         // After full iteration, cache small result sets
         if ($buffer !== null) {
             $this->cachedRows = $buffer;
+            $this->cacheVersion = $this->getDataVersion();
         }
 
         // Memoize count for subsequent count() calls
@@ -471,6 +481,19 @@ abstract class AbstractTable implements TableInterface
             $this->cachedCount = $count;
             $this->cachedExists = $count > 0;
         }
+    }
+
+    /**
+     * Get current data version for cache invalidation
+     *
+     * Subclasses with mutable underlying data should override this
+     * to return a version number that changes when data is modified.
+     *
+     * @return int Current data version (0 = immutable/never changes)
+     */
+    protected function getDataVersion(): int
+    {
+        return 0;
     }
 
     /**

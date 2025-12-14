@@ -2,507 +2,429 @@
 
 namespace mini\Database;
 
-use mini\Table\TableInterface;
-use mini\Table\MutableTableInterface;
-use mini\Table\Set;
-use mini\Parsing\SQL\{SqlParser, SqlSyntaxException};
+use mini\Parsing\SQL\SqlParser;
+use mini\Parsing\SQL\AstParameterBinder;
 use mini\Parsing\SQL\AST\{
-    ASTNode,
     SelectStatement,
     InsertStatement,
     UpdateStatement,
     DeleteStatement,
+    ColumnNode,
     IdentifierNode,
     LiteralNode,
-    PlaceholderNode,
     BinaryOperation,
-    UnaryOperation,
-    InOperation,
-    IsNullOperation,
     LikeOperation,
-    ColumnNode
+    IsNullOperation,
+    InOperation,
+    BetweenOperation
 };
+use mini\Table\{TableInterface, MutableTableInterface};
 
 /**
- * Virtual Database - SQL interface to TableInterface implementations
+ * Virtual database that executes SQL against registered TableInterface instances
  *
- * Parses SQL queries and translates them to TableInterface method calls.
+ * Phase 1: Single-table operations
+ * - SELECT with WHERE, ORDER BY, LIMIT, column projection
+ * - INSERT, UPDATE, DELETE on MutableTableInterface
  *
- * Example usage:
+ * Future phases will add JOINs, aggregates, DISTINCT, subqueries.
+ *
+ * Usage:
  * ```php
  * $vdb = new VirtualDatabase();
+ * $vdb->registerTable('users', $usersTable);
+ * $vdb->registerTable('orders', $ordersTable);
  *
- * // Register a PartialQuery as a virtual table
- * $vdb->registerTable('active_users', db()->from('users')->eq('active', 1));
- *
- * // Register a FilteredTable
- * $vdb->registerTable('countries', new FilteredTable(
- *     source: fn() => $this->readCsv('countries.csv')
- * ));
- *
- * // Query with SQL
- * foreach ($vdb->query("SELECT * FROM active_users WHERE age > ?", [25]) as $row) {
- *     echo $row['name'];
+ * // SELECT queries return an iterable of stdClass
+ * foreach ($vdb->query('SELECT name, email FROM users WHERE status = ?', ['active']) as $row) {
+ *     echo $row->name;
  * }
+ *
+ * // INSERT/UPDATE/DELETE return affected row count
+ * $affected = $vdb->exec('DELETE FROM users WHERE id = ?', [123]);
  * ```
  */
-class VirtualDatabase implements DatabaseInterface
+class VirtualDatabase
 {
     /** @var array<string, TableInterface> */
     private array $tables = [];
 
-    private SqlParser $parser;
+    private ExpressionEvaluator $evaluator;
 
     public function __construct()
     {
-        $this->parser = new SqlParser();
+        $this->evaluator = new ExpressionEvaluator();
     }
 
     /**
-     * Register a virtual table
+     * Register a table with a name
      */
-    public function registerTable(string $name, TableInterface $table): void
+    public function registerTable(string $name, TableInterface $table): self
     {
-        $this->tables[$name] = $table;
+        $this->tables[strtolower($name)] = $table;
+        return $this;
     }
 
     /**
-     * Execute a SELECT query and return results as ResultSet
+     * Get a registered table by name
      */
-    public function query(string $sql, array $params = []): ResultSetInterface
+    public function getTable(string $name): ?TableInterface
     {
-        try {
-            $ast = $this->parser->parse($sql);
-        } catch (SqlSyntaxException $e) {
-            throw new \RuntimeException("SQL parse error: " . $e->getMessage(), 0, $e);
-        }
-
-        if (!($ast instanceof SelectStatement)) {
-            throw new \RuntimeException("Only SELECT queries supported in VirtualDatabase::query()");
-        }
-
-        return new ResultSet($this->executeSelect($ast, $params));
+        return $this->tables[strtolower($name)] ?? null;
     }
 
     /**
-     * Create a PartialQuery for composable query building
+     * Execute a SELECT query
+     *
+     * @param string $sql SQL query
+     * @param array $params Bound parameters
+     * @return iterable<object> Rows as stdClass objects
      */
-    public function partialQuery(string $table, ?string $sql = null, array $params = []): PartialQuery
+    public function query(string $sql, array $params = []): iterable
     {
-        return PartialQuery::from($this, $table, $sql, $params);
-    }
+        $ast = $this->parseAndBind($sql, $params);
 
-    public function queryOne(string $sql, array $params = []): ?object
-    {
-        foreach ($this->query($sql, $params) as $row) {
-            return $row;
+        if (!$ast instanceof SelectStatement) {
+            throw new \RuntimeException("query() only accepts SELECT statements");
         }
-        return null;
+
+        return $this->executeSelect($ast);
     }
 
-    public function queryField(string $sql, array $params = []): mixed
-    {
-        $row = $this->queryOne($sql, $params);
-        if ($row === null) {
-            return null;
-        }
-        $vars = get_object_vars($row);
-        return $vars ? reset($vars) : null;
-    }
-
-    public function queryColumn(string $sql, array $params = []): array
-    {
-        $column = [];
-        foreach ($this->query($sql, $params) as $row) {
-            $vars = get_object_vars($row);
-            $column[] = $vars ? reset($vars) : null;
-        }
-        return $column;
-    }
-
+    /**
+     * Execute an INSERT, UPDATE, or DELETE statement
+     *
+     * @param string $sql SQL statement
+     * @param array $params Bound parameters
+     * @return int Number of affected rows (or last insert ID for INSERT)
+     */
     public function exec(string $sql, array $params = []): int
     {
-        try {
-            $ast = $this->parser->parse($sql);
-        } catch (SqlSyntaxException $e) {
-            throw new \RuntimeException("SQL parse error: " . $e->getMessage(), 0, $e);
-        }
+        $ast = $this->parseAndBind($sql, $params);
 
         if ($ast instanceof InsertStatement) {
-            return $this->executeInsert($ast, $params);
+            return $this->executeInsert($ast);
         }
 
         if ($ast instanceof UpdateStatement) {
-            return $this->executeUpdate($ast, $params);
+            return $this->executeUpdate($ast);
         }
 
         if ($ast instanceof DeleteStatement) {
-            return $this->executeDelete($ast, $params);
+            return $this->executeDelete($ast);
         }
 
-        throw new \RuntimeException("Unsupported statement type: " . get_class($ast));
+        throw new \RuntimeException("exec() only accepts INSERT, UPDATE, or DELETE statements");
     }
 
-    public function lastInsertId(): ?string
+    private function parseAndBind(string $sql, array $params): object
     {
-        return null;
-    }
+        $parser = new SqlParser();
+        $ast = $parser->parse($sql);
 
-    public function tableExists(string $tableName): bool
-    {
-        return isset($this->tables[$tableName]);
-    }
-
-    public function transaction(\Closure $task): mixed
-    {
-        throw new \RuntimeException("Transactions not supported in VirtualDatabase");
-    }
-
-    public function getDialect(): SqlDialect
-    {
-        return SqlDialect::Virtual;
-    }
-
-    public function quote(mixed $value): string
-    {
-        if ($value === null) {
-            return 'NULL';
-        }
-        if (is_int($value) || is_float($value)) {
-            return (string)$value;
-        }
-        return "'" . str_replace("'", "''", (string)$value) . "'";
-    }
-
-    public function quoteIdentifier(string $identifier): string
-    {
-        if (str_contains($identifier, '.')) {
-            return implode('.', array_map(fn($part) => $this->quoteIdentifier($part), explode('.', $identifier)));
-        }
-        return '"' . str_replace('"', '""', $identifier) . '"';
-    }
-
-    public function delete(PartialQuery $query): int
-    {
-        $where = $query->getWhere();
-        $sql = "DELETE FROM {$query->getTable()}";
-        if (!empty($where['sql'])) {
-            $sql .= " WHERE " . $where['sql'];
-        }
-        $limit = $query->getLimit();
-        if ($limit !== null) {
-            $sql .= " LIMIT " . $limit;
-        }
-        return $this->exec($sql, $where['params']);
-    }
-
-    public function update(PartialQuery $query, string|array $set, array $params = []): int
-    {
-        $where = $query->getWhere();
-
-        if (is_array($set)) {
-            $setParts = [];
-            $setParams = [];
-            foreach ($set as $col => $val) {
-                $setParts[] = "$col = ?";
-                $setParams[] = $val;
-            }
-            $setClause = implode(', ', $setParts);
-            $params = array_merge($setParams, $where['params']);
-        } else {
-            $setClause = $set;
-            $params = array_merge($params, $where['params']);
+        if (!empty($params)) {
+            $binder = new AstParameterBinder($params);
+            $ast = $binder->bind($ast);
         }
 
-        $sql = "UPDATE {$query->getTable()} SET $setClause";
-        if (!empty($where['sql'])) {
-            $sql .= " WHERE " . $where['sql'];
+        return $ast;
+    }
+
+    private function executeSelect(SelectStatement $ast): iterable
+    {
+        // Get the source table
+        if ($ast->from === null) {
+            throw new \RuntimeException("SELECT without FROM not supported");
         }
 
-        return $this->exec($sql, $params);
-    }
-
-    public function insert(string $table, array $data): string
-    {
-        $columns = implode(', ', array_keys($data));
-        $placeholders = implode(', ', array_fill(0, count($data), '?'));
-        $sql = "INSERT INTO $table ($columns) VALUES ($placeholders)";
-
-        $this->exec($sql, array_values($data));
-        return $this->lastInsertId() ?? '';
-    }
-
-    public function upsert(string $table, array $data, string ...$conflictColumns): int
-    {
-        throw new \RuntimeException("UPSERT not supported in VirtualDatabase");
-    }
-
-    // --- Private execution methods ---
-
-    private function getTable(string $name): TableInterface
-    {
-        if (!isset($this->tables[$name])) {
-            throw new \RuntimeException("Virtual table '$name' not registered");
-        }
-        return $this->tables[$name];
-    }
-
-    /**
-     * Execute SELECT by translating AST to TableInterface calls
-     */
-    private function executeSelect(SelectStatement $ast, array $params): iterable
-    {
-        $tableName = $ast->from->name;
+        $tableName = $ast->from->getFullName();
         $table = $this->getTable($tableName);
 
-        // Apply WHERE clause
-        $paramIndex = 0;
-        $table = $this->applyWhere($table, $ast->where, $params, $paramIndex);
-
-        // Apply ORDER BY
-        if (!empty($ast->orderBy)) {
-            foreach ($ast->orderBy as $order) {
-                $column = $this->getColumnName($order['column']);
-                $dir = $order['direction'] ?? 'ASC';
-                $table = $table->order("$column $dir");
-            }
+        if ($table === null) {
+            throw new \RuntimeException("Table not found: $tableName");
         }
 
-        // Apply LIMIT
+        // Phase 1: No JOIN support yet
+        if (!empty($ast->joins)) {
+            throw new \RuntimeException("JOINs not yet supported in Phase 1");
+        }
+
+        // Apply WHERE - delegate to table backend
+        if ($ast->where !== null) {
+            $table = $this->applyWhereToTableInterface($table, $ast->where);
+        }
+
+        // Apply ORDER BY - delegate to table backend
+        if ($ast->orderBy) {
+            $table = $this->applyOrderBy($table, $ast->orderBy);
+        }
+
+        // Apply OFFSET - delegate to table backend
+        if ($ast->offset !== null) {
+            $offset = $this->evaluator->evaluate($ast->offset, null);
+            $table = $table->offset((int)$offset);
+        }
+
+        // Apply LIMIT - delegate to table backend
         if ($ast->limit !== null) {
-            $table = $table->limit($ast->limit);
+            $limit = $this->evaluator->evaluate($ast->limit, null);
+            $table = $table->limit((int)$limit);
         }
 
-        // Yield rows
-        foreach ($table as $id => $row) {
-            yield $id => $row;
+        // Project columns
+        foreach ($table as $row) {
+            yield $this->projectRow($row, $ast->columns);
         }
     }
 
     /**
-     * Apply WHERE clause to table, returning filtered table
+     * Project a row to only the requested columns
      */
-    private function applyWhere(TableInterface $table, ?ASTNode $where, array $params, int &$paramIndex, TableInterface $baseTable = null): TableInterface
+    private function projectRow(object $row, array $columns): object
+    {
+        // Check for SELECT * (wildcard)
+        if (count($columns) === 1) {
+            $col = $columns[0];
+            if ($col instanceof ColumnNode && $col->expression instanceof IdentifierNode) {
+                if ($col->expression->isWildcard()) {
+                    return $row; // Return all columns
+                }
+            }
+        }
+
+        $result = new \stdClass();
+
+        foreach ($columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                continue;
+            }
+
+            // Determine output column name
+            $name = $col->alias;
+            if ($name === null && $col->expression instanceof IdentifierNode) {
+                $name = $col->expression->getName();
+            }
+            if ($name === null) {
+                $name = 'col_' . spl_object_id($col);
+            }
+
+            // Handle table.* (select all columns from a table)
+            if ($col->expression instanceof IdentifierNode && $col->expression->isWildcard()) {
+                // For Phase 1 (single table), just copy all properties
+                foreach ($row as $prop => $val) {
+                    $result->$prop = $val;
+                }
+                continue;
+            }
+
+            // Evaluate the expression
+            $result->$name = $this->evaluator->evaluate($col->expression, $row);
+        }
+
+        return $result;
+    }
+
+    private function executeInsert(InsertStatement $ast): int
+    {
+        $tableName = $ast->table->getFullName();
+        $table = $this->getTable($tableName);
+
+        if ($table === null) {
+            throw new \RuntimeException("Table not found: $tableName");
+        }
+
+        if (!$table instanceof MutableTableInterface) {
+            throw new \RuntimeException("Table '$tableName' does not support INSERT");
+        }
+
+        $columnNames = array_map(fn($col) => $col->getName(), $ast->columns);
+        $lastId = 0;
+
+        foreach ($ast->values as $valueRow) {
+            $row = [];
+            foreach ($valueRow as $i => $valueNode) {
+                $colName = $columnNames[$i] ?? "col_$i";
+                $row[$colName] = $this->evaluator->evaluate($valueNode, null);
+            }
+            $lastId = $table->insert($row);
+        }
+
+        return $lastId;
+    }
+
+    private function executeUpdate(UpdateStatement $ast): int
+    {
+        $tableName = $ast->table->getFullName();
+        $table = $this->getTable($tableName);
+
+        if ($table === null) {
+            throw new \RuntimeException("Table not found: $tableName");
+        }
+
+        if (!$table instanceof MutableTableInterface) {
+            throw new \RuntimeException("Table '$tableName' does not support UPDATE");
+        }
+
+        // Build changes from SET clause
+        $changes = [];
+        foreach ($ast->updates as $update) {
+            $colName = $update['column']->getName();
+            $changes[$colName] = $this->evaluator->evaluate($update['value'], null);
+        }
+
+        // Apply WHERE filter and execute update
+        $workingTable = $this->applyWhereToTable($table, $ast->where);
+        return $workingTable->update($changes);
+    }
+
+    private function executeDelete(DeleteStatement $ast): int
+    {
+        $tableName = $ast->table->getFullName();
+        $table = $this->getTable($tableName);
+
+        if ($table === null) {
+            throw new \RuntimeException("Table not found: $tableName");
+        }
+
+        if (!$table instanceof MutableTableInterface) {
+            throw new \RuntimeException("Table '$tableName' does not support DELETE");
+        }
+
+        $workingTable = $this->applyWhereToTable($table, $ast->where);
+        return $workingTable->delete();
+    }
+
+    /**
+     * Apply a WHERE clause AST to a TableInterface using table methods
+     */
+    private function applyWhereToTableInterface(TableInterface $table, \mini\Parsing\SQL\AST\ASTNode $node): TableInterface
+    {
+        // Binary AND: apply both sides
+        if ($node instanceof BinaryOperation && strtoupper($node->operator) === 'AND') {
+            $table = $this->applyWhereToTableInterface($table, $node->left);
+            return $this->applyWhereToTableInterface($table, $node->right);
+        }
+
+        // Binary OR: use table's or() method with predicates
+        if ($node instanceof BinaryOperation && strtoupper($node->operator) === 'OR') {
+            $p = \mini\Table\Predicate::from($table);
+            $left = $this->applyWhereToTableInterface($p, $node->left);
+            $right = $this->applyWhereToTableInterface($p, $node->right);
+            return $table->or($left, $right);
+        }
+
+        // Simple comparison: column op value
+        if ($node instanceof BinaryOperation) {
+            $op = $node->operator;
+
+            // Left must be column, right must be literal
+            if (!$node->left instanceof IdentifierNode) {
+                throw new \RuntimeException("Left side of comparison must be a column");
+            }
+            if (!$node->right instanceof LiteralNode) {
+                throw new \RuntimeException("Right side of comparison must be a literal value");
+            }
+
+            $column = $node->left->getName();
+            $value = $this->evaluator->evaluate($node->right, null);
+
+            return match ($op) {
+                '=' => $table->eq($column, $value),
+                '<' => $table->lt($column, $value),
+                '<=' => $table->lte($column, $value),
+                '>' => $table->gt($column, $value),
+                '>=' => $table->gte($column, $value),
+                '!=', '<>' => $table->except($table->eq($column, $value)),
+                default => throw new \RuntimeException("Unsupported operator: $op"),
+            };
+        }
+
+        // LIKE operation
+        if ($node instanceof \mini\Parsing\SQL\AST\LikeOperation) {
+            if (!$node->left instanceof IdentifierNode) {
+                throw new \RuntimeException("Left side of LIKE must be a column");
+            }
+            $column = $node->left->getName();
+            $pattern = $this->evaluator->evaluate($node->pattern, null);
+            $result = $table->like($column, $pattern);
+            return $node->negated ? $table->except($result) : $result;
+        }
+
+        // IS NULL operation
+        if ($node instanceof \mini\Parsing\SQL\AST\IsNullOperation) {
+            if (!$node->expression instanceof IdentifierNode) {
+                throw new \RuntimeException("IS NULL expression must be a column");
+            }
+            $column = $node->expression->getName();
+            $nullRows = $table->eq($column, null);
+            return $node->negated ? $table->except($nullRows) : $nullRows;
+        }
+
+        // IN operation
+        if ($node instanceof \mini\Parsing\SQL\AST\InOperation) {
+            if (!$node->left instanceof IdentifierNode) {
+                throw new \RuntimeException("Left side of IN must be a column");
+            }
+            $column = $node->left->getName();
+            $values = [];
+            foreach ($node->values as $valueNode) {
+                $values[] = $this->evaluator->evaluate($valueNode, null);
+            }
+            $set = new \mini\Table\Set($column, $values);
+            $result = $table->in($column, $set);
+            return $node->negated ? $table->except($result) : $result;
+        }
+
+        // BETWEEN operation
+        if ($node instanceof \mini\Parsing\SQL\AST\BetweenOperation) {
+            if (!$node->expression instanceof IdentifierNode) {
+                throw new \RuntimeException("BETWEEN expression must be a column");
+            }
+            $column = $node->expression->getName();
+            $low = $this->evaluator->evaluate($node->low, null);
+            $high = $this->evaluator->evaluate($node->high, null);
+            $result = $table->gte($column, $low)->lte($column, $high);
+            return $node->negated ? $table->except($result) : $result;
+        }
+
+        throw new \RuntimeException("Unsupported WHERE expression: " . get_class($node));
+    }
+
+    /**
+     * Apply ORDER BY clause using table's order() method
+     */
+    private function applyOrderBy(TableInterface $table, array $orderBy): TableInterface
+    {
+        $parts = [];
+        foreach ($orderBy as $item) {
+            $colExpr = $item['column'];
+            $direction = strtoupper($item['direction'] ?? 'ASC');
+
+            if (!$colExpr instanceof IdentifierNode) {
+                throw new \RuntimeException("ORDER BY expression must be a column");
+            }
+
+            $parts[] = $colExpr->getName() . ' ' . $direction;
+        }
+
+        return $table->order(implode(', ', $parts));
+    }
+
+    /**
+     * Apply a WHERE clause AST to a MutableTableInterface
+     */
+    private function applyWhereToTable(MutableTableInterface $table, ?\mini\Parsing\SQL\AST\ASTNode $where): MutableTableInterface
     {
         if ($where === null) {
             return $table;
         }
 
-        // Keep reference to base table for negation operations
-        $baseTable ??= $table;
+        $result = $this->applyWhereToTableInterface($table, $where);
 
-        // Binary operations (=, <, >, AND, OR, etc.)
-        if ($where instanceof BinaryOperation) {
-            return $this->applyBinaryOp($table, $where, $params, $paramIndex, $baseTable);
+        if (!$result instanceof MutableTableInterface) {
+            throw new \RuntimeException("Filtered table must remain MutableTableInterface");
         }
 
-        // IS NULL / IS NOT NULL
-        if ($where instanceof IsNullOperation) {
-            $column = $this->getColumnName($where->expression);
-            $result = $table->eq($column, null);
-            if ($where->negated) {
-                // IS NOT NULL = all rows except nulls
-                return $table->except($result);
-            }
-            return $result;
-        }
-
-        // IN clause
-        if ($where instanceof InOperation) {
-            if ($where->isSubquery()) {
-                throw new \RuntimeException("IN with subquery not yet supported in VirtualDatabase");
-            }
-
-            $column = $this->getColumnName($where->left);
-
-            // Build a Set from the IN values
-            $values = [];
-            foreach ($where->values as $v) {
-                $values[] = $this->evaluateExpression($v, $params, $paramIndex);
-            }
-
-            $result = $table->in($column, new Set($values));
-            if ($where->negated) {
-                // NOT IN = all rows except those in set
-                return $table->except($result);
-            }
-            return $result;
-        }
-
-        // LIKE clause
-        if ($where instanceof LikeOperation) {
-            $column = $this->getColumnName($where->left);
-            $pattern = $this->evaluateExpression($where->pattern, $params, $paramIndex);
-            $result = $table->like($column, $pattern);
-            if ($where->negated) {
-                // NOT LIKE = all rows except matches
-                return $table->except($result);
-            }
-            return $result;
-        }
-
-        // NOT expression
-        if ($where instanceof UnaryOperation && strtoupper($where->operator) === 'NOT') {
-            // NOT expr = baseTable except expr
-            $inner = $this->applyWhere($table, $where->operand, $params, $paramIndex, $baseTable);
-            return $table->except($inner);
-        }
-
-        throw new \RuntimeException("Unsupported WHERE clause type: " . get_class($where));
-    }
-
-    /**
-     * Apply binary operation (=, <, >, <=, >=, AND, OR)
-     */
-    private function applyBinaryOp(TableInterface $table, BinaryOperation $node, array $params, int &$paramIndex, TableInterface $baseTable): TableInterface
-    {
-        $op = strtoupper($node->operator);
-
-        // AND: chain filters (fast - filters progressively smaller set)
-        if ($op === 'AND') {
-            $table = $this->applyWhere($table, $node->left, $params, $paramIndex, $baseTable);
-            return $this->applyWhere($table, $node->right, $params, $paramIndex, $baseTable);
-        }
-
-        // OR: union of both sides (uses TableInterface::union())
-        if ($op === 'OR') {
-            // Apply each side to the current table independently
-            // Save paramIndex to replay for right side
-            $leftParamIndex = $paramIndex;
-            $left = $this->applyWhere($table, $node->left, $params, $paramIndex, $baseTable);
-            $right = $this->applyWhere($table, $node->right, $params, $leftParamIndex, $baseTable);
-            return $left->union($right);
-        }
-
-        // Comparison operators: column op value
-        $column = $this->getColumnName($node->left);
-        $value = $this->evaluateExpression($node->right, $params, $paramIndex);
-
-        return match ($op) {
-            '=' => $table->eq($column, $value),
-            '<' => $table->lt($column, $value),
-            '<=' => $table->lte($column, $value),
-            '>' => $table->gt($column, $value),
-            '>=' => $table->gte($column, $value),
-            '!=', '<>' => $table->except($table->eq($column, $value)),
-            'LIKE' => $table->like($column, $value),
-            default => throw new \RuntimeException("Unsupported operator: $op"),
-        };
-    }
-
-    /**
-     * Evaluate expression to get a value (for comparisons)
-     */
-    private function evaluateExpression(ASTNode $expr, array $params, int &$paramIndex): mixed
-    {
-        if ($expr instanceof LiteralNode) {
-            if ($expr->valueType === 'number') {
-                return str_contains($expr->value, '.') ? (float)$expr->value : (int)$expr->value;
-            }
-            return $expr->value;
-        }
-
-        if ($expr instanceof PlaceholderNode) {
-            if ($expr->token === '?') {
-                return $params[$paramIndex++] ?? null;
-            }
-            $name = ltrim($expr->token, ':');
-            return $params[$name] ?? null;
-        }
-
-        if ($expr instanceof IdentifierNode) {
-            // Column reference without row context - shouldn't happen in value position
-            throw new \RuntimeException("Cannot evaluate column reference without row context");
-        }
-
-        throw new \RuntimeException("Cannot evaluate expression type: " . get_class($expr));
-    }
-
-    /**
-     * Get column name from an AST node
-     */
-    private function getColumnName(ASTNode $node): string
-    {
-        if ($node instanceof IdentifierNode) {
-            $parts = explode('.', $node->name);
-            return end($parts);
-        }
-
-        if ($node instanceof ColumnNode) {
-            return $this->getColumnName($node->expression);
-        }
-
-        throw new \RuntimeException("Expected column reference, got: " . get_class($node));
-    }
-
-    // --- DML execution methods ---
-
-    private function executeInsert(InsertStatement $ast, array $params): int
-    {
-        $tableName = $ast->table->name;
-        $table = $this->getTable($tableName);
-
-        if (!($table instanceof MutableTableInterface)) {
-            throw new \RuntimeException("Table '$tableName' does not support INSERT");
-        }
-
-        $columns = array_map(fn($col) => $col->name, $ast->columns);
-        $affectedRows = 0;
-        $paramIndex = 0;
-
-        foreach ($ast->values as $valueRow) {
-            $row = [];
-            foreach ($valueRow as $i => $valueExpr) {
-                $columnName = $columns[$i] ?? $i;
-                $row[$columnName] = $this->evaluateExpression($valueExpr, $params, $paramIndex);
-            }
-            $table->insert($row);
-            $affectedRows++;
-        }
-
-        return $affectedRows;
-    }
-
-    private function executeUpdate(UpdateStatement $ast, array $params): int
-    {
-        $tableName = $ast->table->name;
-        $table = $this->getTable($tableName);
-
-        if (!($table instanceof MutableTableInterface)) {
-            throw new \RuntimeException("Table '$tableName' does not support UPDATE");
-        }
-
-        // Apply WHERE to find matching rows
-        $paramIndex = 0;
-
-        // First, extract SET values (they come before WHERE params)
-        $changes = [];
-        foreach ($ast->updates as $update) {
-            $columnName = $update['column']->name;
-            $changes[$columnName] = $this->evaluateExpression($update['value'], $params, $paramIndex);
-        }
-
-        // Apply WHERE filter
-        $filtered = $this->applyWhere($table, $ast->where, $params, $paramIndex);
-
-        // Update matching rows
-        return $filtered->update($changes);
-    }
-
-    private function executeDelete(DeleteStatement $ast, array $params): int
-    {
-        $tableName = $ast->table->name;
-        $table = $this->getTable($tableName);
-
-        if (!($table instanceof MutableTableInterface)) {
-            throw new \RuntimeException("Table '$tableName' does not support DELETE");
-        }
-
-        // Apply WHERE filter
-        $paramIndex = 0;
-        $filtered = $this->applyWhere($table, $ast->where, $params, $paramIndex);
-
-        // Delete matching rows
-        return $filtered->delete();
+        return $result;
     }
 }
