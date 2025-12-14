@@ -16,6 +16,9 @@ use Traversable;
  */
 abstract class AbstractTable implements TableInterface
 {
+    /** Maximum rows to buffer optimistically during iteration */
+    protected const OPTIMISTIC_BUFFER_COUNT = 200;
+
     /** @var array<string, ColumnDef> All columns in the table */
     private readonly array $columnDefs;
 
@@ -34,11 +37,17 @@ abstract class AbstractTable implements TableInterface
     /** @var bool|null Cached exists result (cleared on clone) */
     protected ?bool $cachedExists = null;
 
+    /** @var array<int|string, object>|null Cached rows for small result sets */
+    protected ?array $cachedRows = null;
+
+    /** @var bool Whether optimistic buffering was disabled (result set too large) */
+    protected bool $bufferingDisabled = false;
+
     /** @var array<string, true>|null Lazy membership index for has() */
     protected ?array $membershipIndex = null;
 
-    /** @var bool Whether membershipIndex was built using row keys */
-    private bool $membershipIndexUsesRowKeys = false;
+    /** @var ColumnDef|false|null Cached primary key column (null=not checked, false=none found) */
+    private ColumnDef|false|null $primaryKeyColumn = null;
 
     public function __construct(ColumnDef ...$columns)
     {
@@ -56,8 +65,9 @@ abstract class AbstractTable implements TableInterface
     {
         $this->cachedCount = null;
         $this->cachedExists = null;
+        $this->cachedRows = null;
+        $this->bufferingDisabled = false;
         $this->membershipIndex = null;
-        $this->membershipIndexUsesRowKeys = false;
     }
 
     /**
@@ -88,26 +98,7 @@ abstract class AbstractTable implements TableInterface
             return $this->compareFn;
         }
 
-        // Use locale-aware collation via mini\collator() service
-        if (function_exists('mini\\collator')) {
-            $collator = \mini\collator();
-            return fn(string $a, string $b): int => $collator->compare($a, $b) ?: 0;
-        }
-
-        // Fallback to binary comparison
-        return fn(string $a, string $b): int => $a <=> $b;
-    }
-
-    /**
-     * Create a copy with a custom comparison function for string sorting
-     *
-     * @param Closure(string, string): int $fn Comparison function
-     */
-    public function withCompareFn(Closure $fn): static
-    {
-        $c = clone $this;
-        $c->compareFn = $fn;
-        return $c;
+        return static fn(string $a, string $b): int => $a === $b ? 0 : (\mini\collator()->compare($a, $b) ?: 0);
     }
 
     /**
@@ -269,8 +260,8 @@ abstract class AbstractTable implements TableInterface
     /**
      * Check if value(s) exist in the table's projected columns
      *
-     * Builds a membership index lazily on first call for O(1) subsequent lookups.
-     * Returns false if the member's properties don't exactly match the table's columns.
+     * Uses indexed columns when available to avoid full table scans.
+     * Falls back to cached rows or iteration for non-indexed lookups.
      *
      * @param object $member Object with properties matching getColumns()
      */
@@ -289,35 +280,121 @@ abstract class AbstractTable implements TableInterface
             }
         }
 
-        // Build membership index lazily (also captures count)
-        if ($this->membershipIndex === null) {
-            $colNames = array_keys($cols);
-            $rowKeyColumns = $this->getRowKeyColumns();
+        // Normalize member to array for faster comparison
+        $memberValues = [];
+        foreach ($cols as $col => $def) {
+            $memberValues[$col] = $member->$col ?? null;
+        }
 
-            // Optimization: if checking exactly the row key columns, use row keys directly
-            $this->membershipIndexUsesRowKeys = ($colNames === $rowKeyColumns && count($colNames) === 1);
+        // Short-circuit: try direct lookup in cached rows via primary key
+        // Note: rowid may or may not match primary key, so only trust positive matches
+        if ($this->cachedRows !== null) {
+            $pk = $this->getPrimaryKeyColumn();
+            if ($pk !== null && isset($cols[$pk->name])) {
+                $pkValue = $memberValues[$pk->name];
+                if ($pkValue !== null && isset($this->cachedRows[$pkValue])) {
+                    $cachedRow = $this->cachedRows[$pkValue];
+                    // Verify all columns match
+                    $matches = true;
+                    foreach ($memberValues as $col => $val) {
+                        if (($cachedRow->$col ?? null) !== $val) {
+                            $matches = false;
+                            break;
+                        }
+                    }
+                    if ($matches) {
+                        return true;
+                    }
+                }
+                // Don't return false - rowid might not match PK, fall through
+            }
+        }
 
+        // Try to find a unique index we can query directly
+        $uniqueCol = $this->findUniqueIndexColumn($cols);
+        if ($uniqueCol !== null) {
+            $query = $this->eq($uniqueCol, $memberValues[$uniqueCol]);
+
+            // Apply remaining column filters
+            foreach ($memberValues as $col => $val) {
+                if ($col !== $uniqueCol) {
+                    $query = $query->eq($col, $val);
+                }
+            }
+
+            return $query->exists();
+        }
+
+        // Build membership key from normalized values
+        $colNames = array_keys($cols);
+        $targetKey = $this->membershipKeyFromValues($memberValues);
+
+        // No unique index - fall back to membership index for small/cached tables
+        if ($this->membershipIndex !== null) {
+            return isset($this->membershipIndex[$targetKey]);
+        }
+
+        // Build index from cached rows if available
+        if ($this->cachedRows !== null) {
             $this->membershipIndex = [];
-            $count = 0;
-            foreach ($this as $id => $row) {
-                $key = $this->membershipIndexUsesRowKeys ? $id : $this->membershipKey($row, $colNames);
-                $this->membershipIndex[$key] = true;
-                $count++;
+            foreach ($this->cachedRows as $row) {
+                $this->membershipIndex[$this->membershipKey($row, $colNames)] = true;
             }
-            // Cache count since we iterated anyway
-            if ($this->cachedCount === null) {
-                $this->cachedCount = $count;
-                $this->cachedExists = $count > 0;
+            return isset($this->membershipIndex[$targetKey]);
+        }
+
+        // No cache, no index - iterate and search (also builds cache for small tables)
+        foreach ($this as $row) {
+            if ($this->membershipKey($row, $colNames) === $targetKey) {
+                return true;
             }
         }
 
-        if ($this->membershipIndexUsesRowKeys) {
-            // Direct key lookup when checking row key column
-            $colName = array_keys($cols)[0];
-            return isset($this->membershipIndex[$member->$colName ?? null]);
-        }
+        return false;
+    }
 
-        return isset($this->membershipIndex[$this->membershipKey($member, array_keys($cols))]);
+    /**
+     * Generate membership key from pre-extracted values array
+     */
+    private function membershipKeyFromValues(array $values): string
+    {
+        $parts = [];
+        foreach ($values as $val) {
+            $parts[] = ($val === null ? 'n:' : 's:') . $val;
+        }
+        return implode("\x00", $parts);
+    }
+
+    /**
+     * Get the primary key column definition (cached)
+     */
+    protected function getPrimaryKeyColumn(): ?ColumnDef
+    {
+        if ($this->primaryKeyColumn === null) {
+            $this->primaryKeyColumn = false;
+            foreach ($this->columnDefs as $col) {
+                if ($col->index === IndexType::Primary) {
+                    $this->primaryKeyColumn = $col;
+                    break;
+                }
+            }
+        }
+        return $this->primaryKeyColumn ?: null;
+    }
+
+    /**
+     * Find a column with a unique index (Primary or Unique)
+     *
+     * @return string|null Column name if found, null otherwise
+     */
+    private function findUniqueIndexColumn(array $cols): ?string
+    {
+        foreach ($cols as $col => $def) {
+            if ($def->index === IndexType::Primary || $def->index === IndexType::Unique) {
+                return $col;
+            }
+        }
+        return null;
     }
 
     /**
@@ -345,14 +422,54 @@ abstract class AbstractTable implements TableInterface
     /**
      * Iterate over rows with visible columns only
      *
+     * Uses optimistic buffering for small result sets (≤OPTIMISTIC_BUFFER_COUNT rows):
+     * - First iteration buffers rows while yielding them
+     * - Subsequent iterations yield from cache (no re-execution)
+     * - Large result sets disable buffering to avoid memory issues
+     *
+     * Also memoizes count after full iteration for O(1) count() calls.
+     *
      * @return Traversable<int|string, object>
      */
     final public function getIterator(): Traversable
     {
+        // If we have cached rows from a previous iteration, yield from them
+        if ($this->cachedRows !== null) {
+            yield from $this->cachedRows;
+            return;
+        }
+
         $visibleCols = $this->getColumns();
+        $buffer = $this->bufferingDisabled ? null : [];
+        $count = 0;
 
         foreach ($this->materialize() as $id => $row) {
-            yield $id => (object) array_intersect_key((array) $row, $visibleCols);
+            $projected = (object) array_intersect_key((array) $row, $visibleCols);
+
+            // Buffer if under limit
+            if ($buffer !== null) {
+                if ($count < static::OPTIMISTIC_BUFFER_COUNT) {
+                    $buffer[$id] = $projected;
+                } else {
+                    // Exceeded limit - stop buffering
+                    $this->bufferingDisabled = true;
+                    $buffer = null;
+                }
+            }
+
+            yield $id => $projected;
+            $count++;
+        }
+
+        // After full iteration, cache small result sets
+        if ($buffer !== null) {
+            $this->cachedRows = $buffer;
+        }
+
+        // Memoize count for subsequent count() calls
+        if ($this->cachedCount === null) {
+            $this->cachedCount = $count;
+            $this->cachedExists = $count > 0;
         }
     }
 
@@ -371,6 +488,18 @@ abstract class AbstractTable implements TableInterface
             $result[$name] = $this->columnDefs[$name];
         }
         return $result;
+    }
+
+    /**
+     * Get all column definitions regardless of projection
+     *
+     * Used by wrappers that need to filter/sort on columns not in the output.
+     *
+     * @return array<string, ColumnDef>
+     */
+    public function getAllColumns(): array
+    {
+        return $this->columnDefs;
     }
 
     /**

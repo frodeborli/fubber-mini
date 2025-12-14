@@ -9,53 +9,54 @@ require_once __DIR__ . '/_TableImplementationTest.php';
 use mini\testing\TableImplementationTest;
 use mini\Table\GeneratorTable;
 use mini\Table\TableInterface;
+use mini\Table\ColumnDef;
+use mini\Table\ColumnType;
+use mini\Table\IndexType;
 
 $test = new class extends TableImplementationTest {
 
     protected function createTable(): TableInterface
     {
-        return new GeneratorTable(fn() => yield from $this->getTestData());
+        return new GeneratorTable(
+            fn() => yield from $this->getTestData(),
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('name', ColumnType::Text),
+            new ColumnDef('age', ColumnType::Int),
+            new ColumnDef('dept', ColumnType::Text),
+        );
     }
 
     // =========================================================================
     // GeneratorTable-specific tests
     // =========================================================================
 
-    public function testInfersColumnsFromFirstRow(): void
+    public function testRequiresAtLeastOneColumn(): void
     {
-        $table = new GeneratorTable(fn() => yield from [
-            1 => (object)['foo' => 1, 'bar' => 'x'],
-        ]);
-
-        $cols = array_keys($table->getColumns());
-        $this->assertSame(['foo', 'bar'], $cols);
+        $this->expectException(\InvalidArgumentException::class);
+        new GeneratorTable(fn() => yield from []);
     }
 
-    public function testEmptyGeneratorYieldsNoColumns(): void
-    {
-        $table = new GeneratorTable(fn() => yield from []);
-
-        $this->assertSame([], array_keys($table->getColumns()));
-        $this->assertSame(0, $table->count());
-    }
-
-    public function testClosureIsCalledFreshEachIteration(): void
+    public function testClosureCallingBehavior(): void
     {
         $callCount = 0;
-        $table = new GeneratorTable(function() use (&$callCount) {
-            $callCount++;
-            yield 1 => (object)['id' => 1];
-        });
+        $table = new GeneratorTable(
+            function() use (&$callCount) {
+                $callCount++;
+                yield 1 => (object)['id' => 1];
+            },
+            new ColumnDef('id', ColumnType::Int),
+        );
 
-        // First call happens in constructor to infer columns
+        // Constructor does not call closure
+        $this->assertSame(0, $callCount);
+
+        // First full iteration calls closure (then caches result for small tables)
+        iterator_to_array($table);
         $this->assertSame(1, $callCount);
 
-        // Each iteration should call the closure again
+        // Subsequent iterations use cached result (no closure call)
         iterator_to_array($table);
-        $this->assertSame(2, $callCount);
-
-        iterator_to_array($table);
-        $this->assertSame(3, $callCount);
+        $this->assertSame(1, $callCount);
     }
 };
 

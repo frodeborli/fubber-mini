@@ -3,24 +3,28 @@
 namespace mini\Table;
 
 /**
- * Column definition with optional index metadata
+ * Column definition with type and optional index metadata
  *
+ * The type determines comparison semantics (whether to use collation).
  * When a column is the leading column of an index, set $index to the
  * index type and list any additional columns in $indexWith.
  *
  * Examples:
  * ```php
- * // Simple column, no index
+ * // Simple text column, no index
  * new ColumnDef('name')
  *
- * // Primary key
- * new ColumnDef('id', IndexType::Primary)
+ * // Integer primary key
+ * new ColumnDef('id', ColumnType::Int, IndexType::Primary)
+ *
+ * // Indexed text column
+ * new ColumnDef('email', ColumnType::Text, IndexType::Unique)
  *
  * // Composite index on (org_id, user_id) - define on leading column
- * new ColumnDef('org_id', IndexType::Index, 'user_id')
+ * new ColumnDef('org_id', ColumnType::Int, IndexType::Index, 'user_id')
  *
- * // The non-leading column has no index info
- * new ColumnDef('user_id')
+ * // DateTime column (sorts correctly with binary comparison)
+ * new ColumnDef('created_at', ColumnType::DateTime)
  * ```
  */
 readonly class ColumnDef
@@ -30,11 +34,13 @@ readonly class ColumnDef
 
     /**
      * @param string $name Column name
+     * @param ColumnType $type Data type for comparison semantics
      * @param IndexType $index Index type (None if not indexed)
      * @param string ...$indexWith Additional columns in composite index
      */
     public function __construct(
         public string $name,
+        public ColumnType $type = ColumnType::Text,
         public IndexType $index = IndexType::None,
         string ...$indexWith,
     ) {
@@ -81,24 +87,20 @@ readonly class ColumnDef
     /**
      * Get the common denominator ColumnDef
      *
-     * Returns a ColumnDef with the weaker index type and common prefix
-     * of indexWith columns.
+     * Returns a ColumnDef with the same type, weaker index type, and common
+     * prefix of indexWith columns.
      *
      * ```php
-     * $a = new ColumnDef('id', IndexType::Primary);
-     * $b = new ColumnDef('id', IndexType::Index);
-     * $a->commonWith($b);  // ColumnDef('id', IndexType::Index)
+     * $a = new ColumnDef('id', ColumnType::Int, IndexType::Primary);
+     * $b = new ColumnDef('id', ColumnType::Int, IndexType::Index);
+     * $a->commonWith($b);  // ColumnDef('id', ColumnType::Int, IndexType::Index)
      *
-     * $a = new ColumnDef('a', IndexType::Index, 'b', 'c');
-     * $b = new ColumnDef('a', IndexType::Index, 'b', 'd');
-     * $a->commonWith($b);  // ColumnDef('a', IndexType::Index, 'b')
-     *
-     * $a = new ColumnDef('name', IndexType::Index);
-     * $b = new ColumnDef('name');
-     * $a->commonWith($b);  // ColumnDef('name')
+     * $a = new ColumnDef('a', ColumnType::Int, IndexType::Index, 'b', 'c');
+     * $b = new ColumnDef('a', ColumnType::Int, IndexType::Index, 'b', 'd');
+     * $a->commonWith($b);  // ColumnDef('a', ColumnType::Int, IndexType::Index, 'b')
      * ```
      *
-     * @throws \InvalidArgumentException if column names don't match
+     * @throws \InvalidArgumentException if column names or types don't match
      */
     public function commonWith(self $other): self
     {
@@ -108,11 +110,17 @@ readonly class ColumnDef
             );
         }
 
+        if ($this->type !== $other->type) {
+            throw new \InvalidArgumentException(
+                "Cannot union columns with different types: {$this->name} has {$this->type->name} vs {$other->type->name}"
+            );
+        }
+
         // Take the weaker index type
         $index = $this->index->weakerOf($other->index);
 
         if (!$index->isIndexed()) {
-            return new self($this->name);
+            return new self($this->name, $this->type);
         }
 
         // Find common prefix of indexWith
@@ -126,6 +134,6 @@ readonly class ColumnDef
             }
         }
 
-        return new self($this->name, $index, ...$commonIndexWith);
+        return new self($this->name, $this->type, $index, ...$commonIndexWith);
     }
 }

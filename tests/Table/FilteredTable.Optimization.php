@@ -14,18 +14,25 @@ use mini\Test;
 use mini\Table\GeneratorTable;
 use mini\Table\FilteredTable;
 use mini\Table\EmptyTable;
+use mini\Table\ColumnDef;
+use mini\Table\ColumnType;
+use mini\Table\IndexType;
 
 $test = new class extends Test {
 
     protected function createTable(): GeneratorTable
     {
-        return new GeneratorTable(fn() => yield from [
-            1 => (object)['id' => 1, 'age' => 10],
-            2 => (object)['id' => 2, 'age' => 20],
-            3 => (object)['id' => 3, 'age' => 30],
-            4 => (object)['id' => 4, 'age' => 40],
-            5 => (object)['id' => 5, 'age' => 50],
-        ]);
+        return new GeneratorTable(
+            fn() => yield from [
+                1 => (object)['id' => 1, 'age' => 10],
+                2 => (object)['id' => 2, 'age' => 20],
+                3 => (object)['id' => 3, 'age' => 30],
+                4 => (object)['id' => 4, 'age' => 40],
+                5 => (object)['id' => 5, 'age' => 50],
+            ],
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('age', ColumnType::Int),
+        );
     }
 
     // =========================================================================

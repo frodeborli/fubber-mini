@@ -18,6 +18,8 @@ use Traversable;
  */
 class FilteredTable extends AbstractTableWrapper implements PredicateInterface
 {
+    private ColumnDef $columnDef;
+
     public function __construct(
         AbstractTable $source,
         private string $column,
@@ -35,6 +37,10 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
         if ($this->offset !== 0) {
             $source = $source->offset(0);
         }
+
+        // Validate column exists and cache its definition (check all columns, not just visible)
+        $cols = $source->getAllColumns();
+        $this->columnDef = $cols[$column] ?? throw new \LogicException("Unknown column '$column'");
 
         parent::__construct($source);
     }
@@ -88,17 +94,199 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
     {
         $col = $this->column;
         $allAdditional = array_unique([...$additionalColumns, $col]);
+        $source = parent::materialize(...$allAdditional);
 
+        // Select filter strategy once, then apply pagination
+        $filtered = match ($this->operator) {
+            Operator::Eq => $this->filterEq($source, $col),
+            Operator::Lt => $this->filterLt($source, $col),
+            Operator::Lte => $this->filterLte($source, $col),
+            Operator::Gt => $this->filterGt($source, $col),
+            Operator::Gte => $this->filterGte($source, $col),
+            Operator::In => $this->filterIn($source, $col),
+            Operator::Like => $this->filterLike($source, $col),
+        };
+
+        if ($this->getLimit() === null && $this->getOffset() === 0) {
+            yield from $filtered;
+        } else {
+            yield from $this->paginate($filtered);
+        }
+    }
+
+    private function filterEq(iterable $source, string $col): \Generator
+    {
+        $value = $this->value;
+        if ($value === null) {
+            // eq(col, null) implements SQL "col IS NULL"
+            foreach ($source as $id => $row) {
+                if ($row->$col === null) {
+                    yield $id => $row;
+                }
+            }
+        } elseif ($this->columnDef->type->isNumeric()) {
+            // Numeric: use == for type coercion (5 == 5.0 is true)
+            foreach ($source as $id => $row) {
+                if ($row->$col == $value) {
+                    yield $id => $row;
+                }
+            }
+        } else {
+            // String: use === for exact match
+            foreach ($source as $id => $row) {
+                if ($row->$col === $value) {
+                    yield $id => $row;
+                }
+            }
+        }
+    }
+
+    private function filterLt(iterable $source, string $col): \Generator
+    {
+        $value = $this->value;
+        if ($this->columnDef->type->isNumeric()) {
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $row->$col < $value) {
+                    yield $id => $row;
+                }
+            }
+        } elseif ($this->columnDef->type->shouldUseCollator()) {
+            if (!is_string($value) && !is_numeric($value)) return;
+            $value = (string) $value;
+            $cmp = $this->getCompareFn();
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $cmp($row->$col, $value) < 0) {
+                    yield $id => $row;
+                }
+            }
+        } else {
+            // DateTime, Binary - use binary comparison
+            if (!is_string($value) && !is_numeric($value)) return;
+            $value = (string) $value;
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $row->$col < $value) {
+                    yield $id => $row;
+                }
+            }
+        }
+    }
+
+    private function filterLte(iterable $source, string $col): \Generator
+    {
+        $value = $this->value;
+        if ($this->columnDef->type->isNumeric()) {
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $row->$col <= $value) {
+                    yield $id => $row;
+                }
+            }
+        } elseif ($this->columnDef->type->shouldUseCollator()) {
+            if (!is_string($value) && !is_numeric($value)) return;
+            $value = (string) $value;
+            $cmp = $this->getCompareFn();
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $cmp($row->$col, $value) <= 0) {
+                    yield $id => $row;
+                }
+            }
+        } else {
+            // DateTime, Binary - use binary comparison
+            if (!is_string($value) && !is_numeric($value)) return;
+            $value = (string) $value;
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $row->$col <= $value) {
+                    yield $id => $row;
+                }
+            }
+        }
+    }
+
+    private function filterGt(iterable $source, string $col): \Generator
+    {
+        $value = $this->value;
+        if ($this->columnDef->type->isNumeric()) {
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $row->$col > $value) {
+                    yield $id => $row;
+                }
+            }
+        } elseif ($this->columnDef->type->shouldUseCollator()) {
+            if (!is_string($value) && !is_numeric($value)) return;
+            $value = (string) $value;
+            $cmp = $this->getCompareFn();
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $cmp($row->$col, $value) > 0) {
+                    yield $id => $row;
+                }
+            }
+        } else {
+            // DateTime, Binary - use binary comparison
+            if (!is_string($value) && !is_numeric($value)) return;
+            $value = (string) $value;
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $row->$col > $value) {
+                    yield $id => $row;
+                }
+            }
+        }
+    }
+
+    private function filterGte(iterable $source, string $col): \Generator
+    {
+        $value = $this->value;
+        if ($this->columnDef->type->isNumeric()) {
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $row->$col >= $value) {
+                    yield $id => $row;
+                }
+            }
+        } elseif ($this->columnDef->type->shouldUseCollator()) {
+            if (!is_string($value) && !is_numeric($value)) return;
+            $value = (string) $value;
+            $cmp = $this->getCompareFn();
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $cmp($row->$col, $value) >= 0) {
+                    yield $id => $row;
+                }
+            }
+        } else {
+            // DateTime, Binary - use binary comparison
+            if (!is_string($value) && !is_numeric($value)) return;
+            $value = (string) $value;
+            foreach ($source as $id => $row) {
+                if ($row->$col !== null && $row->$col >= $value) {
+                    yield $id => $row;
+                }
+            }
+        }
+    }
+
+    private function filterIn(iterable $source, string $col): \Generator
+    {
+        foreach ($source as $id => $row) {
+            if ($this->matchesIn($row->$col ?? null)) {
+                yield $id => $row;
+            }
+        }
+    }
+
+    private function filterLike(iterable $source, string $col): \Generator
+    {
+        foreach ($source as $id => $row) {
+            if ($this->matchesLike($row->$col ?? null)) {
+                yield $id => $row;
+            }
+        }
+    }
+
+    private function paginate(iterable $source): \Generator
+    {
         $skipped = 0;
         $emitted = 0;
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
-        foreach (parent::materialize(...$allAdditional) as $id => $row) {
-            if (!$this->matches($row->$col ?? null)) {
-                continue;
-            }
-
+        foreach ($source as $id => $row) {
             if ($skipped < $offset) {
                 $skipped++;
                 continue;
@@ -151,13 +339,21 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
     }
 
     /**
-     * Compare two values using collator for strings, <=> for numbers
+     * Compare two values respecting column type
+     *
+     * - Numeric columns: use <=> (allows int/float coercion)
+     * - Text columns: use collator for locale-aware comparison
+     * - Binary/DateTime columns: use <=> for raw byte ordering
      */
     private function compare(mixed $left, mixed $right): int
     {
-        if (is_string($left) || is_string($right)) {
-            return $this->getCompareFn()((string)$left, (string)$right);
+        // Text columns use locale-aware collator
+        if ($this->columnDef->type->shouldUseCollator()) {
+            if (is_string($left) || is_string($right)) {
+                return $this->getCompareFn()((string)$left, (string)$right);
+            }
         }
+        // All other types (Int, Float, DateTime, Binary) use binary comparison
         return $left <=> $right;
     }
 
@@ -211,6 +407,23 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
     // Filter methods - optimize same-column filters, wrap otherwise
     // -------------------------------------------------------------------------
 
+    /**
+     * Restore absorbed pagination to a replacement table
+     *
+     * Used when optimizations bypass this wrapper and return a new table
+     * directly on source - we must transfer our absorbed limit/offset.
+     */
+    private function withPagination(TableInterface $table): TableInterface
+    {
+        if ($this->limit !== null) {
+            $table = $table->limit($this->limit);
+        }
+        if ($this->offset !== 0) {
+            $table = $table->offset($this->offset);
+        }
+        return $table;
+    }
+
     public function eq(string $column, int|float|string|null $value): TableInterface
     {
         if ($column === $this->column) {
@@ -227,7 +440,7 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
                 default => null,
             };
             if ($compatible === true) {
-                return $this->source->eq($column, $value);
+                return $this->withPagination($this->source->eq($column, $value));
             }
             if ($compatible === false) {
                 return EmptyTable::from($this);
@@ -243,8 +456,13 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
             if ($this->operator === Operator::Eq) {
                 return $this->compare($this->value, $value) < 0 ? $this : EmptyTable::from($this);
             }
-            if ($this->operator === Operator::Lt || $this->operator === Operator::Lte) {
-                return $cmp < 0 ? $this->source->lt($column, $value) : $this;
+            if ($this->operator === Operator::Lt) {
+                // lt + lt: keep stricter (smaller) bound
+                return $cmp < 0 ? $this->withPagination($this->source->lt($column, $value)) : $this;
+            }
+            if ($this->operator === Operator::Lte) {
+                // lte + lt: lt is stricter when value <= existing
+                return $cmp <= 0 ? $this->withPagination($this->source->lt($column, $value)) : $this;
             }
             if ($this->operator === Operator::Gt || $this->operator === Operator::Gte) {
                 if ($cmp <= 0) {
@@ -263,7 +481,7 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
                 return $this->compare($this->value, $value) <= 0 ? $this : EmptyTable::from($this);
             }
             if ($this->operator === Operator::Lt || $this->operator === Operator::Lte) {
-                return $cmp < 0 ? $this->source->lte($column, $value) : $this;
+                return $cmp < 0 ? $this->withPagination($this->source->lte($column, $value)) : $this;
             }
             if ($this->operator === Operator::Gt) {
                 if ($cmp <= 0) {
@@ -274,7 +492,7 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
                 if ($cmp > 0) {
                     // valid range, fall through
                 } elseif ($cmp === 0) {
-                    return $this->source->eq($column, $value);
+                    return $this->withPagination($this->source->eq($column, $value));
                 } else {
                     return EmptyTable::from($this);
                 }
@@ -290,8 +508,13 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
             if ($this->operator === Operator::Eq) {
                 return $this->compare($this->value, $value) > 0 ? $this : EmptyTable::from($this);
             }
-            if ($this->operator === Operator::Gt || $this->operator === Operator::Gte) {
-                return $cmp > 0 ? $this->source->gt($column, $value) : $this;
+            if ($this->operator === Operator::Gt) {
+                // gt + gt: keep stricter (larger) bound
+                return $cmp > 0 ? $this->withPagination($this->source->gt($column, $value)) : $this;
+            }
+            if ($this->operator === Operator::Gte) {
+                // gte + gt: gt is stricter when value >= existing
+                return $cmp >= 0 ? $this->withPagination($this->source->gt($column, $value)) : $this;
             }
             if ($this->operator === Operator::Lt || $this->operator === Operator::Lte) {
                 if ($cmp >= 0) {
@@ -310,7 +533,7 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
                 return $this->compare($this->value, $value) >= 0 ? $this : EmptyTable::from($this);
             }
             if ($this->operator === Operator::Gt || $this->operator === Operator::Gte) {
-                return $cmp > 0 ? $this->source->gte($column, $value) : $this;
+                return $cmp > 0 ? $this->withPagination($this->source->gte($column, $value)) : $this;
             }
             if ($this->operator === Operator::Lt) {
                 if ($cmp >= 0) {
@@ -321,7 +544,7 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
                 if ($cmp < 0) {
                     // valid range, fall through
                 } elseif ($cmp === 0) {
-                    return $this->source->eq($column, $value);
+                    return $this->withPagination($this->source->eq($column, $value));
                 } else {
                     return EmptyTable::from($this);
                 }

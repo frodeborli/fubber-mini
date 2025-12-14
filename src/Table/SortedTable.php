@@ -56,6 +56,18 @@ class SortedTable extends AbstractTableWrapper
         AbstractTable $source,
         OrderDef ...$orders,
     ) {
+        // Absorb source's limit/offset - we apply them after sorting
+        $this->limit = $source->getLimit();
+        $this->offset = $source->getOffset();
+
+        // Clear source's limit/offset since we handle it
+        if ($this->limit !== null) {
+            $source = $source->limit(null);
+        }
+        if ($this->offset !== 0) {
+            $source = $source->offset(0);
+        }
+
         parent::__construct($source);
         $this->orderBy = $orders;
     }
@@ -121,6 +133,9 @@ class SortedTable extends AbstractTableWrapper
 
     public function limit(?int $n): TableInterface
     {
+        if ($this->limit === $n) {
+            return $this;
+        }
         $c = clone $this;
         $c->limit = $n;
         return $c;
@@ -128,6 +143,9 @@ class SortedTable extends AbstractTableWrapper
 
     public function offset(int $n): TableInterface
     {
+        if ($this->offset === $n) {
+            return $this;
+        }
         $c = clone $this;
         $c->offset = $n;
         return $c;
@@ -140,8 +158,9 @@ class SortedTable extends AbstractTableWrapper
     {
         $orders = $this->orderBy;
         $compareFn = $this->getCompareFn();
+        $columns = $this->source->getAllColumns();
 
-        return function (stdClass $a, stdClass $b) use ($orders, $compareFn): int {
+        return function (stdClass $a, stdClass $b) use ($orders, $compareFn, $columns): int {
             foreach ($orders as $order) {
                 $column = $order->column;
                 $mult = $order->asc ? 1 : -1;
@@ -149,14 +168,18 @@ class SortedTable extends AbstractTableWrapper
                 $valA = $a->$column ?? null;
                 $valB = $b->$column ?? null;
 
-                // Use <=> for null, int, float; custom compareFn for strings
+                // Use <=> for null, int, float
                 if ($valA === null || $valB === null
                     || is_int($valA) || is_float($valA)
                     || is_int($valB) || is_float($valB)
                 ) {
                     $cmp = $valA <=> $valB;
-                } else {
+                } elseif (isset($columns[$column]) && $columns[$column]->type->shouldUseCollator()) {
+                    // Text columns use locale-aware collator
                     $cmp = $compareFn((string)$valA, (string)$valB);
+                } else {
+                    // Binary, Date, Time, DateTime use binary comparison
+                    $cmp = $valA <=> $valB;
                 }
 
                 if ($cmp !== 0) {

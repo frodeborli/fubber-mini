@@ -10,6 +10,9 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 use mini\Test;
 use mini\Table\GeneratorTable;
 use mini\Table\Set;
+use mini\Table\ColumnDef;
+use mini\Table\ColumnType;
+use mini\Table\IndexType;
 
 $test = new class extends Test {
 
@@ -18,18 +21,24 @@ $test = new class extends Test {
      */
     protected function createTable(): GeneratorTable
     {
-        return new GeneratorTable(fn() => yield from [
-            1  => (object)['id' => 1,  'name' => 'Alice',   'age' => 20, 'dept' => 'Engineering'],
-            2  => (object)['id' => 2,  'name' => 'Bob',     'age' => 25, 'dept' => 'Sales'],
-            3  => (object)['id' => 3,  'name' => 'Carol',   'age' => 30, 'dept' => 'Engineering'],
-            4  => (object)['id' => 4,  'name' => 'Dave',    'age' => 35, 'dept' => 'Sales'],
-            5  => (object)['id' => 5,  'name' => 'Eve',     'age' => 40, 'dept' => 'Marketing'],
-            6  => (object)['id' => 6,  'name' => 'Frank',   'age' => 45, 'dept' => 'Engineering'],
-            7  => (object)['id' => 7,  'name' => 'Grace',   'age' => 50, 'dept' => 'Sales'],
-            8  => (object)['id' => 8,  'name' => 'Henry',   'age' => 55, 'dept' => 'Marketing'],
-            9  => (object)['id' => 9,  'name' => 'Ivy',     'age' => 60, 'dept' => 'Engineering'],
-            10 => (object)['id' => 10, 'name' => 'Jack',    'age' => 65, 'dept' => 'Sales'],
-        ]);
+        return new GeneratorTable(
+            fn() => yield from [
+                1  => (object)['id' => 1,  'name' => 'Alice',   'age' => 20, 'dept' => 'Engineering'],
+                2  => (object)['id' => 2,  'name' => 'Bob',     'age' => 25, 'dept' => 'Sales'],
+                3  => (object)['id' => 3,  'name' => 'Carol',   'age' => 30, 'dept' => 'Engineering'],
+                4  => (object)['id' => 4,  'name' => 'Dave',    'age' => 35, 'dept' => 'Sales'],
+                5  => (object)['id' => 5,  'name' => 'Eve',     'age' => 40, 'dept' => 'Marketing'],
+                6  => (object)['id' => 6,  'name' => 'Frank',   'age' => 45, 'dept' => 'Engineering'],
+                7  => (object)['id' => 7,  'name' => 'Grace',   'age' => 50, 'dept' => 'Sales'],
+                8  => (object)['id' => 8,  'name' => 'Henry',   'age' => 55, 'dept' => 'Marketing'],
+                9  => (object)['id' => 9,  'name' => 'Ivy',     'age' => 60, 'dept' => 'Engineering'],
+                10 => (object)['id' => 10, 'name' => 'Jack',    'age' => 65, 'dept' => 'Sales'],
+            ],
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('name', ColumnType::Text),
+            new ColumnDef('age', ColumnType::Int),
+            new ColumnDef('dept', ColumnType::Text),
+        );
     }
 
     // =========================================================================

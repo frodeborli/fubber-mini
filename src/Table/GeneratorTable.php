@@ -8,35 +8,32 @@ use Traversable;
  * Simple table backed by a generator/closure
  *
  * The closure must return a generator that yields key => stdClass pairs.
- * Column definitions are inferred from the first row's properties.
+ * Column definitions must be provided explicitly.
  *
  * ```php
- * $table = new GeneratorTable(function() {
- *     yield 1 => (object)['id' => 1, 'name' => 'Alice'];
- *     yield 2 => (object)['id' => 2, 'name' => 'Bob'];
- * });
+ * $table = new GeneratorTable(
+ *     function() {
+ *         yield 1 => (object)['id' => 1, 'name' => 'Alice'];
+ *         yield 2 => (object)['id' => 2, 'name' => 'Bob'];
+ *     },
+ *     new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+ *     new ColumnDef('name', ColumnType::Text),
+ * );
  * ```
  *
- * The closure is called fresh each time the table is iterated, allowing
- * for arbitrarily large data sources without buffering.
+ * Small result sets (≤200 rows) are cached after first iteration for
+ * efficient repeated access. Larger result sets stream without buffering.
  */
 class GeneratorTable extends AbstractTable
 {
     private Closure $generator;
 
-    public function __construct(Closure $generator)
+    public function __construct(Closure $generator, ColumnDef ...$columns)
     {
-        $this->generator = $generator;
-
-        // Peek at first row to infer columns
-        $columns = [];
-        foreach ($generator() as $row) {
-            foreach ((array)$row as $name => $value) {
-                $columns[] = new ColumnDef($name);
-            }
-            break;
+        if (empty($columns)) {
+            throw new \InvalidArgumentException('GeneratorTable requires at least one column');
         }
-
+        $this->generator = $generator;
         parent::__construct(...$columns);
     }
 

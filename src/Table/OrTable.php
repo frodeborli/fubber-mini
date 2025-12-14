@@ -135,10 +135,24 @@ class OrTable extends AbstractTableWrapper implements PredicateInterface
     // Don't push or() down - wrap in another OrTable or handle locally
     // -------------------------------------------------------------------------
 
+    /**
+     * Restore absorbed pagination to a replacement table
+     */
+    private function withPagination(TableInterface $table): TableInterface
+    {
+        if ($this->limit !== null) {
+            $table = $table->limit($this->limit);
+        }
+        if ($this->offset !== 0) {
+            $table = $table->offset($this->offset);
+        }
+        return $table;
+    }
+
     public function or(TableInterface ...$predicates): TableInterface
     {
-        // Merge predicates into a new OrTable
+        // Merge predicates into a new OrTable, restoring absorbed pagination
         $allPredicates = [...$this->predicates, ...$predicates];
-        return new self($this->source, ...$allPredicates);
+        return $this->withPagination(new self($this->source, ...$allPredicates));
     }
 }

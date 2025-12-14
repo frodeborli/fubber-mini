@@ -48,6 +48,11 @@ abstract class AbstractTableWrapper extends AbstractTable
         return $this->source->getColumns();
     }
 
+    public function getAllColumns(): array
+    {
+        return $this->source->getAllColumns();
+    }
+
     public function columns(string ...$columns): TableInterface
     {
         $c = clone $this;
