@@ -107,7 +107,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
             // Handle non-primary indexes
             if ($col->index === IndexType::Index || $col->index === IndexType::Unique) {
                 $indexCols = [$col->name, ...$col->indexWith];
-                $indexName = 'idx_' . implode('_', $indexCols);
+                $indexName = $this->quoteIdentifier('idx_' . implode('_', $indexCols));
                 $unique = $col->index === IndexType::Unique ? 'UNIQUE ' : '';
                 $indexes[] = "CREATE {$unique}INDEX {$indexName} ON {$this->tableName} ("
                     . implode(', ', array_map(fn($c) => $this->quoteIdentifier($c), $indexCols))
@@ -154,9 +154,10 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
     {
         $sets = [];
         $params = [];
+        $i = 0;
 
         foreach ($changes as $col => $value) {
-            $paramName = ':set_' . $col;
+            $paramName = ':set_' . ($i++);
             $sets[] = $this->quoteIdentifier($col) . ' = ' . $paramName;
             $params[$paramName] = $value;
         }
