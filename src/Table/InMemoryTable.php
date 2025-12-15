@@ -77,6 +77,14 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
     }
 
     /**
+     * Quote a SQLite identifier (column/table name).
+     */
+    private function quoteIdentifier(string $name): string
+    {
+        return '"' . str_replace('"', '""', $name) . '"';
+    }
+
+    /**
      * Create the SQLite table with proper schema
      */
     private function createTable(array $columns): void
@@ -86,7 +94,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         $primaryKey = null;
 
         foreach ($columns as $col) {
-            $def = $this->db->escapeString($col->name) . ' ' . $col->type->sqlType();
+            $def = $this->quoteIdentifier($col->name) . ' ' . $col->type->sqlType();
 
             if ($col->index === IndexType::Primary) {
                 // INTEGER PRIMARY KEY becomes rowid alias in SQLite
@@ -102,7 +110,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
                 $indexName = 'idx_' . implode('_', $indexCols);
                 $unique = $col->index === IndexType::Unique ? 'UNIQUE ' : '';
                 $indexes[] = "CREATE {$unique}INDEX {$indexName} ON {$this->tableName} ("
-                    . implode(', ', array_map(fn($c) => $this->db->escapeString($c), $indexCols))
+                    . implode(', ', array_map(fn($c) => $this->quoteIdentifier($c), $indexCols))
                     . ')';
             }
         }
@@ -126,7 +134,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         $values = [];
 
         foreach ($row as $col => $value) {
-            $columns[] = $this->db->escapeString($col);
+            $columns[] = $this->quoteIdentifier($col);
             $placeholders[] = '?';
             $values[] = $value;
         }
@@ -149,7 +157,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
 
         foreach ($changes as $col => $value) {
             $paramName = ':set_' . $col;
-            $sets[] = $this->db->escapeString($col) . ' = ' . $paramName;
+            $sets[] = $this->quoteIdentifier($col) . ' = ' . $paramName;
             $params[$paramName] = $value;
         }
 
@@ -579,7 +587,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         $params = [];
 
         foreach ($filters as $filter) {
-            $col = $this->db->escapeString($filter['column']);
+            $col = $this->quoteIdentifier($filter['column']);
 
             if ($filter['op'] === 'IS') {
                 $conditions[] = "$col IS NULL";
@@ -614,7 +622,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
 
         $parts = [];
         foreach ($this->orderBy as $order) {
-            $col = $this->db->escapeString($order->column);
+            $col = $this->quoteIdentifier($order->column);
             $dir = $order->asc ? 'ASC' : 'DESC';
             $parts[] = "$col $dir";
         }
@@ -654,7 +662,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
 
         // Use _rowid_ with alias to avoid conflict with INTEGER PRIMARY KEY columns
         $selectList = '_rowid_ AS __rowid__, ' . implode(', ', array_map(
-            fn($c) => $this->db->escapeString($c),
+            fn($c) => $this->quoteIdentifier($c),
             $selectCols
         ));
 
@@ -681,6 +689,33 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
 
             yield $rowid => (object) $row;
         }
+    }
+
+    public function load(string|int $rowId): ?object
+    {
+        $visibleCols = array_keys($this->getColumns());
+        $selectList = implode(', ', array_map(
+            fn($c) => $this->quoteIdentifier($c),
+            $visibleCols
+        ));
+
+        $sql = "SELECT $selectList FROM {$this->tableName} WHERE _rowid_ = :rowid";
+
+        [$whereSql, $whereParams] = $this->buildWhereClause();
+        if ($whereSql) {
+            $sql = "SELECT $selectList FROM {$this->tableName} WHERE _rowid_ = :rowid AND ($whereSql)";
+        }
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->bindValue(':rowid', $rowId);
+        foreach ($whereParams as $name => $value) {
+            $stmt->bindValue($name, $value);
+        }
+
+        $result = $stmt->execute();
+        $row = $result->fetchArray(SQLITE3_ASSOC);
+
+        return $row ? (object) $row : null;
     }
 
     public function count(): int
