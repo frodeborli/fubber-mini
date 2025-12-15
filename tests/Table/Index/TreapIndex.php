@@ -48,13 +48,13 @@ $test = new class extends Test {
     {
         $index = new TreapIndex();
 
-        $this->assertSame(0, count($index));
+        $this->assertSame(0, $index->keyCount());
 
         $index->insert('a', 1);
         $index->insert('a', 2);
         $index->insert('b', 3);
 
-        $this->assertSame(2, count($index)); // 2 unique keys
+        $this->assertSame(2, $index->keyCount()); // 2 unique keys
     }
 
     // =========================================================================
@@ -302,7 +302,7 @@ $test = new class extends Test {
             $index->insert(sprintf('%03d', $i), $i);
         }
 
-        $this->assertSame(100, count($index));
+        $this->assertSame(100, $index->keyCount());
 
         $results = iterator_to_array($index->range());
         $expected = range(0, 99);
@@ -364,7 +364,7 @@ $test = new class extends Test {
     {
         $index = new TreapIndex();
 
-        $this->assertSame(0, count($index));
+        $this->assertSame(0, $index->keyCount());
         $this->assertSame([], iterator_to_array($index->range()));
         $this->assertSame([], iterator_to_array($index->eq('any')));
         $this->assertFalse($index->has('any'));
@@ -410,19 +410,19 @@ $test = new class extends Test {
         $index->insert('b', 2);
         $index->insert('c', 3);
 
-        $this->assertSame(3, count($index));
+        $this->assertSame(3, $index->keyCount());
 
         // Trigger migration
         iterator_to_array($index->range());
 
-        $this->assertSame(3, count($index));
+        $this->assertSame(3, $index->keyCount());
 
         // Insert and delete in treap mode
         $index->insert('d', 4);
-        $this->assertSame(4, count($index));
+        $this->assertSame(4, $index->keyCount());
 
         $index->delete('a', 1);
-        $this->assertSame(3, count($index));
+        $this->assertSame(3, $index->keyCount());
     }
 };
 

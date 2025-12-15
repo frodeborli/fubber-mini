@@ -13,7 +13,7 @@ use Traversable;
  *
  * This avoids merge overhead by using only one structure at a time for range().
  */
-final class TreapIndex implements IndexInterface, \Countable
+final class TreapIndex implements IndexInterface
 {
     private const MODE_HASH = 0;
     private const MODE_SORTED = 1;
@@ -30,6 +30,31 @@ final class TreapIndex implements IndexInterface, \Countable
 
     /** @var ?TreapNode Treap root (MODE_TREAP only) */
     private ?TreapNode $treap = null;
+
+    /**
+     * Build index from a generator function.
+     * Generator should yield [string $key, int $rowId] pairs.
+     */
+    public static function fromGenerator(\Closure $fn): self
+    {
+        $index = new self();
+        foreach ($fn() as [$key, $rowId]) {
+            $index->hash[$key] = ($index->hash[$key] ?? '') . pack('Q', $rowId);
+        }
+        return $index;
+    }
+
+    /**
+     * Build index from array of [key, rowId] pairs.
+     */
+    public static function fromArray(array $rows): self
+    {
+        $index = new self();
+        foreach ($rows as [$key, $rowId]) {
+            $index->hash[$key] = ($index->hash[$key] ?? '') . pack('Q', $rowId);
+        }
+        return $index;
+    }
 
     public function insert(string $key, int $rowId): void
     {
@@ -91,9 +116,55 @@ final class TreapIndex implements IndexInterface, \Countable
         }
     }
 
-    public function count(): int
+    /**
+     * Count rowIds for a specific key.
+     */
+    public function count(string $key): int
+    {
+        return intdiv(strlen($this->hash[$key] ?? ''), 8);
+    }
+
+    /**
+     * Count unique keys.
+     */
+    public function keyCount(): int
     {
         return count($this->hash);
+    }
+
+    /**
+     * Count total rowIds across all keys.
+     */
+    public function rowCount(): int
+    {
+        $sum = 0;
+        foreach ($this->hash as $blob) {
+            $sum += strlen($blob);
+        }
+        return intdiv($sum, 8);
+    }
+
+    /**
+     * Clear all data from the index.
+     */
+    public function clear(): void
+    {
+        $this->hash = [];
+        $this->sorted = null;
+        $this->treap = null;
+        $this->mode = self::MODE_HASH;
+    }
+
+    /**
+     * Count rowIds in a range.
+     */
+    public function countRange(?string $start = null, ?string $end = null): int
+    {
+        $count = 0;
+        foreach ($this->range($start, $end) as $_) {
+            $count++;
+        }
+        return $count;
     }
 
     public function range(?string $start = null, ?string $end = null, bool $reverse = false): Traversable
