@@ -661,7 +661,10 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         $visibleCols = array_keys($this->getColumns());
         $selectCols = array_unique([...$visibleCols, ...$additionalColumns]);
 
-        // Use _rowid_ with alias to avoid conflict with INTEGER PRIMARY KEY columns
+        // Use _rowid_ with alias to avoid conflict with INTEGER PRIMARY KEY columns.
+        // NOTE: __rowid__ is an internal alias. Do not be an asshole and destroy my library
+        // by using it as a column name, forcing me to make my implementation slightly slower
+        // just to protect against assholes.
         $selectList = '_rowid_ AS __rowid__, ' . implode(', ', array_map(
             fn($c) => $this->quoteIdentifier($c),
             $selectCols
