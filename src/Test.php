@@ -39,9 +39,12 @@ abstract class Test
     private ?string $expectedExceptionClass = null;
 
     /**
-     * Run all test methods and return exit code
+     * Run all test methods and exit with appropriate code
+     *
+     * @param bool $exit Whether to call exit() with the result (default: true)
+     * @return int Exit code (0 = all passed, 1 = failures)
      */
-    public function run(): int
+    public function run(bool $exit = true): int
     {
         $methods = $this->getTestMethods();
         $passed = 0;
@@ -102,7 +105,13 @@ abstract class Test
             echo "❌ $failed of " . ($passed + $failed) . " test(s) failed\n";
         }
 
-        return $failed > 0 ? 1 : 0;
+        $exitCode = $failed > 0 ? 1 : 0;
+
+        if ($exit) {
+            exit($exitCode);
+        }
+
+        return $exitCode;
     }
 
     /**
