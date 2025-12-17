@@ -4,15 +4,23 @@
 /**
  * Mini Framework Test Runner
  *
- * Usage:
- *   mini test                    Run tests in tests/ (default)
- *   mini test tests/             Run tests in specified directory
- *   mini test tests/Auth.php     Run single test file
- *   mini test tests/ Router      Run tests matching "Router"
- *   mini test --list             List available tests
+ * Finds and runs test files, reports results.
  */
 
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use mini\Test;
+
 $args = array_slice($argv, 1);
+$interrupted = false;
+
+// Signal handling
+if (function_exists('pcntl_signal')) {
+    pcntl_signal(SIGINT, function() use (&$interrupted) {
+        $interrupted = true;
+    });
+    pcntl_async_signals(true);
+}
 
 // Parse arguments
 $path = null;
@@ -32,33 +40,17 @@ foreach ($args as $arg) {
     }
 }
 
-// Default to tests/ in current directory
-if ($path === null) {
-    $path = getcwd() . '/tests';
-}
-
-// Resolve to absolute path
-$path = realpath($path);
+$path = $path ? realpath($path) : realpath(getcwd() . '/tests');
 if ($path === false) {
     fwrite(STDERR, "Error: Path not found\n");
     exit(1);
 }
 
-// Collect test files
-$testFiles = [];
-
-if (is_file($path)) {
-    $testFiles[] = $path;
-} else {
-    $testFiles = findTestFiles($path);
-}
-
-// Apply filter
+$testFiles = is_file($path) ? [$path] : findTestFiles($path);
 if ($filter) {
     $testFiles = array_filter($testFiles, fn($f) => stripos(basename($f), $filter) !== false);
 }
 
-// List mode
 if ($listMode) {
     foreach ($testFiles as $file) {
         echo basename($file, '.php') . "\n";
@@ -72,86 +64,56 @@ if (empty($testFiles)) {
 }
 
 // Run tests
-echo "Running " . count($testFiles) . " test(s)...\n\n";
-
 $passed = 0;
 $failed = 0;
-$failedTests = [];
-
-// Base path for display
 $basePath = is_file($path) ? dirname($path) : $path;
 
+echo "Running " . count($testFiles) . " test(s)...\n\n";
+
 foreach ($testFiles as $file) {
-    // Show relative path from test directory
-    $name = str_replace($basePath . '/', '', $file);
-    $name = preg_replace('/\.php$/', '', $name);
+    if ($interrupted) break;
 
-    // Run test in subprocess for isolation
-    // Enable assertions and make them throw exceptions
-    $cmd = sprintf('php -d zend.assertions=1 -d assert.exception=1 %s 2>&1', escapeshellarg($file));
-    $output = [];
-    $exitCode = 0;
-    exec($cmd, $output, $exitCode);
+    $name = preg_replace('/\.php$/', '', str_replace($basePath . '/', '', $file));
+    echo "● $name\n";
 
-    if ($exitCode === 0) {
-        echo "✓ $name\n";
-        $passed++;
-    } else {
-        echo "✗ $name\n";
-        $failedTests[$name] = implode("\n", $output);
-        $failed++;
+    $result = Test::runTestFile($file);
+
+    if ($interrupted) {
+        echo "\nInterrupted.\n";
+        break;
     }
-}
 
-echo "\n";
-
-// Show failure details
-if ($failed > 0) {
-    echo "─────────────────────────────────────────\n";
-    echo "FAILURES:\n\n";
-    foreach ($failedTests as $name => $output) {
-        echo "[$name]\n";
-        echo $output . "\n\n";
-    }
+    $result['exitCode'] === 0 ? $passed++ : $failed++;
 }
 
 // Summary
-echo "─────────────────────────────────────────\n";
+echo "\n─────────────────────────────────────────\n";
+if ($interrupted) {
+    $remaining = count($testFiles) - $passed - $failed;
+    echo "Passed: $passed, Failed: $failed, Skipped: $remaining (interrupted)\n";
+    exit(130);
+}
 echo "Passed: $passed, Failed: $failed\n";
-
 exit($failed > 0 ? 1 : 0);
 
 // --- Functions ---
 
-function findTestFiles(string $dir): array
-{
+function findTestFiles(string $dir): array {
     $files = [];
+    $skip = ['/^debug_/', '/^_/', '/benchmark/i', '/profile/i', '/^assert$/'];
 
-    // Skip patterns
-    $skipPrefixes = ['debug_', 'benchmark-', '_'];
-    $skipNames = ['assert'];
-
-    $iterator = new RecursiveIteratorIterator(
+    $iter = new RecursiveIteratorIterator(
         new RecursiveDirectoryIterator($dir, RecursiveDirectoryIterator::SKIP_DOTS)
     );
 
-    foreach ($iterator as $file) {
+    foreach ($iter as $file) {
         if ($file->getExtension() !== 'php') continue;
-
         $name = $file->getBasename('.php');
         $path = $file->getPathname();
-
-        // Skip if any parent directory starts with _
         if (preg_match('#[/\\\\]_[^/\\\\]*[/\\\\]#', $path)) continue;
-
-        // Skip helper/utility files
-        if (in_array($name, $skipNames)) continue;
-
-        // Skip by prefix
-        foreach ($skipPrefixes as $prefix) {
-            if (str_starts_with($name, $prefix)) continue 2;
+        foreach ($skip as $pattern) {
+            if (preg_match($pattern, $name)) continue 2;
         }
-
         $files[] = $path;
     }
 
@@ -159,13 +121,11 @@ function findTestFiles(string $dir): array
     return $files;
 }
 
-function showHelp(): void
-{
+function showHelp(): void {
     echo <<<'HELP'
 Mini Framework Test Runner
 
-Usage:
-  mini test [path] [filter]
+Usage: mini test [path] [filter]
 
 Arguments:
   path      Directory or file to test (default: tests/)
@@ -176,21 +136,9 @@ Options:
   --help, -h    Show this help
 
 Examples:
-  mini test                     Run all tests in tests/
-  mini test tests/              Run all tests in tests/
+  mini test                     Run all tests
   mini test tests/Auth.php      Run single test file
   mini test tests/ Router       Run tests matching "Router"
-  mini test --list              List available tests
-
-Writing Tests:
-  A test is a PHP file that exits 0 on success, non-zero on failure.
-  Use assert() or include tests/assert.php for helpers.
-
-  <?php
-  require __DIR__ . '/assert.php';
-
-  assert_eq('expected', actualFunction());
-  echo "✓ Test passed\n";
 
 HELP;
 }

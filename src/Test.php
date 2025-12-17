@@ -2,14 +2,16 @@
 
 namespace mini;
 
+use Composer\Autoload\ClassLoader;
+use ReflectionClass;
+
 /**
  * Base class for structured tests
  *
  * Usage:
- *   // tests/Mini/container.php
  *   $test = new class extends mini\Test {
- *       public function testSingletonReturnsSameInstance(): void {
- *           $this->assertSame($a, $b);
+ *       public function testSomething(): void {
+ *           $this->assertSame($expected, $actual);
  *       }
  *   };
  *   exit($test->run());
@@ -17,120 +19,252 @@ namespace mini;
  * Test methods must be public and start with "test".
  * Method names are converted from camelCase to readable output:
  *   testSingletonReturnsSameInstance → "Singleton returns same instance"
- *
- * Lifecycle:
- *   1. setUp() is called once (override to do pre-bootstrap setup)
- *   2. bootstrap() is called automatically if setUp() didn't call it
- *   3. All test* methods run in sequence
- *
- * If you need to register services or configure Mini before bootstrap,
- * override setUp() and call bootstrap() yourself after your setup:
- *
- *   protected function setUp(): void {
- *       Mini::$mini->set('service', $mock);
- *       \mini\bootstrap();
- *   }
  */
 abstract class Test
 {
-    private array $results = [];
     private array $logs = [];
-    private ?string $currentTest = null;
     private ?string $expectedExceptionClass = null;
 
+    // Output state
+    private bool $isTty;
+    private bool $verbose;
+    private int $passed = 0;
+    private int $failed = 0;
+    private ?string $currentTestName = null;
+    private string $normal = '';
+    private string $white = '';
+    private string $green = '';
+    private string $red = '';
+    private float $startTime = 0;
+    private string $indent = '';
+    /** @var resource|null File descriptor 3 for reporting to test runner */
+    private $runnerPipe = null;
+
     /**
-     * Run all test methods and exit with appropriate code
+     * Run a test file in a subprocess
      *
-     * @param bool $exit Whether to call exit() with the result (default: true)
-     * @return int Exit code (0 = all passed, 1 = failures)
+     * @return array{exitCode: int, info: ?array}
      */
+    public static function runTestFile(string $path): array
+    {
+        $depth = ((int) getenv('MINI_TEST_RUNNER')) + 1;
+
+        // Pass env to child without modifying parent's environment
+        $env = getenv();
+        $env['MINI_TEST_RUNNER'] = (string) $depth;
+
+        $process = proc_open(
+            ['php', '-d', 'zend.assertions=1', '-d', 'assert.exception=1', $path],
+            [STDIN, STDOUT, STDERR, 3 => ['pipe', 'w']],
+            $pipes,
+            null,
+            $env
+        );
+
+        $info = null;
+        if (is_resource($process)) {
+            $json = stream_get_contents($pipes[3]);
+            fclose($pipes[3]);
+            if ($json) {
+                $info = json_decode($json, true);
+            }
+            $exitCode = proc_close($process);
+        } else {
+            $exitCode = 1;
+        }
+
+        return ['exitCode' => $exitCode, 'info' => $info];
+    }
+
+    private function getIndentString(): string
+    {
+        $depth = (int) getenv('MINI_TEST_RUNNER') ?: 0;
+        return str_repeat('  ', 1 + $depth);
+    }
+
+
     public function run(bool $exit = true): int
     {
-        $methods = $this->getTestMethods();
-        $passed = 0;
-        $failed = 0;
+        $this->isTty = stream_isatty(STDOUT);
+        $this->indent = $this->getIndentString();
+        if ($this->isTty) {
+            $this->normal = "\033[0m";
+            $this->green = "\033[92m";
+            $this->red = "\033[91m";
+            $this->white = "\033[97m";
+        }
+        $this->verbose = in_array('-v', $GLOBALS['argv']) || (bool) getenv('MINI_TEST_RUNNER');
 
-        // Call setUp once before all tests
+        // Open fd 3 for reporting to test runner if available
+        if (getenv('MINI_TEST_RUNNER')) {
+            $this->runnerPipe = @fopen('php://fd/3', 'w');
+        }
+
         $this->setUp();
 
-        // If setUp didn't bootstrap, do it now
         if (Mini::$mini->phase->getCurrentState() !== Phase::Ready) {
             \mini\bootstrap();
         }
 
-        foreach ($methods as $method) {
-            $this->currentTest = $method;
-            $this->logs[$method] = [];
+        foreach ($this->getTestMethods() as $method) {
             $this->expectedExceptionClass = null;
+            $this->logs[$method] = [];
             $name = $this->methodToName($method);
+
+            $this->startTest($name);
 
             try {
                 $this->$method();
 
-                // If we expected an exception but didn't get one
                 if ($this->expectedExceptionClass !== null) {
                     throw new \AssertionError("Expected {$this->expectedExceptionClass} to be thrown");
                 }
 
-                echo "✓ $name\n";
-                $this->results[$method] = ['status' => 'passed'];
-                $passed++;
+                $this->endTest(true);
             } catch (\Throwable $e) {
-                // Check if this was an expected exception
                 if ($this->expectedExceptionClass !== null && $e instanceof $this->expectedExceptionClass) {
-                    echo "✓ $name\n";
-                    $this->results[$method] = ['status' => 'passed'];
-                    $passed++;
+                    $this->endTest(true);
                 } else {
-                    echo "✗ $name\n";
-                    echo "  " . $e->getMessage() . "\n";
-                    if ($e->getFile() && $e->getLine()) {
-                        echo "  at " . basename($e->getFile()) . ":" . $e->getLine() . "\n";
-                    }
-                    $this->results[$method] = ['status' => 'failed', 'error' => $e];
-                    $failed++;
+                    $this->endTest(false, $e);
                 }
             }
 
-            // Output any logs for this test
-            foreach ($this->logs[$method] as $log) {
-                echo "  → $log\n";
+            // Show logs (only in standalone mode)
+            if (!$this->verbose) {
+                foreach ($this->logs[$method] as $log) {
+                    echo "  → $log\n";
+                }
             }
         }
 
-        echo "\n";
-        if ($failed === 0) {
-            echo "✅ All $passed test(s) passed!\n";
-        } else {
-            echo "❌ $failed of " . ($passed + $failed) . " test(s) failed\n";
-        }
+        $this->printSummary();
+        $this->reportToRunner([
+            'passed' => $this->passed,
+            'failed' => $this->failed,
+        ]);
 
-        $exitCode = $failed > 0 ? 1 : 0;
-
+        $exitCode = $this->failed > 0 ? 1 : 0;
         if ($exit) {
             exit($exitCode);
         }
-
         return $exitCode;
     }
 
     /**
-     * Override to set up state before tests run
-     *
-     * Called once before all test methods. If you need to configure
-     * services before bootstrap, do it here and call bootstrap() yourself.
-     * If you don't call bootstrap(), it will be called automatically
-     * after setUp() returns.
+     * Write structured data to the test runner via fd 3
      */
+    private function reportToRunner(array $data): void
+    {
+        if ($this->runnerPipe) {
+            fwrite($this->runnerPipe, json_encode($data) . "\n");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Output methods
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private function startTest(string $name): void
+    {
+        $this->startTime = microtime(true);
+        $this->currentTestName = $name;
+
+        if ($this->verbose) {
+            if ($this->isTty) {
+                // Show name, will be cleared on success
+                echo "{$this->indent}  {$this->white}]{$this->normal} $name\r{$this->indent}{$this->white}[{$this->normal}";
+            } else {
+                $displayName = strlen($name) >= 50 ? substr($name, 0, 45) . '...' : $name;
+                echo "{$this->indent}" . str_pad($displayName, 50);
+            }
+        }
+        ob_flush();
+    }
+
+    private function endTest(bool $success, ?\Throwable $error = null): void
+    {
+        $name = $this->currentTestName;
+
+        if ($success) {
+            $this->passed++;
+            if ($this->verbose) {
+                if ($this->isTty) {
+                    $time = microtime(true) - $this->startTime;
+                    if ($time > 3) {
+                        if ($time > 1) {
+                            $timeStr = number_format($time, 3) . ' s';
+                        } else {
+                            $timeStr = number_format($time * 1000, 1) . 'ms';
+                        }
+                        echo "\r{$this->indent}{$this->white}[{$this->green}✓{$this->white}]{$this->normal} $name ({$this->red}" . $timeStr . "{$this->normal})\n";
+                    } else {
+                        echo "\r\033[2K"; // Clear line
+                    }
+                } else {
+                    echo "SUCCESS\n";
+                }
+            }
+        } else {
+            $this->failed++;
+            if ($this->verbose) {
+                if ($this->isTty) {
+                    echo "\r{$this->indent}{$this->white}[{$this->red}✗{$this->white}]{$this->normal} $name\n";
+                } else {
+                    echo "FAIL\n";
+                }
+            } else {
+                echo "{$this->indent}" . $this->currentTestName . " {$this->red}FAIL{$this->normal}\n";
+            }
+            if ($error !== null) {
+                echo rtrim($this->indentText($this->cleanup($error))) . "\n\n";
+            }
+        }
+    }
+
+    private function printSummary(): void
+    {
+        if ($this->verbose) {
+            if ($this->failed > 0) {
+                echo "{$this->indent}✗ {$this->failed} failed, {$this->passed} passed\n";
+            }
+        } else {
+            if ($this->failed === 0) {
+                echo "{$this->indent}✅ All {$this->passed} test(s) passed!\n";
+            } else {
+                $total = $this->passed + $this->failed;
+                echo "{$this->indent}❌ {$this->failed} of $total test(s) failed\n";
+            }
+        }
+    }
+
+    private function indentText(string $text): string {
+        $indent = $this->indent . '  ';
+        return preg_replace('/^/m', $indent, $text);
+    }
+
+    private function cleanup(string $text): string {
+        if (class_exists(ClassLoader::class)) {
+            $rc = new ReflectionClass(ClassLoader::class);
+            $prefixDir = dirname($rc->getFileName(), 3) . '/';
+        } else {
+            $prefixDir = getcwd() . '/';
+        }
+        return str_replace($prefixDir, '', $text);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Lifecycle
+    // ─────────────────────────────────────────────────────────────────────────
+
     protected function setUp(): void {}
 
-    /**
-     * Log intermediate output during a test
-     */
     protected function log(string $message): void
     {
-        if ($this->currentTest !== null) {
-            $this->logs[$this->currentTest][] = $message;
+        if ($this->currentTestName !== null) {
+            $key = array_key_last($this->logs);
+            if ($key !== null) {
+                $this->logs[$key][] = $message;
+            }
         }
     }
 
@@ -324,16 +458,6 @@ abstract class Test
         }
     }
 
-    /**
-     * Assert that a callable throws an exception
-     *
-     * Usage:
-     *   $this->expectException(\InvalidArgumentException::class);
-     *   $codeUnderTest();
-     *
-     * Note: This stores the expected exception and checks it at the end of the test.
-     * For more control, use assertThrows() which wraps the callable.
-     */
     protected function expectException(string $exceptionClass): void
     {
         $this->expectedExceptionClass = $exceptionClass;
@@ -348,9 +472,6 @@ abstract class Test
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Get all public methods starting with "test"
-     */
     private function getTestMethods(): array
     {
         $methods = [];
@@ -365,26 +486,13 @@ abstract class Test
         return $methods;
     }
 
-    /**
-     * Convert camelCase method name to readable string
-     *
-     * testSingletonReturnsSameInstance → "Singleton returns same instance"
-     */
     private function methodToName(string $method): string
     {
-        // Remove "test" prefix
         $name = substr($method, 4);
-
-        // Insert spaces before uppercase letters
         $name = preg_replace('/([a-z])([A-Z])/', '$1 $2', $name);
-
-        // Lowercase and capitalize first letter
         return ucfirst(strtolower($name));
     }
 
-    /**
-     * Export value for error messages
-     */
     private function export(mixed $value): string
     {
         if (is_object($value)) {
