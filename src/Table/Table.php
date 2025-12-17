@@ -35,6 +35,8 @@ use Traversable;
  */
 final class Table implements TableInterface
 {
+    use TablePropertiesTrait;
+
     private TableInterface $source;
 
     /** @var array<string|int, list<array{string, string}>> param => [[column, operator], ...] */
@@ -384,5 +386,10 @@ final class Table implements TableInterface
             );
         }
         return $this->getEffectiveSource()->load($rowId);
+    }
+
+    public function withAlias(?string $tableAlias = null, array $columnAliases = []): TableInterface
+    {
+        return new AliasTable($this, $tableAlias, $columnAliases);
     }
 }

@@ -4,6 +4,9 @@ namespace mini\Database;
 
 use mini\Table\SetInterface;
 use mini\Table\TableInterface;
+use mini\Table\TablePropertiesTrait;
+use mini\Table\AliasTable;
+use mini\Table\DistinctTable;
 use mini\Parsing\GenericParser;
 use mini\Parsing\TextNode;
 use stdClass;
@@ -16,6 +19,8 @@ use stdClass;
  */
 final class PartialQuery implements ResultSetInterface, TableInterface
 {
+    use TablePropertiesTrait;
+
     private DatabaseInterface $db;
 
     /**
@@ -337,7 +342,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      *
      * For SQL databases, uses NOT IN subquery or EXCEPT where supported.
      */
-    public function except(TableInterface $other): TableInterface
+    public function except(SetInterface $other): TableInterface
     {
         if (!($other instanceof self)) {
             throw new \InvalidArgumentException("PartialQuery::except() requires another PartialQuery");
@@ -457,7 +462,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      *
      * Requires columns() to be called first to specify which columns to check.
      */
-    public function has(stdClass $member): bool
+    public function has(object $member): bool
     {
         if ($this->select === null) {
             throw new \RuntimeException("has() requires columns() or select() to be called first");
@@ -481,7 +486,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     /**
      * Set ORDER BY clause (overwrites previous)
      */
-    public function order(string $orderSpec): self
+    public function order(?string $orderSpec): TableInterface
     {
         $new          = clone $this;
         $new->orderBy = $orderSpec;
@@ -506,6 +511,22 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         $new         = clone $this;
         $new->offset = $offset;
         return $new;
+    }
+
+    /**
+     * Return distinct rows only
+     */
+    public function distinct(): TableInterface
+    {
+        return new DistinctTable($this);
+    }
+
+    /**
+     * Alias this table/query
+     */
+    public function withAlias(?string $tableAlias = null, array $columnAliases = []): TableInterface
+    {
+        return new AliasTable($this, $tableAlias, $columnAliases);
     }
 
     /**
