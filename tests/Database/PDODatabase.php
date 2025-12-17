@@ -55,8 +55,8 @@ $test = new class extends Test {
         }
 
         $this->assertCount(2, $rows);
-        $this->assertSame('Alice', $rows[0]['name']);
-        $this->assertSame('Bob', $rows[1]['name']);
+        $this->assertSame('Alice', $rows[0]->name);
+        $this->assertSame('Bob', $rows[1]->name);
     }
 
     public function testQueryToArray(): void
@@ -67,7 +67,7 @@ $test = new class extends Test {
         $rows = \mini\db()->query('SELECT * FROM test_db')->toArray();
 
         $this->assertCount(1, $rows);
-        $this->assertSame('Test', $rows[0]['name']);
+        $this->assertSame('Test', $rows[0]->name);
     }
 
     public function testQueryOne(): void
@@ -78,7 +78,7 @@ $test = new class extends Test {
         $row = \mini\db()->queryOne('SELECT * FROM test_db ORDER BY id');
 
         $this->assertNotNull($row);
-        $this->assertSame('First', $row['name']);
+        $this->assertSame('First', $row->name);
     }
 
     public function testQueryOneReturnsNullWhenEmpty(): void
@@ -130,7 +130,7 @@ $test = new class extends Test {
 
         // Verify the row exists
         $row = \mini\db()->queryOne("SELECT * FROM test_db WHERE id = ?", [$id]);
-        $this->assertSame('Inserted', $row['name']);
+        $this->assertSame('Inserted', $row->name);
     }
 
     public function testInsertThrowsOnEmptyData(): void
@@ -228,7 +228,7 @@ $test = new class extends Test {
         $this->assertSame(1, $updated);
 
         $row = \mini\db()->queryOne("SELECT * FROM test_db WHERE id = ?", [$id]);
-        $this->assertSame('updated', $row['status']);
+        $this->assertSame('updated', $row->status);
     }
 
     public function testUpdateWithRawSql(): void
@@ -245,7 +245,7 @@ $test = new class extends Test {
         $this->assertSame(1, $updated);
 
         $row = \mini\db()->queryOne("SELECT * FROM test_db WHERE id = ?", [$id]);
-        $this->assertSame('Modified', $row['name']);
+        $this->assertSame('Modified', $row->name);
     }
 
     public function testTableExistsWithSqlite(): void

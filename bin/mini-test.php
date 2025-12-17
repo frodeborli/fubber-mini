@@ -33,10 +33,13 @@ foreach ($args as $arg) {
     } elseif ($arg === '--help' || $arg === '-h') {
         showHelp();
         exit(0);
-    } elseif ($path === null && (is_dir($arg) || is_file($arg))) {
-        $path = $arg;
-    } elseif ($filter === null && !str_starts_with($arg, '-')) {
-        $filter = $arg;
+    } elseif (!str_starts_with($arg, '-')) {
+        // Positional arg: if it's an existing path use it, otherwise it's a filter
+        if ($path === null && (is_dir($arg) || is_file($arg))) {
+            $path = $arg;
+        } elseif ($filter === null) {
+            $filter = $arg;
+        }
     }
 }
 
