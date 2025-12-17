@@ -16,7 +16,7 @@ use Traversable;
  * new FilteredTable($source, 'id', Operator::In, $setOfIds)
  * ```
  */
-class FilteredTable extends AbstractTableWrapper implements PredicateInterface
+class FilteredTable extends AbstractTableWrapper
 {
     private ColumnDef $columnDef;
 
@@ -62,32 +62,6 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
     public function getFilterValue(): mixed
     {
         return $this->value;
-    }
-
-    public function test(object $row): bool
-    {
-        // If column doesn't exist, we can't determine - return true (open world)
-        if (!property_exists($row, $this->column)) {
-            // Still need to check source predicates
-            $source = $this->getSource();
-            if ($source instanceof PredicateInterface) {
-                return $source->test($row);
-            }
-            return true;
-        }
-
-        // Check our condition
-        if (!$this->matches($row->{$this->column})) {
-            return false;
-        }
-
-        // Delegate to source if it's also a predicate
-        $source = $this->getSource();
-        if ($source instanceof PredicateInterface) {
-            return $source->test($row);
-        }
-
-        return true;
     }
 
     protected function materialize(string ...$additionalColumns): Traversable
@@ -401,6 +375,19 @@ class FilteredTable extends AbstractTableWrapper implements PredicateInterface
             return false;
         }
         return parent::has($member);
+    }
+
+    public function load(string|int $rowId): ?object
+    {
+        $row = $this->source->load($rowId);
+        if ($row === null) {
+            return null;
+        }
+        // Check if the loaded row passes our filter
+        if (!$this->test($row)) {
+            return null;
+        }
+        return $row;
     }
 
     // -------------------------------------------------------------------------

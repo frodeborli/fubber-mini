@@ -2,132 +2,282 @@
 
 namespace mini\Table;
 
-use Traversable;
-
 /**
- * Predicate table for building filter structures without data
+ * Immutable predicate for filtering conditions
  *
- * Captures filter operations by wrapping itself in FilteredTable/SortedTable.
- * Used to build query templates that can be combined with OR:
+ * A standalone class representing filter conditions that can be used with or().
+ * Supports both concrete values and bind parameters.
  *
  * ```php
- * $p = new Predicate(new ColumnDef('age'), new ColumnDef('status'));
+ * use function mini\p;
  *
- * // Build predicate structures (no data, just filter chain)
- * $young = $p->lt('age', 30);
- * $senior = $p->gte('age', 65);
- *
- * // Apply to real table with OR
- * $table->or($young, $senior);
- *
- * // Complex: (status='active' AND age<30) OR (status='vip')
- * $table->or(
- *     $p->eq('status', 'active')->lt('age', 30),
- *     $p->eq('status', 'vip')
+ * // Use the p() helper for concise syntax
+ * $users->or(
+ *     p()->eq('status', 'active'),
+ *     p()->gte('age', 65)
  * );
+ *
+ * // Chain multiple conditions (AND)
+ * p()->eq('status', 'active')->lt('age', 30)
+ *
+ * // With bind parameters
+ * p()->eqBind('id', ':id')->bind([':id' => 123])
  * ```
  */
-final class Predicate extends AbstractTable implements PredicateInterface
+final class Predicate
 {
-    public function __construct(ColumnDef ...$columns)
-    {
-        parent::__construct(...$columns);
-    }
+    /**
+     * @var list<array{column: string, operator: Operator, value: mixed, bound: bool}>
+     */
+    private array $conditions = [];
 
     /**
-     * Create a Predicate with the same schema as another table
+     * Create an empty predicate (matches everything)
      */
-    public static function from(TableInterface $source): self
+    public function __construct() {}
+
+    // -------------------------------------------------------------------------
+    // Condition methods - return new Predicate with condition added
+    // -------------------------------------------------------------------------
+
+    public function eq(string $column, int|float|string|null $value): self
     {
-        return new self(...array_values($source->getColumns()));
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Eq, 'value' => $value, 'bound' => true];
+        return $new;
     }
 
-    protected function materialize(string ...$additionalColumns): Traversable
+    public function eqBind(string $column, string $param): self
     {
-        // If the user tries to iterate a Predicate directly, something is wrong.
-        throw new \LogicException(
-            "A Predicate is a logic definition. It cannot be iterated directly. " .
-            "Did you forget to apply it to a table using \$table->or(...)?"
-        );    
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Eq, 'value' => $param, 'bound' => false];
+        return $new;
     }
 
-    public function count(): int
+    public function lt(string $column, int|float|string $value): self
     {
-        return 0;
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Lt, 'value' => $value, 'bound' => true];
+        return $new;
     }
 
-    public function exists(): bool
+    public function ltBind(string $column, string $param): self
     {
-        return false;
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Lt, 'value' => $param, 'bound' => false];
+        return $new;
     }
 
-    public function has(object $member): bool
+    public function lte(string $column, int|float|string $value): self
     {
-        return false;
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Lte, 'value' => $value, 'bound' => true];
+        return $new;
     }
 
-    public function test(object $row): bool
+    public function lteBind(string $column, string $param): self
     {
-        // Base predicate matches everything
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Lte, 'value' => $param, 'bound' => false];
+        return $new;
+    }
+
+    public function gt(string $column, int|float|string $value): self
+    {
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Gt, 'value' => $value, 'bound' => true];
+        return $new;
+    }
+
+    public function gtBind(string $column, string $param): self
+    {
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Gt, 'value' => $param, 'bound' => false];
+        return $new;
+    }
+
+    public function gte(string $column, int|float|string $value): self
+    {
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Gte, 'value' => $value, 'bound' => true];
+        return $new;
+    }
+
+    public function gteBind(string $column, string $param): self
+    {
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Gte, 'value' => $param, 'bound' => false];
+        return $new;
+    }
+
+    public function in(string $column, SetInterface $values): self
+    {
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::In, 'value' => $values, 'bound' => true];
+        return $new;
+    }
+
+    public function like(string $column, string $pattern): self
+    {
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Like, 'value' => $pattern, 'bound' => true];
+        return $new;
+    }
+
+    public function likeBind(string $column, string $param): self
+    {
+        $new = clone $this;
+        $new->conditions[] = ['column' => $column, 'operator' => Operator::Like, 'value' => $param, 'bound' => false];
+        return $new;
+    }
+
+    // -------------------------------------------------------------------------
+    // Bind parameter support
+    // -------------------------------------------------------------------------
+
+    /**
+     * Check if all parameters are bound
+     */
+    public function isBound(): bool
+    {
+        foreach ($this->conditions as $cond) {
+            if (!$cond['bound']) {
+                return false;
+            }
+        }
         return true;
     }
 
+    /**
+     * Get list of unbound parameter names
+     *
+     * @return list<string>
+     */
+    public function getUnboundParams(): array
+    {
+        $params = [];
+        foreach ($this->conditions as $cond) {
+            if (!$cond['bound']) {
+                $params[] = $cond['value'];
+            }
+        }
+        return $params;
+    }
+
+    /**
+     * Resolve bind parameters with concrete values
+     *
+     * @param array<string, mixed> $values Parameter name => value
+     */
+    public function bind(array $values): self
+    {
+        $new = clone $this;
+        foreach ($new->conditions as $i => $cond) {
+            if (!$cond['bound']) {
+                $param = $cond['value'];
+                if (!array_key_exists($param, $values)) {
+                    continue; // Leave unbound for partial binding
+                }
+                $new->conditions[$i]['value'] = $values[$param];
+                $new->conditions[$i]['bound'] = true;
+            }
+        }
+        return $new;
+    }
+
     // -------------------------------------------------------------------------
-    // Filter methods - wrap $this to capture structure
+    // Condition access
     // -------------------------------------------------------------------------
 
-    public function eq(string $column, int|float|string|null $value): PredicateInterface
+    /**
+     * Get all conditions
+     *
+     * @return list<array{column: string, operator: Operator, value: mixed, bound: bool}>
+     */
+    public function getConditions(): array
     {
-        return new FilteredTable($this, $column, Operator::Eq, $value);
+        return $this->conditions;
     }
 
-    public function lt(string $column, int|float|string $value): PredicateInterface
+    /**
+     * Check if predicate has no conditions (matches everything)
+     */
+    public function isEmpty(): bool
     {
-        return new FilteredTable($this, $column, Operator::Lt, $value);
+        return empty($this->conditions);
     }
 
-    public function lte(string $column, int|float|string $value): PredicateInterface
+    // -------------------------------------------------------------------------
+    // Row testing
+    // -------------------------------------------------------------------------
+
+    /**
+     * Test if a row matches all conditions
+     *
+     * Empty predicate (no conditions) matches everything.
+     *
+     * @throws \LogicException If there are unbound parameters
+     */
+    public function test(object $row): bool
     {
-        return new FilteredTable($this, $column, Operator::Lte, $value);
+        foreach ($this->conditions as $cond) {
+            if (!$cond['bound']) {
+                throw new \LogicException("Predicate has unbound parameter '{$cond['value']}'");
+            }
+            if (!$this->testCondition($row, $cond['column'], $cond['operator'], $cond['value'])) {
+                return false;
+            }
+        }
+        return true;
     }
 
-    public function gt(string $column, int|float|string $value): PredicateInterface
+    private function testCondition(object $row, string $column, Operator $operator, mixed $value): bool
     {
-        return new FilteredTable($this, $column, Operator::Gt, $value);
+        if (!property_exists($row, $column)) {
+            return true; // Open world assumption
+        }
+
+        $rowValue = $row->$column;
+
+        return match ($operator) {
+            Operator::Eq => $this->compareEq($rowValue, $value),
+            Operator::Lt => $rowValue !== null && $rowValue < $value,
+            Operator::Lte => $rowValue !== null && $rowValue <= $value,
+            Operator::Gt => $rowValue !== null && $rowValue > $value,
+            Operator::Gte => $rowValue !== null && $rowValue >= $value,
+            Operator::In => $this->testIn($rowValue, $column, $value),
+            Operator::Like => $this->testLike($rowValue, $value),
+        };
     }
 
-    public function gte(string $column, int|float|string $value): PredicateInterface
+    private function compareEq(mixed $rowValue, mixed $value): bool
     {
-        return new FilteredTable($this, $column, Operator::Gte, $value);
+        if ($value === null) {
+            return $rowValue === null;
+        }
+        // Use == for numeric comparison (5 == 5.0)
+        if (is_numeric($rowValue) && is_numeric($value)) {
+            return $rowValue == $value;
+        }
+        return $rowValue === $value;
     }
 
-    public function in(string $column, SetInterface $values): PredicateInterface
+    private function testIn(mixed $rowValue, string $column, SetInterface $set): bool
     {
-        return new FilteredTable($this, $column, Operator::In, $values);
+        $member = (object)[$column => $rowValue];
+        return $set->has($member);
     }
 
-    public function like(string $column, string $pattern): PredicateInterface
+    private function testLike(mixed $rowValue, string $pattern): bool
     {
-        return new FilteredTable($this, $column, Operator::Like, $pattern);
-    }
-
-    public function order(?string $spec): TableInterface
-    {
-        throw new \LogicException('Predicates cannot have ordering - use order() on the result table');
-    }
-
-    public function limit(?int $n): TableInterface
-    {
-        throw new \LogicException('Predicates cannot have limit - use limit() on the result table');
-    }
-
-    public function offset(int $n): TableInterface
-    {
-        throw new \LogicException('Predicates cannot have offset - use offset() on the result table');
-    }
-
-    public function or(TableInterface ...$predicates): TableInterface
-    {
-        throw new \LogicException('Predicates cannot have nested or() - use or() on the result table');
+        if ($rowValue === null) {
+            return false;
+        }
+        $regex = '/^' . str_replace(
+            ['%', '_'],
+            ['.*', '.'],
+            preg_quote($pattern, '/')
+        ) . '$/i';
+        return preg_match($regex, (string)$rowValue) === 1;
     }
 }

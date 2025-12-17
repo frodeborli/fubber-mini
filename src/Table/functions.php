@@ -22,3 +22,22 @@ function collator(): Collator
 {
     return Mini::$mini->get(Collator::class);
 }
+
+/**
+ * Empty predicate constant for building filter conditions
+ *
+ * Since Predicate is immutable, a single shared instance is safe.
+ *
+ * ```php
+ * use const mini\p;
+ *
+ * $users->or(
+ *     p->eq('status', 'active'),
+ *     p->eq('status', 'pending')
+ * );
+ *
+ * // Chain multiple conditions (AND)
+ * p->eq('role', 'admin')->gte('level', 5)
+ * ```
+ */
+const p = new Table\Predicate();

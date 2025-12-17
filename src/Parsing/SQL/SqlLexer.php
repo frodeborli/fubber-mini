@@ -58,6 +58,9 @@ class SqlLexer
     public const T_GROUP  = 'GROUP';
     public const T_HAVING = 'HAVING';
     public const T_BETWEEN = 'BETWEEN';
+    public const T_EXISTS = 'EXISTS';
+    public const T_UNION = 'UNION';
+    public const T_ALL = 'ALL';
     public const T_IDENTIFIER = 'IDENTIFIER';
     public const T_STRING = 'STRING';
     public const T_NUMBER = 'NUMBER';
@@ -221,6 +224,13 @@ class SqlLexer
                     continue;
                 }
 
+                // <> is alias for !=
+                if ($char === '<' && $next === '>') {
+                    $tokens[] = ['type' => self::T_OP, 'value' => '<>', 'pos' => $start];
+                    $this->cursor += 2;
+                    continue;
+                }
+
                 $tokens[] = ['type' => $type, 'value' => $char, 'pos' => $start];
                 $this->cursor++;
                 continue;
@@ -294,6 +304,9 @@ class SqlLexer
                         'GROUP' => self::T_GROUP,
                         'HAVING' => self::T_HAVING,
                         'BETWEEN' => self::T_BETWEEN,
+                        'EXISTS' => self::T_EXISTS,
+                        'UNION' => self::T_UNION,
+                        'ALL' => self::T_ALL,
                         default => self::T_IDENTIFIER
                     };
                 }

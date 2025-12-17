@@ -2,28 +2,27 @@
 
 namespace mini\Table;
 
-use stdClass;
+use mini\Table\Index\TreapIndex;
 use Traversable;
 
 /**
- * Set difference table (rows in source but NOT in excluded set)
+ * Table wrapper that removes duplicate rows
  *
- * Yields rows from source that don't exist in the excluded set.
- * Filter methods push down to source via AbstractTableWrapper.
+ * Deduplication is based on the visible columns at the time distinct() was called.
+ * Uses TreapIndex for O(1) duplicate detection during iteration.
  *
  * ```php
- * // WHERE id NOT IN (1, 2, 3)
- * $table->columns('id')->except(new Set('id', [1, 2, 3]))
+ * // Unique roles
+ * $table->columns('role')->distinct();
  *
- * // WHERE status != 'inactive'
- * $table->except($table->eq('status', 'inactive'))
+ * // Unique role+name combos, then project to role
+ * $table->columns('role', 'name')->distinct()->columns('role');
  * ```
  */
-class ExceptTable extends AbstractTableWrapper
+class DistinctTable extends AbstractTableWrapper
 {
     public function __construct(
         TableInterface $source,
-        private SetInterface $excluded,
     ) {
         // Wrap source with pagination in BarrierTable to prevent filter pushdown
         // from changing result set membership
@@ -36,6 +35,7 @@ class ExceptTable extends AbstractTableWrapper
 
     // -------------------------------------------------------------------------
     // Limit/offset must be stored locally, not pushed to source
+    // (we deduplicate first, then apply pagination)
     // -------------------------------------------------------------------------
 
     public function limit(?int $n): TableInterface
@@ -58,29 +58,35 @@ class ExceptTable extends AbstractTableWrapper
         return $c;
     }
 
+    /**
+     * Distinct of distinct is still distinct - return self
+     */
+    public function distinct(): TableInterface
+    {
+        return $this;
+    }
+
     protected function materialize(string ...$additionalColumns): Traversable
     {
-        $excluded = $this->excluded;
-        $excludedCols = array_keys($excluded->getColumns());
-        $allAdditional = array_unique([...$additionalColumns, ...$excludedCols]);
+        $seen = new TreapIndex();
+        $visibleCols = array_keys($this->getColumns());
 
         $skipped = 0;
         $emitted = 0;
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
-        foreach (parent::materialize(...$allAdditional) as $id => $row) {
-            // Build member object from excluded set's columns
-            $member = new stdClass();
-            foreach ($excludedCols as $col) {
-                $member->$col = $row->$col ?? null;
-            }
+        foreach (parent::materialize(...$additionalColumns) as $id => $row) {
+            // Build key from visible columns only
+            $key = $this->rowKey($row, $visibleCols);
 
-            // Skip if in excluded set
-            if ($excluded->has($member)) {
+            // Skip if already seen
+            if ($seen->has($key)) {
                 continue;
             }
+            $seen->insert($key, 0);
 
+            // Handle offset
             if ($skipped < $offset) {
                 $skipped++;
                 continue;
@@ -89,10 +95,25 @@ class ExceptTable extends AbstractTableWrapper
             yield $id => $row;
             $emitted++;
 
+            // Handle limit
             if ($limit !== null && $emitted >= $limit) {
                 return;
             }
         }
+    }
+
+    /**
+     * Generate a unique key for a row based on visible columns
+     */
+    private function rowKey(object $row, array $cols): string
+    {
+        $parts = [];
+        foreach ($cols as $col) {
+            $val = $row->$col ?? null;
+            // Type prefix to distinguish null from "null" string
+            $parts[] = ($val === null ? "\x00" : "\x01") . $val;
+        }
+        return implode("\x00", $parts);
     }
 
     public function count(): int
@@ -100,29 +121,7 @@ class ExceptTable extends AbstractTableWrapper
         if ($this->cachedCount !== null) {
             return $this->cachedCount;
         }
-        $count = 0;
-        foreach ($this as $_) {
-            $count++;
-        }
+        $count = iterator_count($this);
         return $this->cachedCount = $count;
     }
-
-    public function has(object $member): bool
-    {
-        // Short-circuit: if member is in excluded set, it's not in result
-        $excludedCols = array_keys($this->excluded->getColumns());
-        $excludedMember = new \stdClass();
-        foreach ($excludedCols as $col) {
-            if (!property_exists($member, $col)) {
-                // Can't check exclusion - fall back to parent
-                return parent::has($member);
-            }
-            $excludedMember->$col = $member->$col;
-        }
-        if ($this->excluded->has($excludedMember)) {
-            return false;
-        }
-        return parent::has($member);
-    }
-
 }

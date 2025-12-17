@@ -929,6 +929,53 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     }
 
     /**
+     * Get current offset
+     */
+    public function getOffset(): int
+    {
+        return $this->offset;
+    }
+
+    /**
+     * Check if any rows exist
+     */
+    public function exists(): bool
+    {
+        return $this->limit(1)->one() !== null;
+    }
+
+    /**
+     * Get column definitions
+     *
+     * PartialQuery doesn't track column metadata - returns empty array.
+     * Use columns() to specify projection.
+     */
+    public function getColumns(): array
+    {
+        return [];
+    }
+
+    /**
+     * OR predicate support
+     *
+     * Not yet implemented for PartialQuery - use raw where() with OR.
+     */
+    public function or(\mini\Table\Predicate ...$predicates): TableInterface
+    {
+        throw new \RuntimeException("or() not yet implemented for PartialQuery - use where() with OR clause");
+    }
+
+    /**
+     * Load a single row by ID
+     *
+     * PartialQuery doesn't track row IDs - not supported.
+     */
+    public function load(string|int $rowId): ?object
+    {
+        throw new \RuntimeException("load() not supported for PartialQuery - use eq() with primary key column");
+    }
+
+    /**
      * Get CTE (Common Table Expression) prefix for DELETE/UPDATE
      *
      * Returns the WITH clause if CTEs are present, empty string otherwise.

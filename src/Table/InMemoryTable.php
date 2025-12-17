@@ -329,19 +329,12 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         return new ExceptTable($this, $other);
     }
 
-    public function or(TableInterface ...$predicates): TableInterface
+    public function or(Predicate ...$predicates): TableInterface
     {
-        // If any predicate is a bare Predicate (matches everything), OR is redundant
-        foreach ($predicates as $p) {
-            if ($p instanceof Predicate) {
-                return $this;
-            }
-        }
-
-        // Filter out EmptyTable predicates (they match nothing)
+        // Filter out empty predicates (they match nothing)
         $predicates = array_values(array_filter(
             $predicates,
-            fn($p) => !$p instanceof EmptyTable
+            fn($p) => !$p->isEmpty()
         ));
 
         // No predicates → nothing matches
@@ -349,23 +342,38 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
             return EmptyTable::from($this);
         }
 
+        // If any predicate matches everything, OR is redundant
+        foreach ($predicates as $p) {
+            if ($p->isEmpty()) {
+                continue; // Already filtered above, but just in case
+            }
+            // An empty predicate with no conditions would match everything,
+            // but we filter those out above
+        }
+
         $clone = clone $this;
 
-        // Start OR groups with current conditions (if any)
-        if (!empty($clone->where)) {
-            $clone->orGroups = [$clone->where];
-            $clone->where = [];
-        } elseif (empty($clone->orGroups)) {
-            // No existing conditions - will only match predicate conditions
+        // Keep existing WHERE conditions (they will be ANDed with OR groups)
+        // Only initialize orGroups if needed
+        if (empty($clone->orGroups)) {
             $clone->orGroups = [];
         }
 
         // Extract conditions from each predicate and add as OR groups
+        $unhandledPredicates = [];
         foreach ($predicates as $predicate) {
             $conditions = $this->extractPredicateConditions($predicate, $clone);
             if (!empty($conditions)) {
                 $clone->orGroups[] = $conditions;
+            } elseif (!$predicate->isBound()) {
+                // Has unbound parameters - can't push to SQL
+                $unhandledPredicates[] = $predicate;
             }
+        }
+
+        // If any predicates couldn't be converted to SQL, fall back to OrTable
+        if (!empty($unhandledPredicates)) {
+            return new OrTable($this, ...$predicates);
         }
 
         return $clone;
@@ -457,6 +465,22 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         // Build the exclusion condition: _rowid_ NOT IN (SELECT _rowid_ FROM ... WHERE other_conditions)
         [$otherWhere, $otherParams] = $other->buildWhereClause();
 
+        // Renumber params from $other to avoid collision with $clone's params
+        $renamedParams = [];
+        $renameMap = [];
+        foreach ($otherParams as $oldName => $value) {
+            $newName = ':p' . (++$clone->paramCounter);
+            $renamedParams[$newName] = $value;
+            $renameMap[$oldName] = $newName;
+        }
+
+        // Apply renames to the where clause (handle longest names first to avoid partial replacement)
+        $sortedOldNames = array_keys($renameMap);
+        usort($sortedOldNames, fn($a, $b) => strlen($b) - strlen($a));
+        foreach ($sortedOldNames as $oldName) {
+            $otherWhere = str_replace($oldName, $renameMap[$oldName], $otherWhere);
+        }
+
         $subquery = "SELECT _rowid_ FROM {$this->tableName}";
         if ($otherWhere) {
             $subquery .= " WHERE $otherWhere";
@@ -466,7 +490,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         $clone->where[] = [
             'column' => '_rowid_',
             'op' => 'NOT_IN_SUBQUERY',
-            'value' => $otherParams,
+            'value' => $renamedParams,
             'paramName' => $subquery,
         ];
 
@@ -474,19 +498,16 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
     }
 
     /**
-     * Extract filter conditions from a predicate chain
-     *
-     * Walks up the FilteredTable chain and collects conditions with proper parameter names.
+     * Extract filter conditions from a Predicate
      */
-    private function extractPredicateConditions(TableInterface $predicate, self $clone): array
+    private function extractPredicateConditions(Predicate $predicate, self $clone): array
     {
         $conditions = [];
-        $current = $predicate;
 
-        while ($current instanceof FilteredTable) {
-            $col = $current->getFilterColumn();
-            $op = $current->getFilterOperator();
-            $val = $current->getFilterValue();
+        foreach ($predicate->getConditions() as $cond) {
+            $col = $cond['column'];
+            $op = $cond['operator'];
+            $val = $cond['value'];
 
             $paramName = ':p' . (++$clone->paramCounter);
 
@@ -503,7 +524,6 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
             };
 
             $conditions[] = $condition;
-            $current = $current->getSource();
         }
 
         return $conditions;
@@ -549,10 +569,21 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
      */
     private function buildWhereClause(): array
     {
-        // Handle OR groups
+        $parts = [];
+        $params = [];
+
+        // Build AND conditions from WHERE
+        if (!empty($this->where)) {
+            [$whereSql, $whereParams] = $this->buildConditionGroup($this->where);
+            if ($whereSql) {
+                $parts[] = $whereSql;
+                $params = array_merge($params, $whereParams);
+            }
+        }
+
+        // Build OR groups and AND them with WHERE
         if (!empty($this->orGroups)) {
             $groups = [];
-            $params = [];
 
             foreach ($this->orGroups as $group) {
                 [$groupSql, $groupParams] = $this->buildConditionGroup($group);
@@ -562,15 +593,18 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
                 }
             }
 
-            if (empty($groups)) {
-                return ['', []];
+            if (!empty($groups)) {
+                // Wrap OR groups in parentheses
+                $orClause = implode(' OR ', $groups);
+                $parts[] = "($orClause)";
             }
-
-            return [implode(' OR ', $groups), $params];
         }
 
-        // Handle simple AND conditions
-        return $this->buildConditionGroup($this->where);
+        if (empty($parts)) {
+            return ['', []];
+        }
+
+        return [implode(' AND ', $parts), $params];
     }
 
     /**

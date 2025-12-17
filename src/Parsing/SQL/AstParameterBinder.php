@@ -12,6 +12,7 @@ use mini\Parsing\SQL\AST\{
     IsNullOperation,
     LikeOperation,
     BetweenOperation,
+    ExistsOperation,
     SubqueryNode,
     FunctionCallNode,
     SelectStatement,
@@ -87,6 +88,12 @@ class AstParameterBinder
             } else {
                 $new->values = array_map(fn($v) => $this->bindNode($v), $node->values);
             }
+            return $new;
+        }
+
+        if ($node instanceof ExistsOperation) {
+            $new = clone $node;
+            $new->subquery = $this->bindNode($node->subquery);
             return $new;
         }
 

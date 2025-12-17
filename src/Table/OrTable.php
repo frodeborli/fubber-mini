@@ -7,27 +7,25 @@ use Traversable;
 /**
  * Applies OR predicates to source table in-memory
  *
- * Like FilteredTable, this exists for cases where OR can't be pushed to backend.
  * Materializes source and yields rows matching any of the predicates.
  *
  * ```php
- * $p = Predicate::from($table);
- * new OrTable($source, $p->eq('x', 1), $p->eq('y', 2))
+ * new OrTable($source, Predicate::eq('x', 1), Predicate::eq('y', 2))
  * ```
  */
-class OrTable extends AbstractTableWrapper implements PredicateInterface
+class OrTable extends AbstractTableWrapper
 {
-    /** @var TableInterface[] */
+    /** @var Predicate[] */
     private array $predicates;
 
     public function __construct(
         AbstractTable $source,
-        TableInterface ...$predicates,
+        Predicate ...$predicates,
     ) {
-        // Filter out EmptyTable predicates
+        // Filter out empty predicates
         $this->predicates = array_values(array_filter(
             $predicates,
-            fn($p) => !$p instanceof EmptyTable
+            fn($p) => !$p->isEmpty()
         ));
 
         // Absorb source's limit/offset - we apply them after filtering
@@ -44,15 +42,27 @@ class OrTable extends AbstractTableWrapper implements PredicateInterface
         parent::__construct($source);
     }
 
+    /**
+     * Test if a row matches any predicate
+     */
     public function test(object $row): bool
     {
-        // OR: true if ANY predicate matches
         foreach ($this->predicates as $predicate) {
-            if ($predicate instanceof PredicateInterface && $predicate->test($row)) {
+            if ($predicate->test($row)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Get all predicates
+     *
+     * @return Predicate[]
+     */
+    public function getPredicates(): array
+    {
+        return $this->predicates;
     }
 
     protected function materialize(string ...$additionalColumns): Traversable
@@ -149,7 +159,7 @@ class OrTable extends AbstractTableWrapper implements PredicateInterface
         return $table;
     }
 
-    public function or(TableInterface ...$predicates): TableInterface
+    public function or(Predicate ...$predicates): TableInterface
     {
         // Merge predicates into a new OrTable, restoring absorbed pagination
         $allPredicates = [...$this->predicates, ...$predicates];

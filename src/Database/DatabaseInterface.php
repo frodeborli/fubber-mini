@@ -270,4 +270,41 @@ interface DatabaseInterface
      * @return int Number of affected rows
      */
     public function upsert(string $table, array $data, string ...$conflictColumns): int;
+
+    /**
+     * Build a temporary table containing schema metadata
+     *
+     * Creates (or refreshes) a temporary table with database schema information,
+     * including columns and indexes. The table can then be queried using standard SQL.
+     *
+     * Table structure:
+     * - table_name TEXT: Name of the table
+     * - name TEXT: Column name or index name
+     * - type TEXT: 'column', 'primary', 'unique', or 'index'
+     * - data_type TEXT: Data type for columns (NULL for indexes)
+     * - is_nullable INTEGER: 1 if nullable, 0 if NOT NULL (NULL for indexes)
+     * - default_value TEXT: Default value expression (NULL for indexes)
+     * - ordinal INTEGER: Position (1-based for columns, NULL for indexes)
+     * - extra TEXT: For indexes: comma-separated list of indexed columns
+     *
+     * Example:
+     * ```php
+     * db()->buildSchemaTable('_schema');
+     *
+     * // Query all columns for a table
+     * $columns = db()->query("SELECT * FROM _schema WHERE table_name = ? AND type = 'column'", ['users']);
+     *
+     * // List all tables
+     * $tables = db()->queryColumn('SELECT DISTINCT table_name FROM _schema');
+     *
+     * // Find all indexes
+     * $indexes = db()->query("SELECT * FROM _schema WHERE type IN ('primary', 'unique', 'index')");
+     *
+     * // Find primary key columns for a table
+     * $pk = db()->queryOne("SELECT extra FROM _schema WHERE table_name = ? AND type = 'primary'", ['users']);
+     * ```
+     *
+     * @param string $tableName Name for the temporary schema table
+     */
+    public function buildSchemaTable(string $tableName): void;
 }

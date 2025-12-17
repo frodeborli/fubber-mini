@@ -485,6 +485,338 @@ $test = new class extends Test {
         $this->assertSame($table, $vdb->getTable('USERS'));
         $this->assertNull($vdb->getTable('nonexistent'));
     }
+
+    // =========================================================================
+    // IN Subquery tests
+    // =========================================================================
+
+    private function createOrdersTable(): InMemoryTable
+    {
+        $table = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('user_id', ColumnType::Int),
+            new ColumnDef('amount', ColumnType::Int),
+            new ColumnDef('status', ColumnType::Text),
+        );
+
+        $table->insert(['id' => 1, 'user_id' => 1, 'amount' => 100, 'status' => 'shipped']);
+        $table->insert(['id' => 2, 'user_id' => 1, 'amount' => 200, 'status' => 'pending']);
+        $table->insert(['id' => 3, 'user_id' => 2, 'amount' => 150, 'status' => 'shipped']);
+        $table->insert(['id' => 4, 'user_id' => 3, 'amount' => 300, 'status' => 'cancelled']);
+
+        return $table;
+    }
+
+    private function createVdbWithOrders(): VirtualDatabase
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('users', $this->createUsersTable());
+        $vdb->registerTable('orders', $this->createOrdersTable());
+        return $vdb;
+    }
+
+    public function testInSubquerySameColumnName(): void
+    {
+        // Users who have shipped orders (using id = id match)
+        $vdb = $this->createVdbWithOrders();
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE status = 'shipped')"
+        ));
+
+        // Users 1 and 2 have shipped orders
+        $this->assertCount(2, $rows);
+        $names = array_map(fn($r) => $r->name, $rows);
+        $this->assertTrue(in_array('Alice', $names, true));
+        $this->assertTrue(in_array('Bob', $names, true));
+    }
+
+    public function testInSubqueryDifferentColumnName(): void
+    {
+        // This tests the ColumnMappedSet wrapper
+        // user_id from orders maps to id in users
+        $vdb = $this->createVdbWithOrders();
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE amount > 200)"
+        ));
+
+        // Only user 3 (Charlie) has an order > 200
+        $this->assertCount(1, $rows);
+        $this->assertSame('Charlie', $rows[0]->name);
+    }
+
+    public function testNotInSubquery(): void
+    {
+        // Users who don't have shipped orders
+        $vdb = $this->createVdbWithOrders();
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM orders WHERE status = 'shipped')"
+        ));
+
+        // Only Charlie (id=3) has no shipped orders
+        $this->assertCount(1, $rows);
+        $this->assertSame('Charlie', $rows[0]->name);
+    }
+
+    public function testInSubqueryWithPlaceholder(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE status = ?)",
+            ['pending']
+        ));
+
+        // Only user 1 (Alice) has pending orders
+        $this->assertCount(1, $rows);
+        $this->assertSame('Alice', $rows[0]->name);
+    }
+
+    public function testInSubqueryWithLimit(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders ORDER BY amount DESC LIMIT 2)"
+        ));
+
+        // Top 2 orders by amount: id=4 (300, user 3), id=2 (200, user 1)
+        $this->assertCount(2, $rows);
+        $names = array_map(fn($r) => $r->name, $rows);
+        $this->assertTrue(in_array('Alice', $names, true));
+        $this->assertTrue(in_array('Charlie', $names, true));
+    }
+
+    public function testInSubqueryReturnsEmpty(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE status = 'nonexistent')"
+        ));
+
+        $this->assertCount(0, $rows);
+    }
+
+    public function testInSubqueryWithMultipleConditions(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        // Users who are active AND have shipped orders
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE status = 'active' AND id IN (SELECT user_id FROM orders WHERE status = 'shipped')"
+        ));
+
+        // Alice (active, has shipped) and Bob (active, has shipped)
+        $this->assertCount(2, $rows);
+    }
+
+    // =========================================================================
+    // EXISTS Subquery tests
+    // =========================================================================
+
+    public function testExistsNonCorrelated(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        // If any shipped orders exist, return all users
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE status = 'shipped')"
+        ));
+
+        // Shipped orders exist, so all 3 users returned
+        $this->assertCount(3, $rows);
+    }
+
+    public function testExistsNonCorrelatedFalse(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        // No orders with status 'nonexistent', so EXISTS is false
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE status = 'nonexistent')"
+        ));
+
+        // No rows returned
+        $this->assertCount(0, $rows);
+    }
+
+    public function testNotExistsNonCorrelated(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        // NOT EXISTS on existing data
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE status = 'shipped')"
+        ));
+
+        // Shipped orders exist, so NOT EXISTS is false, no users returned
+        $this->assertCount(0, $rows);
+    }
+
+    public function testExistsCorrelated(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        // Users who have at least one order
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)"
+        ));
+
+        // Users 1, 2, 3 all have orders
+        $this->assertCount(3, $rows);
+    }
+
+    public function testExistsCorrelatedWithCondition(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        // Users who have at least one shipped order
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id AND status = 'shipped')"
+        ));
+
+        // Users 1 (Alice) and 2 (Bob) have shipped orders
+        $this->assertCount(2, $rows);
+        $names = array_map(fn($r) => $r->name, $rows);
+        $this->assertTrue(in_array('Alice', $names, true));
+        $this->assertTrue(in_array('Bob', $names, true));
+    }
+
+    public function testNotExistsCorrelated(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        // Users who have NO shipped orders
+        $rows = iterator_to_array($vdb->query(
+            "SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id AND status = 'shipped')"
+        ));
+
+        // Only Charlie (id=3) has no shipped orders
+        $this->assertCount(1, $rows);
+        $this->assertSame('Charlie', $rows[0]->name);
+    }
+
+    // =========================================================================
+    // Aggregate function tests
+    // =========================================================================
+
+    public function testCountAll(): void
+    {
+        $vdb = $this->createVdb();
+        $rows = iterator_to_array($vdb->query('SELECT COUNT(*) FROM users'));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame(3, $rows[0]->{'COUNT(*)'});
+    }
+
+    public function testCountWithAlias(): void
+    {
+        $vdb = $this->createVdb();
+        $rows = iterator_to_array($vdb->query('SELECT COUNT(*) AS total FROM users'));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame(3, $rows[0]->total);
+    }
+
+    public function testCountWithWhere(): void
+    {
+        $vdb = $this->createVdb();
+        $rows = iterator_to_array($vdb->query("SELECT COUNT(*) AS active_count FROM users WHERE status = 'active'"));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame(2, $rows[0]->active_count);
+    }
+
+    public function testSumAggregate(): void
+    {
+        $vdb = $this->createVdb();
+        $rows = iterator_to_array($vdb->query('SELECT SUM(age) AS total_age FROM users'));
+
+        $this->assertCount(1, $rows);
+        // 30 + 25 + 35 = 90
+        $this->assertSame(90, $rows[0]->total_age);
+    }
+
+    public function testAvgAggregate(): void
+    {
+        $vdb = $this->createVdb();
+        $rows = iterator_to_array($vdb->query('SELECT AVG(age) AS avg_age FROM users'));
+
+        $this->assertCount(1, $rows);
+        // (30 + 25 + 35) / 3 = 30
+        $this->assertSame(30.0, $rows[0]->avg_age);
+    }
+
+    public function testMinAggregate(): void
+    {
+        $vdb = $this->createVdb();
+        $rows = iterator_to_array($vdb->query('SELECT MIN(age) AS min_age FROM users'));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame(25, $rows[0]->min_age);
+    }
+
+    public function testMaxAggregate(): void
+    {
+        $vdb = $this->createVdb();
+        $rows = iterator_to_array($vdb->query('SELECT MAX(age) AS max_age FROM users'));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame(35, $rows[0]->max_age);
+    }
+
+    public function testMultipleAggregates(): void
+    {
+        $vdb = $this->createVdb();
+        $rows = iterator_to_array($vdb->query(
+            'SELECT COUNT(*) AS cnt, SUM(age) AS total, AVG(age) AS average, MIN(age) AS youngest, MAX(age) AS oldest FROM users'
+        ));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame(3, $rows[0]->cnt);
+        $this->assertSame(90, $rows[0]->total);
+        $this->assertSame(30.0, $rows[0]->average);
+        $this->assertSame(25, $rows[0]->youngest);
+        $this->assertSame(35, $rows[0]->oldest);
+    }
+
+    public function testAggregateEmptyResult(): void
+    {
+        $vdb = $this->createVdb();
+        // No users with status 'deleted'
+        $rows = iterator_to_array($vdb->query("SELECT COUNT(*) AS cnt, SUM(age) AS total, AVG(age) AS avg FROM users WHERE status = 'deleted'"));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame(0, $rows[0]->cnt);
+        $this->assertNull($rows[0]->total);
+        $this->assertNull($rows[0]->avg);
+    }
+
+    public function testCustomAggregate(): void
+    {
+        $vdb = $this->createVdb();
+
+        // Register a custom GROUP_CONCAT-style aggregate
+        $vdb->createAggregate(
+            'GROUP_CONCAT',
+            function (&$context, $value) {
+                if ($value !== null) {
+                    $context[] = $value;
+                }
+            },
+            function (&$context) {
+                return implode(',', $context ?? []);
+            },
+            1
+        );
+
+        $rows = iterator_to_array($vdb->query('SELECT GROUP_CONCAT(name) AS names FROM users'));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('Alice,Bob,Charlie', $rows[0]->names);
+    }
+
+    public function testAggregateWithFilteredSubset(): void
+    {
+        $vdb = $this->createVdbWithOrders();
+        // Sum of shipped order amounts
+        $rows = iterator_to_array($vdb->query("SELECT SUM(amount) AS shipped_total FROM orders WHERE status = 'shipped'"));
+
+        $this->assertCount(1, $rows);
+        // Orders: 100 (shipped), 200 (pending), 150 (shipped), 300 (pending)
+        // Shipped: 100 + 150 = 250
+        $this->assertSame(250, $rows[0]->shipped_total);
+    }
 };
 
 exit($test->run());

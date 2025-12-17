@@ -35,6 +35,25 @@ abstract class AbstractTableWrapper extends AbstractTable
     }
 
     // -------------------------------------------------------------------------
+    // Property delegation - check local, then source
+    // -------------------------------------------------------------------------
+
+    public function getProperty(string $name): mixed
+    {
+        // Check local first (allows shadowing)
+        if (parent::hasProperty($name)) {
+            return parent::getProperty($name);
+        }
+        // Delegate to source
+        return $this->source->getProperty($name);
+    }
+
+    public function hasProperty(string $name): bool
+    {
+        return parent::hasProperty($name) || $this->source->hasProperty($name);
+    }
+
+    // -------------------------------------------------------------------------
     // Delegation - override in subclasses as needed
     // -------------------------------------------------------------------------
 
@@ -63,6 +82,11 @@ abstract class AbstractTableWrapper extends AbstractTable
     public function count(): int
     {
         return $this->source->count();
+    }
+
+    public function load(string|int $rowId): ?object
+    {
+        return $this->source->load($rowId);
     }
 
     protected function getCompareFn(): Closure
@@ -134,7 +158,7 @@ abstract class AbstractTableWrapper extends AbstractTable
         return $c;
     }
 
-    public function or(TableInterface ...$predicates): TableInterface
+    public function or(Predicate ...$predicates): TableInterface
     {
         $c = clone $this;
         $c->source = $this->source->or(...$predicates);

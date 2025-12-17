@@ -493,4 +493,215 @@ class PDODatabase implements DatabaseInterface
         return $this->buildSqlServerUpsert($table, $columns, $values, $conflictColumns);
     }
 
+    /**
+     * Build a temporary table containing schema metadata
+     */
+    public function buildSchemaTable(string $tableName): void
+    {
+        $dialect = $this->getDialect();
+
+        // Create or clear the temp table
+        $this->exec("DROP TABLE IF EXISTS {$tableName}");
+        $this->exec("CREATE TEMP TABLE {$tableName} (
+            table_name TEXT,
+            name TEXT,
+            type TEXT,
+            data_type TEXT,
+            is_nullable INTEGER,
+            default_value TEXT,
+            ordinal INTEGER,
+            extra TEXT
+        )");
+
+        // Populate based on dialect
+        match ($dialect) {
+            SqlDialect::Sqlite => $this->populateSchemaSqlite($tableName),
+            SqlDialect::MySQL => $this->populateSchemaMySQL($tableName),
+            SqlDialect::Postgres => $this->populateSchemaPostgres($tableName),
+            default => $this->populateSchemaGeneric($tableName),
+        };
+    }
+
+    private function populateSchemaSqlite(string $schemaTable): void
+    {
+        // Get all table names
+        $tables = $this->queryColumn(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        );
+
+        foreach ($tables as $table) {
+            // Skip the schema table itself
+            if ($table === $schemaTable) {
+                continue;
+            }
+
+            // Get column info via PRAGMA
+            $columns = $this->query("PRAGMA table_info({$table})")->toArray();
+            $pkColumns = [];
+
+            foreach ($columns as $col) {
+                $this->exec(
+                    "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
+                     VALUES (?, ?, 'column', ?, ?, ?, ?, NULL)",
+                    [
+                        $table,
+                        $col->name,
+                        $col->type,
+                        $col->notnull ? 0 : 1,
+                        $col->dflt_value,
+                        $col->cid + 1
+                    ]
+                );
+
+                if ($col->pk) {
+                    $pkColumns[$col->pk] = $col->name; // pk is 1-based position in PK
+                }
+            }
+
+            // Add primary key as an index entry
+            if (!empty($pkColumns)) {
+                ksort($pkColumns);
+                $this->exec(
+                    "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
+                     VALUES (?, ?, 'primary', NULL, NULL, NULL, NULL, ?)",
+                    [$table, 'PRIMARY', implode(', ', $pkColumns)]
+                );
+            }
+
+            // Get indexes via PRAGMA
+            $indexes = $this->query("PRAGMA index_list({$table})")->toArray();
+
+            foreach ($indexes as $idx) {
+                // Skip auto-generated indexes for PRIMARY KEY and UNIQUE constraints
+                // (they start with "sqlite_autoindex_")
+                if (str_starts_with($idx->name, 'sqlite_autoindex_')) {
+                    continue;
+                }
+
+                // Get columns in this index
+                $indexCols = $this->query("PRAGMA index_info({$idx->name})")->toArray();
+                $colNames = array_map(fn($c) => $c->name, $indexCols);
+
+                $type = $idx->unique ? 'unique' : 'index';
+
+                $this->exec(
+                    "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
+                     VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?)",
+                    [$table, $idx->name, $type, implode(', ', $colNames)]
+                );
+            }
+        }
+    }
+
+    private function populateSchemaMySQL(string $schemaTable): void
+    {
+        // Insert columns
+        $this->exec(
+            "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
+             SELECT
+                 TABLE_NAME,
+                 COLUMN_NAME,
+                 'column',
+                 COLUMN_TYPE,
+                 CASE WHEN IS_NULLABLE = 'YES' THEN 1 ELSE 0 END,
+                 COLUMN_DEFAULT,
+                 ORDINAL_POSITION,
+                 NULL
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE()
+             ORDER BY TABLE_NAME, ORDINAL_POSITION"
+        );
+
+        // Insert indexes (grouped by index name with columns concatenated)
+        $this->exec(
+            "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
+             SELECT
+                 TABLE_NAME,
+                 INDEX_NAME,
+                 CASE
+                     WHEN INDEX_NAME = 'PRIMARY' THEN 'primary'
+                     WHEN NON_UNIQUE = 0 THEN 'unique'
+                     ELSE 'index'
+                 END,
+                 NULL,
+                 NULL,
+                 NULL,
+                 NULL,
+                 GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)
+             FROM INFORMATION_SCHEMA.STATISTICS
+             WHERE TABLE_SCHEMA = DATABASE()
+             GROUP BY TABLE_NAME, INDEX_NAME, NON_UNIQUE
+             ORDER BY TABLE_NAME, INDEX_NAME"
+        );
+    }
+
+    private function populateSchemaPostgres(string $schemaTable): void
+    {
+        // Insert columns
+        $this->exec(
+            "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
+             SELECT
+                 table_name,
+                 column_name,
+                 'column',
+                 data_type,
+                 CASE WHEN is_nullable = 'YES' THEN 1 ELSE 0 END,
+                 column_default,
+                 ordinal_position,
+                 NULL
+             FROM information_schema.columns
+             WHERE table_schema = current_schema()
+             ORDER BY table_name, ordinal_position"
+        );
+
+        // Insert indexes
+        $this->exec(
+            "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
+             SELECT
+                 t.relname AS table_name,
+                 i.relname AS index_name,
+                 CASE
+                     WHEN ix.indisprimary THEN 'primary'
+                     WHEN ix.indisunique THEN 'unique'
+                     ELSE 'index'
+                 END,
+                 NULL,
+                 NULL,
+                 NULL,
+                 NULL,
+                 string_agg(a.attname, ', ' ORDER BY array_position(ix.indkey, a.attnum))
+             FROM pg_class t
+             JOIN pg_index ix ON t.oid = ix.indrelid
+             JOIN pg_class i ON i.oid = ix.indexrelid
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+             JOIN pg_namespace n ON n.oid = t.relnamespace
+             WHERE n.nspname = current_schema()
+               AND t.relkind = 'r'
+             GROUP BY t.relname, i.relname, ix.indisprimary, ix.indisunique
+             ORDER BY t.relname, i.relname"
+        );
+    }
+
+    private function populateSchemaGeneric(string $schemaTable): void
+    {
+        // Try INFORMATION_SCHEMA for columns (works for many databases)
+        try {
+            $this->exec(
+                "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
+                 SELECT
+                     TABLE_NAME,
+                     COLUMN_NAME,
+                     'column',
+                     DATA_TYPE,
+                     CASE WHEN IS_NULLABLE = 'YES' THEN 1 ELSE 0 END,
+                     COLUMN_DEFAULT,
+                     ORDINAL_POSITION,
+                     NULL
+                 FROM INFORMATION_SCHEMA.COLUMNS
+                 ORDER BY TABLE_NAME, ORDINAL_POSITION"
+            );
+        } catch (\Throwable) {
+            // If INFORMATION_SCHEMA not available, leave table empty
+        }
+    }
 }

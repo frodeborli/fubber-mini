@@ -135,22 +135,27 @@ interface TableInterface extends SetInterface, IteratorAggregate, Countable
     /**
      * Filter rows matching any of the given predicates (OR semantics)
      *
-     * Each predicate is a filter chain built on a Predicate table:
-     *
      * ```php
-     * $p = Predicate::from($users);
-     *
      * // WHERE status = 'active' OR status = 'pending'
-     * $users->or($p->eq('status', 'active'), $p->eq('status', 'pending'));
+     * $users->or(
+     *     Predicate::eq('status', 'active'),
+     *     Predicate::eq('status', 'pending')
+     * );
      *
      * // WHERE (age < 18) OR (age >= 65 AND status = 'retired')
      * $users->or(
-     *     $p->lt('age', 18),
-     *     $p->gte('age', 65)->eq('status', 'retired')
+     *     Predicate::lt('age', 18),
+     *     Predicate::gte('age', 65)->andEq('status', 'retired')
+     * );
+     *
+     * // With bind parameters
+     * $users->or(
+     *     Predicate::eqBind('id', ':id1'),
+     *     Predicate::eqBind('id', ':id2')
      * );
      * ```
      */
-    public function or(TableInterface ...$predicates): TableInterface;
+    public function or(Predicate ...$predicates): TableInterface;
 
     /**
      * Return rows that are in this table but NOT in the other set (set difference)
@@ -241,4 +246,106 @@ interface TableInterface extends SetInterface, IteratorAggregate, Countable
      * ```
      */
     public function exists(): bool;
+
+    /**
+     * Load a single row by its row ID
+     *
+     * Returns the row if it exists and matches current filters, null otherwise.
+     * This enables efficient indexed lookups without iterating.
+     *
+     * ```php
+     * $row = $table->load(123);           // Get row with ID 123
+     * $row = $table->eq('status', 'active')->load(123);  // Only if active
+     * ```
+     *
+     * Row IDs correspond to iteration keys:
+     * ```php
+     * foreach ($table as $rowId => $row) {
+     *     $same = $table->load($rowId);   // $same === $row
+     * }
+     * ```
+     *
+     * @param string|int $rowId The row identifier
+     * @return object|null The row as stdClass, or null if not found
+     */
+    public function load(string|int $rowId): ?object;
+
+    /**
+     * Return table with duplicate rows removed
+     *
+     * Deduplication is based on the currently visible columns at the point
+     * distinct() is called. Further column projections do not change which
+     * rows were considered duplicates:
+     *
+     * ```php
+     * // Distinct on role+name, then project to just role
+     * $table->columns('role', 'name')->distinct()->columns('role');
+     * // May have duplicate roles if different names had same role
+     *
+     * // Distinct on just role
+     * $table->columns('role')->distinct();
+     * // Each role appears once
+     * ```
+     *
+     * Order relative to limit/offset matters:
+     * ```php
+     * $table->distinct()->limit(10);  // Deduplicate all, then take 10
+     * $table->limit(10)->distinct();  // Take 10 (with dupes), then deduplicate
+     * ```
+     */
+    public function distinct(): TableInterface;
+
+    /**
+     * Return table with aliased column names
+     *
+     * Used for JOINs where tables need qualified column names to avoid conflicts.
+     * Column names become "alias.column" format.
+     *
+     * ```php
+     * $u = $users->withAlias('u');
+     * // Columns: u.id, u.name, u.email
+     * // Rows: (object) ['u.id' => 123, 'u.name' => 'Frode']
+     *
+     * // With column renames
+     * $u = $users->withAlias('u', ['name' => 'username']);
+     * // Columns: u.id, u.username, u.email
+     * ```
+     *
+     * @param string|null $tableAlias Prefix for all columns (null = no prefix)
+     * @param array<string,string> $columnAliases Column renames ['original' => 'alias']
+     */
+    public function withAlias(?string $tableAlias = null, array $columnAliases = []): TableInterface;
+
+    /**
+     * Get a table property
+     *
+     * Properties are arbitrary metadata attached to tables. Use hasProperty()
+     * to distinguish between "not set" and "set to null".
+     *
+     * ```php
+     * $table->getProperty('alias');  // 'u' or null
+     * ```
+     *
+     * @return mixed Property value, or null if not set
+     */
+    public function getProperty(string $name): mixed;
+
+    /**
+     * Check if a property exists (including null values)
+     */
+    public function hasProperty(string $name): bool;
+
+    /**
+     * Return table with property set
+     *
+     * Properties can be set to any value including null. Immutable - returns
+     * a new table instance with the property set.
+     *
+     * ```php
+     * $aliased = $users->withProperty('alias', 'u');
+     * $aliased->getProperty('alias');  // 'u'
+     * $users->getProperty('alias');    // null (original unchanged)
+     * ```
+     */
+    public function withProperty(string $name, mixed $value): TableInterface;
 }

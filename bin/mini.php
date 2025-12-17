@@ -62,6 +62,24 @@ $availableCommands = [
             'test tests/ Router' => 'Run tests matching "Router"',
             'test --list' => 'List available tests'
         ]
+    ],
+    'db' => [
+        'description' => 'Interactive database shell',
+        'script' => 'mini-db.php',
+        'examples' => [
+            'db' => 'Start interactive SQL REPL',
+            "db 'SELECT * FROM users'" => 'Execute query directly'
+        ]
+    ],
+    'vdb' => [
+        'description' => 'VirtualDatabase shell (for testing)',
+        'script' => 'mini-db.php',
+        'prepend_args' => ['-v'],
+        'examples' => [
+            'vdb' => 'Start VirtualDatabase REPL',
+            "vdb 'SELECT * FROM users'" => 'Query VirtualDatabase directly',
+            "vdb '.schema'" => 'Show VirtualDatabase schema'
+        ]
     ]
 ];
 
@@ -104,22 +122,29 @@ if (!file_exists($scriptPath)) {
     exit(1);
 }
 
-// Build the command with all remaining arguments (preserve original $argv)
+// Build arguments
+$args = [];
+
+// Add prepend_args if defined (e.g., vdb prepends -v)
+if (isset($availableCommands[$command]['prepend_args'])) {
+    $args = array_merge($args, $availableCommands[$command]['prepend_args']);
+}
+
+$args = array_merge($args, array_slice($argv, 2));
+
+// Build the command array
 $cmd = ['php', $scriptPath];
-$cmd = array_merge($cmd, array_slice($argv, 2));
+$cmd = array_merge($cmd, $args);
 
-// Execute the command
-$descriptorspec = [
-    0 => STDIN,
-    1 => STDOUT,
-    2 => STDERR
-];
+// Ignore SIGINT in parent - let child handle it
+pcntl_signal(SIGINT, SIG_IGN);
 
-$process = proc_open($cmd, $descriptorspec, $pipes);
+// Use proc_open with direct FD pass-through to preserve TTY
+$process = proc_open($cmd, [STDIN, STDOUT, STDERR], $pipes);
 if (is_resource($process)) {
     $exitCode = proc_close($process);
     exit($exitCode);
-} else {
-    echo "Failed to execute command\n";
-    exit(1);
 }
+
+echo "Failed to execute command\n";
+exit(1);

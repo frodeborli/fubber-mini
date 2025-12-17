@@ -70,6 +70,13 @@ class SqlParser
             )
         };
 
+        // Handle UNION [ALL] chains
+        while ($this->match(SqlLexer::T_UNION)) {
+            $all = $this->match(SqlLexer::T_ALL);
+            $right = $this->parseSelectStatement();
+            $stmt = new AST\UnionNode($stmt, $right, $all);
+        }
+
         if ($this->current()['type'] !== SqlLexer::T_EOF) {
             throw new SqlSyntaxException(
                 "Unexpected trailing input",
@@ -146,22 +153,26 @@ class SqlParser
 
         $stmt->columns = $this->parseColumnList();
 
-        $this->expect(SqlLexer::T_FROM);
-        $stmt->from = $this->parseIdentifier();
+        // FROM is optional (for SELECT 1, SELECT expression, etc.)
+        if ($this->match(SqlLexer::T_FROM)) {
+            $stmt->from = $this->parseIdentifier();
 
-        // Optional table alias
-        if ($this->match(SqlLexer::T_AS)) {
-            $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
-            $stmt->fromAlias = $aliasToken['value'];
-        } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
-            // Implicit alias (without AS)
-            $stmt->fromAlias = $this->current()['value'];
-            $this->pos++;
-        }
+            // Optional table alias
+            if ($this->match(SqlLexer::T_AS)) {
+                $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                $stmt->fromAlias = $aliasToken['value'];
+            } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+                // Implicit alias (without AS)
+                $stmt->fromAlias = $this->current()['value'];
+                $this->pos++;
+            }
 
-        // Parse JOINs
-        while ($this->isJoinStart()) {
-            $stmt->joins[] = $this->parseJoin();
+            // Parse JOINs
+            while ($this->isJoinStart()) {
+                $stmt->joins[] = $this->parseJoin();
+            }
+        } else {
+            $stmt->from = null;
         }
 
         if ($this->match(SqlLexer::T_WHERE)) {
@@ -356,10 +367,19 @@ class SqlParser
 
     private function parseComparison(): ASTNode
     {
-        // Handle generic NOT (e.g., NOT is_active, NOT (a = b))
+        // Handle NOT EXISTS
         if ($this->match(SqlLexer::T_NOT)) {
+            if ($this->match(SqlLexer::T_EXISTS)) {
+                return $this->parseExistsOperation(negated: true);
+            }
+            // Handle generic NOT (e.g., NOT is_active, NOT (a = b))
             $expr = $this->parseComparison();
             return new UnaryOperation('NOT', $expr);
+        }
+
+        // Handle EXISTS (SELECT ...)
+        if ($this->match(SqlLexer::T_EXISTS)) {
+            return $this->parseExistsOperation(negated: false);
         }
 
         $left = $this->parseAdditive();
@@ -444,6 +464,14 @@ class SqlParser
             $this->expect(SqlLexer::T_RPAREN);
             return new InOperation($left, $values, $negated);
         }
+    }
+
+    private function parseExistsOperation(bool $negated): AST\ExistsOperation
+    {
+        $this->expect(SqlLexer::T_LPAREN);
+        $subquery = $this->parseSelectStatement();
+        $this->expect(SqlLexer::T_RPAREN);
+        return new AST\ExistsOperation(new SubqueryNode($subquery), $negated);
     }
 
     private function parseAdditive(): ASTNode

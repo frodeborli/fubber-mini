@@ -16,6 +16,8 @@ use Traversable;
  */
 abstract class AbstractTable implements TableInterface
 {
+    use TablePropertiesTrait;
+
     /** Maximum rows to buffer optimistically during iteration */
     protected const OPTIMISTIC_BUFFER_COUNT = 200;
 
@@ -147,6 +149,26 @@ abstract class AbstractTable implements TableInterface
         return $this->offset;
     }
 
+    public function withAlias(?string $tableAlias = null, array $columnAliases = []): TableInterface
+    {
+        $current = $this;
+        if ($this->getProperty('alias') !== $tableAlias) {
+            $current = $current->withProperty('alias', $tableAlias);
+        }
+        if ($this->getProperty('columnAliases') !== $columnAliases) {
+            $current = $current->withProperty('columnAliases', $columnAliases);
+        }
+        return $current;
+    }
+
+    /**
+     * Get the current table alias (null if not set)
+     */
+    public function getTableAlias(): ?string
+    {
+        return $this->getProperty('alias');
+    }
+
     public function union(TableInterface $other): TableInterface
     {
         return new UnionTable($this, $other);
@@ -157,37 +179,34 @@ abstract class AbstractTable implements TableInterface
         return new ExceptTable($this, $other);
     }
 
+    public function distinct(): TableInterface
+    {
+        return new DistinctTable($this);
+    }
+
     /**
      * Filter rows matching any of the given predicates (OR semantics)
      *
-     * Each predicate is a filter chain built on a Predicate table:
-     *
      * ```php
-     * $p = Predicate::from($users);
-     *
      * // WHERE status = 'active' OR status = 'pending'
-     * $users->or($p->eq('status', 'active'), $p->eq('status', 'pending'));
+     * $users->or(
+     *     Predicate::eq('status', 'active'),
+     *     Predicate::eq('status', 'pending')
+     * );
      *
      * // WHERE (age < 18) OR (age >= 65 AND status = 'retired')
      * $users->or(
-     *     $p->lt('age', 18),
-     *     $p->gte('age', 65)->eq('status', 'retired')
+     *     Predicate::lt('age', 18),
+     *     Predicate::gte('age', 65)->andEq('status', 'retired')
      * );
      * ```
      */
-    public function or(TableInterface ...$predicates): TableInterface
+    public function or(Predicate ...$predicates): TableInterface
     {
-        // If any predicate is a bare Predicate (matches everything), OR is redundant
-        foreach ($predicates as $p) {
-            if ($p instanceof Predicate) {
-                return $this;
-            }
-        }
-
-        // Filter out EmptyTable predicates (they match nothing)
+        // Filter out empty predicates (they match nothing)
         $predicates = array_values(array_filter(
             $predicates,
-            fn($p) => !$p instanceof EmptyTable
+            fn($p) => !$p->isEmpty()
         ));
 
         // No predicates → nothing matches
@@ -197,13 +216,13 @@ abstract class AbstractTable implements TableInterface
 
         // Single predicate → apply directly without union overhead
         if (count($predicates) === 1) {
-            return $this->applyPredicateChain($predicates[0], $this);
+            return $this->applyPredicate($predicates[0]);
         }
 
         // Multiple predicates → union branches
-        $result = $this->applyPredicateChain($predicates[0], $this);
+        $result = $this->applyPredicate($predicates[0]);
         for ($i = 1; $i < count($predicates); $i++) {
-            $branch = $this->applyPredicateChain($predicates[$i], $this);
+            $branch = $this->applyPredicate($predicates[$i]);
             $result = $result->union($branch);
         }
 
@@ -211,41 +230,31 @@ abstract class AbstractTable implements TableInterface
     }
 
     /**
-     * Apply a predicate chain to a target table
+     * Apply a Predicate to this table
      *
-     * Recursively unwraps the predicate chain and replays operations on target.
+     * Converts Predicate conditions to table filter calls.
      */
-    private function applyPredicateChain(TableInterface $predicate, TableInterface $target): TableInterface
+    private function applyPredicate(Predicate $predicate): TableInterface
     {
-        // Base case: hit the Predicate root
-        if ($predicate instanceof Predicate) {
-            return $target;
+        $result = $this;
+
+        foreach ($predicate->getConditions() as $cond) {
+            $col = $cond['column'];
+            $op = $cond['operator'];
+            $val = $cond['value'];
+
+            $result = match ($op) {
+                Operator::Eq => $result->eq($col, $val),
+                Operator::Lt => $result->lt($col, $val),
+                Operator::Lte => $result->lte($col, $val),
+                Operator::Gt => $result->gt($col, $val),
+                Operator::Gte => $result->gte($col, $val),
+                Operator::In => $result->in($col, $val),
+                Operator::Like => $result->like($col, $val),
+            };
         }
 
-        // Recursive: unwrap and replay
-        if ($predicate instanceof AbstractTableWrapper) {
-            $inner = $this->applyPredicateChain($predicate->getSource(), $target);
-
-            if ($predicate instanceof FilteredTable) {
-                $col = $predicate->getFilterColumn();
-                $val = $predicate->getFilterValue();
-
-                return match ($predicate->getFilterOperator()) {
-                    Operator::Eq => $inner->eq($col, $val),
-                    Operator::Lt => $inner->lt($col, $val),
-                    Operator::Lte => $inner->lte($col, $val),
-                    Operator::Gt => $inner->gt($col, $val),
-                    Operator::Gte => $inner->gte($col, $val),
-                    Operator::In => $inner->in($col, $val),
-                    Operator::Like => $inner->like($col, $val),
-                };
-            }
-        }
-
-        throw new \InvalidArgumentException(
-            'Predicate chain contains unsupported wrapper: ' . get_class($predicate)
-            . '. Only filter operations (eq, lt, gt, etc.) are allowed.'
-        );
+        return $result;
     }
 
     public function exists(): bool
@@ -506,11 +515,7 @@ abstract class AbstractTable implements TableInterface
         if (empty($this->visibleColumns)) {
             return $this->columnDefs;
         }
-        $result = [];
-        foreach ($this->visibleColumns as $name) {
-            $result[$name] = $this->columnDefs[$name];
-        }
-        return $result;
+        return array_intersect_key($this->columnDefs, array_flip($this->visibleColumns));
     }
 
     /**
@@ -543,5 +548,34 @@ abstract class AbstractTable implements TableInterface
         $c = clone $this;
         $c->visibleColumns = $columns;
         return $c;
+    }
+
+    /**
+     * Load a single row by its row ID
+     *
+     * Default implementation checks cached rows first, then iterates.
+     * Subclasses should override for O(1) lookups when possible.
+     */
+    public function load(string|int $rowId): ?object
+    {
+        // Check cached rows first
+        if ($this->cachedRows !== null && $this->cacheVersion === $this->getDataVersion()) {
+            if (isset($this->cachedRows[$rowId])) {
+                return $this->cachedRows[$rowId];
+            }
+            // If cache is complete (not disabled), row doesn't exist
+            if (!$this->bufferingDisabled) {
+                return null;
+            }
+        }
+
+        // Fall back to iteration
+        foreach ($this as $id => $row) {
+            if ($id === $rowId) {
+                return $row;
+            }
+        }
+
+        return null;
     }
 }

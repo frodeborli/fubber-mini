@@ -762,4 +762,64 @@ abstract class TableImplementationTest extends Test
         // Original first should be 1 (Alice)
         $this->assertSame(1, $originalFirst);
     }
+
+    // =========================================================================
+    // Load by row ID
+    // =========================================================================
+
+    public function testLoadReturnsRowById(): void
+    {
+        $table = $this->createTable();
+
+        $row = $table->load(1);
+        $this->assertNotNull($row);
+        $this->assertSame(1, $row->id);
+        $this->assertSame('Alice', $row->name);
+    }
+
+    public function testLoadReturnsNullForNonExistentId(): void
+    {
+        $table = $this->createTable();
+
+        $row = $table->load(999);
+        $this->assertNull($row);
+    }
+
+    public function testLoadRespectsFilters(): void
+    {
+        $table = $this->createTable()->eq('dept', 'Engineering');
+
+        // Alice (id 1) is in Engineering
+        $row = $table->load(1);
+        $this->assertNotNull($row);
+        $this->assertSame('Alice', $row->name);
+
+        // Bob (id 2) is in Sales, should be filtered out
+        $row = $table->load(2);
+        $this->assertNull($row);
+    }
+
+    public function testLoadRespectsColumnProjection(): void
+    {
+        $table = $this->createTable()->columns('id', 'name');
+
+        $row = $table->load(1);
+        $this->assertNotNull($row);
+
+        $props = array_keys((array)$row);
+        $this->assertSame(['id', 'name'], $props);
+    }
+
+    public function testLoadMatchesIterationKeys(): void
+    {
+        $table = $this->createTable();
+
+        // Every row ID from iteration should be loadable
+        foreach ($table as $rowId => $row) {
+            $loaded = $table->load($rowId);
+            $this->assertNotNull($loaded);
+            $this->assertSame($row->id, $loaded->id);
+            $this->assertSame($row->name, $loaded->name);
+        }
+    }
 }
