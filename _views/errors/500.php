@@ -1,9 +1,9 @@
-<?php $extend('errors/layout.php'); ?>
+<?php $this->extend('errors/layout.php'); ?>
 
-<?php $block('title', '500 - Internal Server Error'); ?>
+<?php $this->block('title', '500 - Internal Server Error'); ?>
 
-<?php $block('content'); ?>
+<?php $this->block('content'); ?>
 <div class="error-code">500</div>
 <h1>Internal Server Error</h1>
 <p><?= htmlspecialchars($message ?? 'An unexpected error occurred while processing your request.', ENT_QUOTES, 'UTF-8') ?></p>
-<?php $end(); ?>
+<?php $this->end(); ?>

@@ -27,36 +27,36 @@ render(string $template, array $vars = []): string  # Render template from _view
 
 ### Template Inheritance
 
-Inside templates, these helpers are available for layout inheritance:
+Inside templates, `$this` provides helpers for layout inheritance:
 
 ```php
-$extend(string $layout)                          # Extend parent layout
-$block(string $name, ?string $value = null)      # Define block (dual-use)
-$end()                                           # End buffered block
-$show(string $name, string $default = '')        # Output block with default
+$this->extend(string $layout)                          # Extend parent layout
+$this->block(string $name, ?string $value = null)      # Define block (dual-use)
+$this->end()                                           # End buffered block
+$this->show(string $name, string $default = '')        # Output block with default
 ```
 
-**Dual-Use `$block()` Syntax:**
+**Dual-Use `$this->block()` Syntax:**
 ```php
 // Inline: set block to value directly
-$block('title', 'My Page');
+$this->block('title', 'My Page');
 
 // Buffered: capture block content
-$block('content'); ?>
+$this->block('content'); ?>
   <p>Content here</p>
-<?php $end();
+<?php $this->end();
 ```
 
 **Example:**
 ```php
 // Child template (child.php)
-<?php $extend('layout.php'); ?>
-<?php $block('title', 'My Page'); ?>
-<?php $block('content'); ?><p>Page content</p><?php $end(); ?>
+<?php $this->extend('layout.php'); ?>
+<?php $this->block('title', 'My Page'); ?>
+<?php $this->block('content'); ?><p>Page content</p><?php $this->end(); ?>
 
 // Parent layout (layout.php)
-<html><head><title><?php $show('title', 'Untitled'); ?></title></head>
-<body><?php $show('content'); ?></body></html>
+<html><head><title><?php $this->show('title', 'Untitled'); ?></title></head>
+<body><?php $this->show('content'); ?></body></html>
 
 // Including sub-templates (partials)
 <?= mini\render('_user-card.php', ['user' => $currentUser]) ?>

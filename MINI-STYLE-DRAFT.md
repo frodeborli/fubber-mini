@@ -34,7 +34,7 @@ When implementing features, **read the README.md in each `src/` subdirectory**.
 | **I18n** | `src/I18n/` | `t("Hello {name}")`, `fmt()->currency()`, ICU MessageFormat |
 | **Caching** | `src/Cache/` | `cache('ns')->get()`, `apcu_store()` with polyfill |
 | **Auth** | `src/Auth/` | `auth()->login()`, `require_login()`, `require_role()` |
-| **Templates** | `src/Template/` | Pure PHP with `$extend()`, `$block()`, `$show()` |
+| **Templates** | `src/Template/` | Pure PHP with `$this->extend()`, `$this->block()`, `$this->show()` |
 | **SQL Parser** | `src/Parsing/SQL/` | Virtual tables for CSV/JSON with SQL interface |
 | **Email** | `src/Mime/` | `mail()->to()->subject()->send()` |
 | **UUID** | `src/UUID/` | `uuid()` (v7), `uuid4()` |

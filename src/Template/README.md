@@ -5,7 +5,7 @@
 Mini's template system is **pure PHP with optional inheritance**:
 
 - **Native PHP syntax** - No special template language to learn
-- **Inheritance support** - Multi-level layouts via `$extend()` and `$block()`
+- **Inheritance support** - Multi-level layouts via `$this->extend()` and `$this->block()`
 - **ViewStart convention** - Automatic `_viewstart.php` inclusion (like ASP.NET Core)
 - **Path registry** - Automatic template discovery in `_views/` directory
 - **Zero configuration** - Works out of the box with sensible defaults
@@ -54,12 +54,12 @@ echo render('settings.php', ['user' => $currentUser]);
 **Child template:**
 ```php
 // _views/home.php
-<?php $extend(); ?>  <!-- Uses $layout from _viewstart.php -->
-<?php $block('title', 'Home Page'); ?>
-<?php $block('content'); ?>
+<?php $this->extend(); ?>  <!-- Uses $layout from _viewstart.php -->
+<?php $this->block('title', 'Home Page'); ?>
+<?php $this->block('content'); ?>
     <h1>Welcome!</h1>
     <p>This is the home page content.</p>
-<?php $end(); ?>
+<?php $this->end(); ?>
 ```
 
 **Parent layout:**
@@ -68,14 +68,14 @@ echo render('settings.php', ['user' => $currentUser]);
 <!DOCTYPE html>
 <html>
 <head>
-    <title><?php $show('title', 'My App'); ?></title>
+    <title><?php $this->show('title', 'My App'); ?></title>
 </head>
 <body>
     <header>
         <nav>...</nav>
     </header>
     <main>
-        <?php $show('content'); ?>
+        <?php $this->show('content'); ?>
     </main>
     <footer>...</footer>
 </body>
@@ -90,50 +90,50 @@ echo render('home.php');
 
 ## Template Helpers
 
-Templates have access to four special helper functions:
+Templates have access to four methods on `$this`:
 
-### `$extend(?string $layout = null)`
+### `$this->extend(?string $layout = null)`
 Marks the current template as extending a parent layout:
 
 ```php
-<?php $extend(); ?>              // Use default $layout from _viewstart.php
-<?php $extend('_layout.php'); ?> // Explicit layout
+<?php $this->extend(); ?>              // Use default $layout from _viewstart.php
+<?php $this->extend('_layout.php'); ?> // Explicit layout
 ```
 
-### `$block(string $name, ?string $value = null)`
+### `$this->block(string $name, ?string $value = null)`
 Defines a block (two modes):
 
 **Inline mode:**
 ```php
-<?php $block('title', 'My Page Title'); ?>
+<?php $this->block('title', 'My Page Title'); ?>
 ```
 
 **Buffered mode:**
 ```php
-<?php $block('content'); ?>
+<?php $this->block('content'); ?>
     <p>Multiple lines of content...</p>
-    <p>...captured until $end() is called.</p>
-<?php $end(); ?>
+    <p>...captured until $this->end() is called.</p>
+<?php $this->end(); ?>
 ```
 
-### `$end()`
-Ends a buffered block started with `$block()`:
+### `$this->end()`
+Ends a buffered block started with `$this->block()`:
 
 ```php
-<?php $block('sidebar'); ?>
+<?php $this->block('sidebar'); ?>
     <ul>
         <li>Item 1</li>
         <li>Item 2</li>
     </ul>
-<?php $end(); ?>
+<?php $this->end(); ?>
 ```
 
-### `$show(string $name, string $default = '')`
+### `$this->show(string $name, string $default = '')`
 Outputs a block in parent templates:
 
 ```php
-<title><?php $show('title', 'Default Title'); ?></title>
-<div class="content"><?php $show('content'); ?></div>
+<title><?php $this->show('title', 'Default Title'); ?></title>
+<div class="content"><?php $this->show('content'); ?></div>
 ```
 
 ## ViewStart Files
@@ -164,14 +164,14 @@ The root `_viewstart.php` typically sets the default layout:
 $layout = '_layout.php';
 ```
 
-Templates can then use `$extend()` without arguments:
+Templates can then use `$this->extend()` without arguments:
 
 ```php
 // _views/page.php
-<?php $extend(); ?>  // Uses '_layout.php' from _viewstart.php
-<?php $block('content'); ?>
+<?php $this->extend(); ?>  // Uses '_layout.php' from _viewstart.php
+<?php $this->block('content'); ?>
     <p>Page content</p>
-<?php $end(); ?>
+<?php $this->end(); ?>
 ```
 
 ### Section-Specific Setup
@@ -187,13 +187,13 @@ $adminSection = true;           // Variable available to all admin templates
 
 ```php
 // _views/admin/dashboard.php
-<?php $extend(); ?>  // Uses '_admin-layout.php'
-<?php $block('content'); ?>
+<?php $this->extend(); ?>  // Uses '_admin-layout.php'
+<?php $this->block('content'); ?>
     <h1>Admin Dashboard</h1>
     <?php if ($adminSection): ?>
         <p>You are in the admin section.</p>
     <?php endif; ?>
-<?php $end(); ?>
+<?php $this->end(); ?>
 ```
 
 ### Event Hooks
@@ -217,28 +217,28 @@ You can extend layouts that themselves extend other layouts:
 
 ```php
 // _views/two-column.php
-<?php $extend('_layout.php'); ?>
-<?php $block('content'); ?>
+<?php $this->extend('_layout.php'); ?>
+<?php $this->block('content'); ?>
     <div class="row">
-        <div class="col-main"><?php $show('main'); ?></div>
-        <div class="col-sidebar"><?php $show('sidebar'); ?></div>
+        <div class="col-main"><?php $this->show('main'); ?></div>
+        <div class="col-sidebar"><?php $this->show('sidebar'); ?></div>
     </div>
-<?php $end(); ?>
+<?php $this->end(); ?>
 ```
 
 ```php
 // _views/dashboard.php
-<?php $extend('two-column.php'); ?>
-<?php $block('title', 'Dashboard'); ?>
-<?php $block('main'); ?>
+<?php $this->extend('two-column.php'); ?>
+<?php $this->block('title', 'Dashboard'); ?>
+<?php $this->block('main'); ?>
     <h1>Dashboard</h1>
     <p>Main content here</p>
-<?php $end(); ?>
-<?php $block('sidebar'); ?>
+<?php $this->end(); ?>
+<?php $this->block('sidebar'); ?>
     <ul>
         <li>Sidebar item</li>
     </ul>
-<?php $end(); ?>
+<?php $this->end(); ?>
 ```
 
 ## Including Partials
@@ -274,10 +274,10 @@ $layout = $user['role'] === 'admin' ? '_admin-layout.php' : '_layout.php';
 
 ```php
 // _views/page.php
-<?php $extend($layout); ?>
-<?php $block('content'); ?>
+<?php $this->extend($layout); ?>
+<?php $this->block('content'); ?>
     <p>Content here</p>
-<?php $end(); ?>
+<?php $this->end(); ?>
 ```
 
 ### Conditional Blocks
@@ -287,13 +287,13 @@ $layout = $user['role'] === 'admin' ? '_admin-layout.php' : '_layout.php';
 <!DOCTYPE html>
 <html>
 <head>
-    <title><?php $show('title', 'My App'); ?></title>
-    <?php if (isset($blocks['meta'])): ?>
-        <?php $show('meta'); ?>
+    <title><?php $this->show('title', 'My App'); ?></title>
+    <?php if (isset($this->blocks['meta'])): ?>
+        <?php $this->show('meta'); ?>
     <?php endif; ?>
 </head>
 <body>
-    <?php $show('content'); ?>
+    <?php $this->show('content'); ?>
 </body>
 </html>
 ```
@@ -303,7 +303,7 @@ $layout = $user['role'] === 'admin' ? '_admin-layout.php' : '_layout.php';
 ```php
 // _views/_layout.php
 <aside class="sidebar">
-    <?php $show('sidebar', '<p>Default sidebar content</p>'); ?>
+    <?php $this->show('sidebar', '<p>Default sidebar content</p>'); ?>
 </aside>
 ```
 
@@ -415,8 +415,8 @@ return new App\CustomRenderer();
 1. **Template Discovery**: Uses path registry to locate template files
 2. **ViewStart**: Includes `_viewstart.php` files from root to template directory (stacked)
 3. **Rendering**: PHP file is included with extracted variables
-4. **Block Capture**: `$block()` captures content via output buffering
-5. **Inheritance**: If `$extend()` was called, re-render parent with blocks
+4. **Block Capture**: `$this->block()` captures content via output buffering
+5. **Inheritance**: If `$this->extend()` was called, re-render parent with blocks
 6. **Output**: Final rendered content returned as string
 
 The renderer handles multi-level inheritance by recursively rendering parent templates, passing captured blocks upward through the `__blocks` variable. ViewStart files only run for the initial template, not for parent layouts.
@@ -463,9 +463,9 @@ Rendering errors are caught and returned as strings for easier debugging during 
 
 ```php
 // _views/blog/post.php
-<?php $extend(); ?>
-<?php $block('title', htmlspecialchars($post['title'])); ?>
-<?php $block('content'); ?>
+<?php $this->extend(); ?>
+<?php $this->block('title', htmlspecialchars($post['title'])); ?>
+<?php $this->block('content'); ?>
     <article>
         <h1><?= htmlspecialchars($post['title']) ?></h1>
         <time><?= $post['published_at'] ?></time>
@@ -473,22 +473,22 @@ Rendering errors are caught and returned as strings for easier debugging during 
             <?= $post['body'] ?> <!-- Already sanitized -->
         </div>
     </article>
-<?php $end(); ?>
+<?php $this->end(); ?>
 ```
 
 ### Admin Dashboard
 
 ```php
 // _views/admin/dashboard.php
-<?php $extend('admin/_layout.php'); ?>
-<?php $block('title', 'Admin Dashboard'); ?>
-<?php $block('content'); ?>
+<?php $this->extend('admin/_layout.php'); ?>
+<?php $this->block('title', 'Admin Dashboard'); ?>
+<?php $this->block('content'); ?>
     <h1>Dashboard</h1>
     <div class="stats">
         <?= mini\render('admin/partials/stat-card.php', ['label' => 'Users', 'value' => $userCount]) ?>
         <?= mini\render('admin/partials/stat-card.php', ['label' => 'Posts', 'value' => $postCount]) ?>
     </div>
-<?php $end(); ?>
+<?php $this->end(); ?>
 ```
 
 ### JSON API with Template

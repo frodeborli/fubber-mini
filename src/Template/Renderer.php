@@ -7,19 +7,19 @@ use mini\Mini;
 /**
  * Default template renderer with inheritance support
  *
- * Supports multi-level template inheritance via extend() and block() helpers.
+ * Supports multi-level template inheritance via $this->extend() and $this->block().
  * Uses the views path registry to locate template files.
  *
  * Template inheritance example:
  * ```php
  * // child.php
- * <?php $extend('layout.php'); ?>
- * <?php $block('title', 'My Page'); ?>
- * <?php $block('content'); ?><p>Content here</p><?php $end(); ?>
+ * <?php $this->extend('layout.php'); ?>
+ * <?php $this->block('title', 'My Page'); ?>
+ * <?php $this->block('content'); ?><p>Content here</p><?php $this->end(); ?>
  *
  * // layout.php
- * <html><head><title><?php $show('title', 'Untitled'); ?></title></head>
- * <body><?php $show('content'); ?></body></html>
+ * <html><head><title><?php $this->show('title', 'Untitled'); ?></title></head>
+ * <body><?php $this->show('content'); ?></body></html>
  * ```
  */
 class Renderer implements RendererInterface
@@ -88,35 +88,22 @@ class Renderer implements RendererInterface
 
         // Find and include _viewstart.php files (stacked, root first)
         // Only for initial render, not when extending parent layouts
-        $layout = null;
         if (!isset($vars['__blocks'])) {
             $viewstartVars = $this->includeViewstarts($template, $vars);
-            $layout = $viewstartVars['layout'] ?? null;
+            $ctx->setDefaultLayout($viewstartVars['layout'] ?? null);
             $vars = $viewstartVars['vars'];
         }
 
-        // Make helper closures available in template scope
-        $extend = fn(?string $file = null) => $ctx->extend($file ?? $layout ?? throw new \LogicException('No layout specified and no $layout default set'));
-        $block  = fn(string $name, ?string $value = null) => $ctx->block($name, $value);
-        $end    = fn() => $ctx->end();
-        $show   = fn(string $name, string $default = '') => $ctx->show($name, $default);
-
         // Merge blocks from lower-level (child) into current context BEFORE rendering
-        // This ensures $show() calls in parent templates can access child blocks
+        // This ensures $this->show() calls in parent templates can access child blocks
         if (isset($vars['__blocks'])) {
             $ctx->blocks = $vars['__blocks'] + $ctx->blocks;
         }
 
-        // Isolated scope render function
-        $renderOnce = function(string $__file, array $__vars) use ($extend, $block, $end, $show) {
-            extract($__vars, EXTR_SKIP);
-            require $__file;
-        };
-
-        // Render template
+        // Render template with $this bound to context
         ob_start();
         try {
-            $renderOnce($templatePath, $vars);
+            $ctx->include($templatePath, $vars);
         } catch (\Throwable $e) {
             ob_end_clean();
             throw $e;
@@ -127,7 +114,7 @@ class Renderer implements RendererInterface
         // and we didn't receive blocks from a child (meaning we're not a parent template)
         if ($output !== '' && !isset($vars['__blocks'])) {
             if (isset($ctx->blocks['content'])) {
-                throw new \LogicException('Template has output outside of blocks which will be discarded. Wrap all output in $block()/$end().');
+                throw new \LogicException('Template has output outside of blocks which will be discarded. Wrap all output in $this->block()/$this->end().');
             }
             $ctx->blocks['content'] = $output;
         }

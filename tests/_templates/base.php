@@ -1,15 +1,15 @@
 <!DOCTYPE html>
-<html lang="<?php $show('lang', 'en'); ?>">
+<html lang="<?php $this->show('lang', 'en'); ?>">
 <head>
   <meta charset="UTF-8">
-  <title><?php $show('title', 'My Site'); ?></title>
-  <?php $show('head'); ?>
+  <title><?php $this->show('title', 'My Site'); ?></title>
+  <?php $this->show('head'); ?>
 </head>
-<body class="<?php $show('body-class', ''); ?>">
-  <nav><?php $show('nav', '<a href="/">Home</a>'); ?></nav>
+<body class="<?php $this->show('body-class', ''); ?>">
+  <nav><?php $this->show('nav', '<a href="/">Home</a>'); ?></nav>
 
-  <?php $show('layout'); ?>
+  <?php $this->show('layout'); ?>
 
-  <footer><?php $show('footer', '© ' . date('Y')); ?></footer>
+  <footer><?php $this->show('footer', '© ' . date('Y')); ?></footer>
 </body>
 </html>

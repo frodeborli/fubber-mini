@@ -82,10 +82,10 @@ return fn() => User::mine()->limit(20);
 Example template:
 
 ```php
-<?php $extend('layout.php'); ?>
-<?php $block('content'); ?>
+<?php $this->extend('layout.php'); ?>
+<?php $this->block('content'); ?>
     <h1>Hello <?= h($user->name) ?></h1>
-<?php $end(); ?>
+<?php $this->end(); ?>
 ```
 
 Example async code:

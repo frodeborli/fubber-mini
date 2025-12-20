@@ -1,16 +1,16 @@
 <?php
 // This layout extends base.php
-$extend('base.php');
+$this->extend('base.php');
 
 // Override some base blocks (inline syntax)
-$block('body-class', 'with-sidebar');
+$this->block('body-class', 'with-sidebar');
 
 // Define the layout block with sidebar structure (buffered syntax)
-$block('layout'); ?>
+$this->block('layout'); ?>
   <div class="sidebar">
-    <?php $show('sidebar', '<p>Default sidebar</p>'); ?>
+    <?php $this->show('sidebar', '<p>Default sidebar</p>'); ?>
   </div>
   <main>
-    <?php $show('content'); ?>
+    <?php $this->show('content'); ?>
   </main>
-<?php $end();
+<?php $this->end();

@@ -1,17 +1,17 @@
 <?php
 // Extend parent layout
-$extend('layout.php');
+$this->extend('layout.php');
 
 // Define title block (using buffered syntax for dynamic content)
-$block('title'); ?>Welcome, <?= htmlspecialchars($user['name']) ?><?php $end();
+$this->block('title'); ?>Welcome, <?= htmlspecialchars($user['name']) ?><?php $this->end();
 
 // Define header block
-$block('header'); ?>
+$this->block('header'); ?>
   Welcome to the site, <?= htmlspecialchars($user['name']) ?>!
-<?php $end();
+<?php $this->end();
 
 // Define content block
-$block('content'); ?>
+$this->block('content'); ?>
   <p>This is the main content area.</p>
   <p>User email: <?= htmlspecialchars($user['email']) ?></p>
-<?php $end();
+<?php $this->end();

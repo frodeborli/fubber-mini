@@ -37,7 +37,7 @@ function assertContains(string $needle, string $haystack, string $message = ''):
 }
 
 // Add test templates directory to views path registry
-mini\Mini::$mini->paths->views->addPath(__DIR__ . '/templates');
+mini\Mini::$mini->paths->views->addPath(__DIR__ . '/../_templates');
 
 echo "Template Rendering Tests\n";
 echo "========================\n\n";
@@ -51,7 +51,7 @@ test("Simple template renders correctly", function() {
 
 // Test 2: Template with inheritance
 test("Template inheritance works", function() {
-    $output = render('child.php', [
+    $output = render('test-child.php', [
         'user' => ['name' => 'Bob', 'email' => 'bob@example.com']
     ]);
 
@@ -64,7 +64,7 @@ test("Template inheritance works", function() {
 
 // Test 3: Block defaults work
 test("Block defaults are used when not defined", function() {
-    $output = render('child.php', [
+    $output = render('test-child.php', [
         'user' => ['name' => 'Charlie', 'email' => 'charlie@example.com']
     ]);
 
@@ -81,7 +81,7 @@ test("HTML escaping works correctly", function() {
 
 // Test 5: Variables are available in child and layout
 test("Variables are available in both child and parent", function() {
-    $output = render('child.php', [
+    $output = render('test-child.php', [
         'user' => ['name' => 'Dave', 'email' => 'dave@example.com']
     ]);
 

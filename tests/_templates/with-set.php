@@ -1,16 +1,16 @@
 <?php
 // Extend parent layout
-$extend('layout.php');
+$this->extend('layout.php');
 
-// Use $block() inline for simple string values
-$block('title', 'Page with dual-use $block()');
-$block('header', 'Using Dual-Use $block() Helper');
+// Use $this->block() inline for simple string values
+$this->block('title', 'Page with dual-use $block()');
+$this->block('header', 'Using Dual-Use $block() Helper');
 
-// Use $block()/$end() for complex content
-$block('content'); ?>
+// Use $this->block()/$this->end() for complex content
+$this->block('content'); ?>
   <p>The $block() function works two ways: inline or buffered.</p>
   <p>User: <?= htmlspecialchars($user['name']) ?></p>
-<?php $end();
+<?php $this->end();
 
 // Inline for simple values
-$block('footer', '© 2025 Example Corp');
+$this->block('footer', '© 2025 Example Corp');

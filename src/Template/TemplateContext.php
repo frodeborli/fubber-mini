@@ -3,21 +3,18 @@
 namespace mini\Template;
 
 /**
- * Template context for managing inheritance and blocks
+ * Template context - the $this object available in templates
  *
- * Internal implementation detail used by Renderer for:
- * - Multi-level inheritance ($extend)
- * - Block overrides ($block / $end)
- * - Dual-use $block(): inline or buffered
- *
- * This class is not intended for direct use by developers - it's managed
- * internally by the template renderer.
+ * Provides template inheritance via:
+ * - $this->extend() - extend a parent layout
+ * - $this->block() / $this->end() - define blocks
+ * - $this->show() - output blocks in parent templates
  *
  * Example usage within templates:
  * ```php
- * <?php $extend('layout.php'); ?>
- * <?php $block('title', 'Home'); ?>
- * <?php $block('content'); ?><p>Hello!</p><?php $end(); ?>
+ * <?php $this->extend('layout.php'); ?>
+ * <?php $this->block('title', 'Home'); ?>
+ * <?php $this->block('content'); ?><p>Hello!</p><?php $this->end(); ?>
  * ```
  */
 final class TemplateContext
@@ -25,15 +22,27 @@ final class TemplateContext
     public ?string $layout = null;
     public array $blocks = [];
     private array $stack = [];
+    private ?string $defaultLayout = null;
+
+    /**
+     * Set the default layout (called from viewstart processing)
+     */
+    public function setDefaultLayout(?string $layout): void
+    {
+        $this->defaultLayout = $layout;
+    }
 
     /**
      * Mark this template as extending a parent layout
      *
-     * @param string $file Parent template filename
+     * @param string|null $file Parent template filename (uses default if null)
+     * @throws \LogicException If no layout specified and no default set
      */
-    public function extend(string $file): void
+    public function extend(?string $file = null): void
     {
-        $this->layout = $file;
+        $this->layout = $file ?? $this->defaultLayout ?? throw new \LogicException(
+            'No layout specified and no $layout default set'
+        );
     }
 
     /**
@@ -78,5 +87,17 @@ final class TemplateContext
     public function show(string $name, string $default = ''): void
     {
         echo $this->blocks[$name] ?? $default;
+    }
+
+    /**
+     * Include a template file with $this bound to this context
+     *
+     * @param string $__file Absolute path to template file
+     * @param array $__vars Variables to extract into template scope
+     */
+    public function include(string $__file, array $__vars): void
+    {
+        extract($__vars, EXTR_SKIP);
+        require $__file;
     }
 }

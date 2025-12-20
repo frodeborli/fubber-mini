@@ -27,7 +27,7 @@ Mini::$mini->addService(RendererInterface::class, Lifetime::Singleton, fn() => M
 /**
  * Render a template with provided variables
  *
- * Supports multi-level template inheritance via extend() and block() helpers.
+ * Supports multi-level template inheritance via $this->extend() and $this->block().
  * Uses path registry to find templates in _views/ directory.
  *
  * Simple templates:
@@ -38,13 +38,13 @@ Mini::$mini->addService(RendererInterface::class, Lifetime::Singleton, fn() => M
  * With layout inheritance:
  * ```php
  * // child.php
- * <?php $extend('layout.php'); ?>
- * <?php $block('title', 'My Page'); ?>
- * <?php $block('content'); ?><p>Content here</p><?php $end(); ?>
+ * <?php $this->extend('layout.php'); ?>
+ * <?php $this->block('title', 'My Page'); ?>
+ * <?php $this->block('content'); ?><p>Content here</p><?php $this->end(); ?>
  *
  * // layout.php
- * <html><head><title><?php $show('title', 'Untitled'); ?></title></head>
- * <body><?php $show('content'); ?></body></html>
+ * <html><head><title><?php $this->show('title', 'Untitled'); ?></title></head>
+ * <body><?php $this->show('content'); ?></body></html>
  * ```
  *
  * Including sub-templates (partials):

@@ -607,18 +607,18 @@ Templates support multi-level inheritance:
 
 ```php
 // _views/user/profile.php
-<?php $extend('layouts/main.php'); ?>
-<?php $block('title', 'User Profile'); ?>
-<?php $block('content'); ?>
+<?php $this->extend('layouts/main.php'); ?>
+<?php $this->block('title', 'User Profile'); ?>
+<?php $this->block('content'); ?>
     <h1><?= htmlspecialchars($user->name) ?></h1>
     <p><?= t("Member since {date}", ['date' => fmt()->dateShort($user->created)]) ?></p>
-<?php $end(); ?>
+<?php $this->end(); ?>
 
 // _views/layouts/main.php
 <!DOCTYPE html>
 <html>
-<head><title><?php $show('title', 'Untitled'); ?></title></head>
-<body><?php $show('content'); ?></body>
+<head><title><?php $this->show('title', 'Untitled'); ?></title></head>
+<body><?php $this->show('content'); ?></body>
 </html>
 ```
 

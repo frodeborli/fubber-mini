@@ -1,4 +1,4 @@
 <html>
-<head><title><?php $show('title', 'Untitled'); ?></title></head>
-<body><?php $show('content'); ?></body>
+<head><title><?php $this->show('title', 'Untitled'); ?></title></head>
+<body><?php $this->show('content'); ?></body>
 </html>
