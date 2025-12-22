@@ -1,6 +1,6 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Utility;
 
 /**
  * Provides arbitrary property storage for tables

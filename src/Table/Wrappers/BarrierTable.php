@@ -1,5 +1,14 @@
 <?php
-namespace mini\Table;
+namespace mini\Table\Wrappers;
+
+use mini\Table\AbstractTable;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Types\Operator;
+use mini\Table\OrderDef;
+use mini\Table\Predicate;
+use mini\Table\Utility\EmptyTable;
+use mini\Table\Utility\TablePropertiesTrait;
 
 /**
  * Barrier that prevents filter/order pushdown to preserve result set membership

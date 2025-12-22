@@ -2,6 +2,15 @@
 namespace mini\Table;
 
 use Closure;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
+use mini\Table\Types\Operator;
+use mini\Table\Utility\EmptyTable;
+use mini\Table\Wrappers\FilteredTable;
+use mini\Table\Wrappers\OrTable;
+use mini\Table\Wrappers\SortedTable;
 use Traversable;
 
 /**

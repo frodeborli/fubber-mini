@@ -1,7 +1,11 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Wrappers;
 
+use mini\Table\AbstractTable;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Utility\TablePropertiesTrait;
 use stdClass;
 use Traversable;
 

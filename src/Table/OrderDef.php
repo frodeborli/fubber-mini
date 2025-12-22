@@ -26,7 +26,7 @@ readonly class OrderDef
             if ($part === '') {
                 continue;
             }
-            if (preg_match('/^(\w+)(?:\s+(ASC|DESC))?$/i', $part, $m)) {
+            if (preg_match('/^([\w.]+)(?:\s+(ASC|DESC))?$/i', $part, $m)) {
                 $column = $m[1];
                 $asc = !isset($m[2]) || strtoupper($m[2]) === 'ASC';
                 $result[] = new self($column, $asc);

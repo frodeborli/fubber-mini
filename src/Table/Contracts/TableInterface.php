@@ -1,9 +1,11 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Contracts;
 
 use Countable;
 use IteratorAggregate;
+use mini\Table\ColumnDef;
+use mini\Table\Predicate;
 
 /**
  * Interface for tabular data access with filtering, ordering, and pagination
@@ -51,7 +53,8 @@ interface TableInterface extends SetInterface, IteratorAggregate, Countable
      * Get column definitions for this table (SetInterface method)
      *
      * Returns ColumnDef objects keyed by column name, with index metadata
-     * for query optimization.
+     * for query optimization. Respects column projection - only returns
+     * columns that are currently visible.
      *
      * ```php
      * $cols = $table->getColumns();
@@ -63,6 +66,23 @@ interface TableInterface extends SetInterface, IteratorAggregate, Countable
      * @return array<string, ColumnDef> Column name => ColumnDef
      */
     public function getColumns(): array;
+
+    /**
+     * Get all column definitions regardless of projection
+     *
+     * Unlike getColumns(), this returns the full schema even after columns()
+     * has been called. Used by wrappers that need to filter/sort on columns
+     * that aren't in the output projection.
+     *
+     * ```php
+     * $projected = $table->columns('id', 'name');
+     * $projected->getColumns();     // ['id' => ..., 'name' => ...]
+     * $projected->getAllColumns();  // ['id' => ..., 'name' => ..., 'email' => ..., ...]
+     * ```
+     *
+     * @return array<string, ColumnDef> Column name => ColumnDef
+     */
+    public function getAllColumns(): array;
 
     /**
      * Filter rows where column equals value (NULL uses IS NULL semantics)

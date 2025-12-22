@@ -1,5 +1,5 @@
 <?php
-namespace mini\Table;
+namespace mini\Table\Types;
 
 enum Operator: string {
     case Eq = '=';

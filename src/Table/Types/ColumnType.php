@@ -1,6 +1,6 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Types;
 
 /**
  * Column data type for comparison semantics
@@ -16,6 +16,9 @@ enum ColumnType
 
     /** Floating point values - binary comparison */
     case Float;
+
+    /** Arbitrary precision decimal values stored as strings - custom comparison */
+    case Decimal;
 
     /** Text values - uses collator for locale-aware comparison */
     case Text;
@@ -41,22 +44,37 @@ enum ColumnType
     }
 
     /**
-     * Whether this column type stores numeric values (Int or Float)
+     * Whether this column type stores numeric values
      */
     public function isNumeric(): bool
     {
-        return $this === self::Int || $this === self::Float;
+        return $this === self::Int || $this === self::Float || $this === self::Decimal;
     }
 
     /**
-     * Get the SQLite column type for schema creation
+     * Whether this column type requires custom comparison (not native PHP <=>)
+     */
+    public function needsCustomComparison(): bool
+    {
+        return $this === self::Text || $this === self::Decimal;
+    }
+
+    /**
+     * Get the SQL column type name
+     *
+     * Returns the base SQL type. For types with parameters (like DECIMAL),
+     * use sqlTypeWithParams() to include precision/scale.
      */
     public function sqlType(): string
     {
         return match ($this) {
             self::Int => 'INTEGER',
             self::Float => 'REAL',
-            self::Text, self::Date, self::Time, self::DateTime => 'TEXT',
+            self::Decimal => 'DECIMAL',
+            self::Text => 'TEXT',
+            self::Date => 'DATE',
+            self::Time => 'TIME',
+            self::DateTime => 'DATETIME',
             self::Binary => 'BLOB',
         };
     }

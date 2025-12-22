@@ -1,7 +1,12 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Utility;
 
+use mini\Table\AbstractTable;
+use mini\Table\ColumnDef;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Predicate;
 use Traversable;
 
 /**
@@ -18,6 +23,8 @@ use Traversable;
  */
 final class EmptyTable extends AbstractTable
 {
+    use TablePropertiesTrait;
+    
     public function __construct(ColumnDef ...$columns)
     {
         parent::__construct(...$columns);

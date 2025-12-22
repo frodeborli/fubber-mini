@@ -1,8 +1,12 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Wrappers;
 
 use Closure;
+use mini\Table\AbstractTable;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Predicate;
 use Traversable;
 
 /**
@@ -16,7 +20,6 @@ use Traversable;
  */
 abstract class AbstractTableWrapper extends AbstractTable
 {
-
     protected AbstractTable $source;
 
     public function __construct(

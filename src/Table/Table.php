@@ -2,42 +2,43 @@
 
 namespace mini\Table;
 
+use Countable;
+use IteratorAggregate;
+use mini\Table\Contracts\MutableTableInterface;
+use mini\Table\Contracts\TableInterface;
 use Traversable;
 
 /**
- * Final table wrapper with parameter binding support
+ * User-facing table wrapper with parameter binding support
  *
- * Provides a strict API around TableInterface with support for
- * bindable predicates, enabling reusable query templates:
+ * Table wraps a TableInterface and provides a minimal, predictable API
+ * for end users. All methods return Table for consistent chaining.
  *
  * ```php
- * // Build reusable query with bindable params
- * $ordersByStatus = Table::from($orders)
- *     ->eqBind('status', ':status')
- *     ->columns('id', 'user_id');
+ * $users = Table::from($usersTable);
  *
- * // Bind and execute
- * $shipped = $ordersByStatus->bind([':status' => 'shipped']);
- * $pending = $ordersByStatus->bind([':status' => 'pending']);
- *
- * // Use in subqueries (for correlated queries)
- * $userOrders = Table::from($orders)
- *     ->eqBind('user_id', ':uid')
- *     ->columns('id');
- *
- * foreach ($users as $user) {
- *     $bound = $userOrders->bind([':uid' => $user->id]);
- *     // $bound is now a SetInterface for this user's orders
+ * // Filtering and iteration
+ * foreach ($users->eq('status', 'active')->order('name')->limit(10) as $user) {
+ *     echo $user->name;
  * }
- * ```
  *
- * Iterating a table with unbound parameters throws RuntimeException.
+ * // Bindable parameters for reusable queries
+ * $byStatus = $users->eqBind('status', ':status');
+ * $active = $byStatus->bind([':status' => 'active']);
+ * $pending = $byStatus->bind([':status' => 'pending']);
+ *
+ * // Mutations (if table is mutable)
+ * $users->insert(['name' => 'Alice', 'status' => 'active']);
+ * $users->eq('status', 'inactive')->delete();
+ * $users->eq('id', 123)->update(['status' => 'active']);
+ * ```
  */
-final class Table implements TableInterface
+final class Table implements IteratorAggregate, Countable
 {
-    use TablePropertiesTrait;
-
     private TableInterface $source;
+
+    /** @var MutableTableInterface|null Root table for mutations */
+    private ?MutableTableInterface $mutableRoot = null;
 
     /** @var array<string|int, list<array{string, string}>> param => [[column, operator], ...] */
     private array $binds = [];
@@ -45,15 +46,21 @@ final class Table implements TableInterface
     /** @var string[]|null Deferred column projection (applied at iteration) */
     private ?array $deferredColumns = null;
 
+    /** @var Predicate[]|null Deferred OR predicates (applied at iteration) */
+    private ?array $deferredPredicates = null;
+
     private function __construct(TableInterface $source)
     {
         $this->source = $source;
+        if ($source instanceof MutableTableInterface) {
+            $this->mutableRoot = $source;
+        }
     }
 
     /**
      * Create a Table wrapper from any TableInterface
      */
-    public static function from(TableInterface $source): self
+    public static function from(self|TableInterface $source): self
     {
         if ($source instanceof self) {
             return $source;
@@ -62,14 +69,72 @@ final class Table implements TableInterface
     }
 
     // =========================================================================
+    // Mutation methods
+    // =========================================================================
+
+    /**
+     * Check if this table supports mutations (insert/update/delete)
+     */
+    public function isMutable(): bool
+    {
+        return $this->mutableRoot !== null;
+    }
+
+    /**
+     * Insert a new row
+     *
+     * @throws \RuntimeException if table is not mutable
+     */
+    public function insert(array $row): int|string
+    {
+        if ($this->mutableRoot === null) {
+            throw new \RuntimeException('Table does not support mutations');
+        }
+        return $this->mutableRoot->insert($row);
+    }
+
+    /**
+     * Update rows matching current filters
+     *
+     * @throws \RuntimeException if table is not mutable or has unbound parameters
+     */
+    public function update(array $changes): int
+    {
+        if ($this->mutableRoot === null) {
+            throw new \RuntimeException('Table does not support mutations');
+        }
+        if (!empty($this->binds)) {
+            throw new \RuntimeException(
+                "Cannot update: unbound parameters: " . implode(', ', array_keys($this->binds))
+            );
+        }
+        return $this->mutableRoot->update($this->getEffectiveSource(), $changes);
+    }
+
+    /**
+     * Delete rows matching current filters
+     *
+     * @throws \RuntimeException if table is not mutable or has unbound parameters
+     */
+    public function delete(): int
+    {
+        if ($this->mutableRoot === null) {
+            throw new \RuntimeException('Table does not support mutations');
+        }
+        if (!empty($this->binds)) {
+            throw new \RuntimeException(
+                "Cannot delete: unbound parameters: " . implode(', ', array_keys($this->binds))
+            );
+        }
+        return $this->mutableRoot->delete($this->getEffectiveSource());
+    }
+
+    // =========================================================================
     // Bindable predicates
     // =========================================================================
 
     /**
      * Add bindable equality predicate
-     *
-     * @param string $column Column to filter
-     * @param string|int $param Parameter name (':name') or position (0, 1, ...)
      */
     public function eqBind(string $column, string|int $param): self
     {
@@ -131,26 +196,32 @@ final class Table implements TableInterface
     /**
      * Bind parameter values
      *
-     * Returns a new Table with the given parameters bound. The predicates
-     * are applied to the underlying source immediately.
-     *
-     * The same parameter can be used in multiple predicates:
-     * ```php
-     * // WHERE price > :val AND cost < :val
-     * $table->gtBind('price', ':val')->ltBind('cost', ':val')->bind([':val' => 100]);
-     * ```
-     *
      * @param array<string|int, mixed> $values Parameter values keyed by name or position
      * @throws \InvalidArgumentException If an unknown parameter is provided
      */
     public function bind(array $values): self
     {
         $c = clone $this;
+
+        // Bind to deferred predicates
+        if ($c->deferredPredicates !== null) {
+            $c->deferredPredicates = array_map(
+                fn(Predicate $p) => $p->bind($values),
+                $c->deferredPredicates
+            );
+        }
+
+        // Bind to direct filters
         foreach ($values as $param => $value) {
             if (!isset($c->binds[$param])) {
                 throw new \InvalidArgumentException("Unknown parameter: $param");
             }
-            foreach ($c->binds[$param] as [$column, $op]) {
+            foreach ($c->binds[$param] as $bind) {
+                // Skip 'or' markers - those are handled via deferredPredicates
+                if ($bind[0] === 'or') {
+                    continue;
+                }
+                [$column, $op] = $bind;
                 $c->source = match ($op) {
                     'eq' => $c->source->eq($column, $value),
                     'lt' => $c->source->lt($column, $value),
@@ -171,21 +242,139 @@ final class Table implements TableInterface
      */
     public function isBound(): bool
     {
-        return empty($this->binds);
+        if (!empty($this->binds)) {
+            return false;
+        }
+        if ($this->deferredPredicates !== null) {
+            foreach ($this->deferredPredicates as $p) {
+                if (!$p->isBound()) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /**
      * Get list of unbound parameter names
-     *
-     * @return array<string|int>
      */
     public function getUnboundParameters(): array
     {
-        return array_keys($this->binds);
+        $params = array_keys($this->binds);
+        if ($this->deferredPredicates !== null) {
+            foreach ($this->deferredPredicates as $p) {
+                $params = array_merge($params, $p->getUnboundParams());
+            }
+        }
+        return array_unique($params);
     }
 
     // =========================================================================
-    // TableInterface delegation
+    // Filter methods
+    // =========================================================================
+
+    public function eq(string $column, int|float|string|null $value): self
+    {
+        $c = clone $this;
+        $c->source = $c->source->eq($column, $value);
+        return $c;
+    }
+
+    public function lt(string $column, int|float|string $value): self
+    {
+        $c = clone $this;
+        $c->source = $c->source->lt($column, $value);
+        return $c;
+    }
+
+    public function lte(string $column, int|float|string $value): self
+    {
+        $c = clone $this;
+        $c->source = $c->source->lte($column, $value);
+        return $c;
+    }
+
+    public function gt(string $column, int|float|string $value): self
+    {
+        $c = clone $this;
+        $c->source = $c->source->gt($column, $value);
+        return $c;
+    }
+
+    public function gte(string $column, int|float|string $value): self
+    {
+        $c = clone $this;
+        $c->source = $c->source->gte($column, $value);
+        return $c;
+    }
+
+    public function like(string $column, string $pattern): self
+    {
+        $c = clone $this;
+        $c->source = $c->source->like($column, $pattern);
+        return $c;
+    }
+
+    public function or(Predicate ...$predicates): self
+    {
+        $c = clone $this;
+
+        // Check for unbound params in predicates
+        $hasUnbound = false;
+        foreach ($predicates as $p) {
+            foreach ($p->getUnboundParams() as $param) {
+                $c->binds[$param][] = ['or', count($predicates)]; // marker for or predicates
+                $hasUnbound = true;
+            }
+        }
+
+        if ($hasUnbound) {
+            // Defer predicates until bound
+            $c->deferredPredicates = $predicates;
+        } else {
+            // All bound, apply immediately
+            $c->source = $c->source->or(...$predicates);
+        }
+
+        return $c;
+    }
+
+    public function columns(string ...$columns): self
+    {
+        $c = clone $this;
+        if ($this->deferredColumns !== null) {
+            $c->deferredColumns = array_values(
+                array_intersect($columns, $this->deferredColumns)
+            );
+        } else {
+            $c->deferredColumns = $columns;
+        }
+        return $c;
+    }
+
+    public function order(?string $spec): self
+    {
+        $c = clone $this;
+        $c->source = $c->source->order($spec);
+        return $c;
+    }
+
+    public function limit(int $n): self
+    {
+        $c = clone $this;
+        $c->source = $c->source->limit($n);
+        return $c;
+    }
+
+    public function offset(int $n): self
+    {
+        $c = clone $this;
+        $c->source = $c->source->offset($n);
+        return $c;
+    }
+
+    // =========================================================================
+    // Iteration and data access
     // =========================================================================
 
     public function getIterator(): Traversable
@@ -208,166 +397,6 @@ final class Table implements TableInterface
         return $this->getEffectiveSource()->count();
     }
 
-    public function getColumns(): array
-    {
-        if ($this->deferredColumns !== null) {
-            // Return only the deferred columns from source's columns
-            $sourceCols = $this->source->getColumns();
-            $result = [];
-            foreach ($this->deferredColumns as $col) {
-                if (isset($sourceCols[$col])) {
-                    $result[$col] = $sourceCols[$col];
-                }
-            }
-            return $result;
-        }
-        return $this->source->getColumns();
-    }
-
-    public function has(object $member): bool
-    {
-        if (!empty($this->binds)) {
-            throw new \RuntimeException(
-                "Cannot check membership: unbound parameters: " . implode(', ', array_keys($this->binds))
-            );
-        }
-        return $this->getEffectiveSource()->has($member);
-    }
-
-    /**
-     * Get source with deferred column projection applied
-     */
-    private function getEffectiveSource(): TableInterface
-    {
-        $source = $this->source;
-        if ($this->deferredColumns !== null) {
-            $source = $source->columns(...$this->deferredColumns);
-        }
-        return $source;
-    }
-
-    public function eq(string $column, int|float|string|null $value): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->eq($column, $value);
-        return $c;
-    }
-
-    public function lt(string $column, int|float|string $value): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->lt($column, $value);
-        return $c;
-    }
-
-    public function lte(string $column, int|float|string $value): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->lte($column, $value);
-        return $c;
-    }
-
-    public function gt(string $column, int|float|string $value): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->gt($column, $value);
-        return $c;
-    }
-
-    public function gte(string $column, int|float|string $value): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->gte($column, $value);
-        return $c;
-    }
-
-    public function in(string $column, SetInterface $values): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->in($column, $values);
-        return $c;
-    }
-
-    public function like(string $column, string $pattern): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->like($column, $pattern);
-        return $c;
-    }
-
-    public function union(TableInterface $other): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->union($other);
-        return $c;
-    }
-
-    public function or(Predicate ...$predicates): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->or(...$predicates);
-        return $c;
-    }
-
-    public function except(SetInterface $other): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->except($other);
-        return $c;
-    }
-
-    public function distinct(): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->distinct();
-        return $c;
-    }
-
-    public function columns(string ...$columns): TableInterface
-    {
-        $c = clone $this;
-        if ($this->deferredColumns !== null) {
-            // Can only narrow, not expand - intersect with existing projection
-            $c->deferredColumns = array_values(
-                array_intersect($columns, $this->deferredColumns)
-            );
-        } else {
-            $c->deferredColumns = $columns;
-        }
-        return $c;
-    }
-
-    public function order(?string $spec): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->order($spec);
-        return $c;
-    }
-
-    public function limit(int $n): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->limit($n);
-        return $c;
-    }
-
-    public function offset(int $n): TableInterface
-    {
-        $c = clone $this;
-        $c->source = $this->source->offset($n);
-        return $c;
-    }
-
-    public function getLimit(): ?int
-    {
-        return $this->source->getLimit();
-    }
-
-    public function getOffset(): int
-    {
-        return $this->source->getOffset();
-    }
-
     public function exists(): bool
     {
         if (!empty($this->binds)) {
@@ -388,8 +417,41 @@ final class Table implements TableInterface
         return $this->getEffectiveSource()->load($rowId);
     }
 
-    public function withAlias(?string $tableAlias = null, array $columnAliases = []): TableInterface
+    /**
+     * @return array<string, ColumnDef>
+     */
+    public function getColumns(): array
     {
-        return new AliasTable($this, $tableAlias, $columnAliases);
+        if ($this->deferredColumns !== null) {
+            $sourceCols = $this->source->getColumns();
+            $result = [];
+            foreach ($this->deferredColumns as $col) {
+                if (isset($sourceCols[$col])) {
+                    $result[$col] = $sourceCols[$col];
+                }
+            }
+            return $result;
+        }
+        return $this->source->getColumns();
+    }
+
+    // =========================================================================
+    // Internal
+    // =========================================================================
+
+    private function getEffectiveSource(): TableInterface
+    {
+        $source = $this->source;
+
+        // Apply deferred predicates (must be fully bound at this point)
+        if ($this->deferredPredicates !== null) {
+            $source = $source->or(...$this->deferredPredicates);
+        }
+
+        if ($this->deferredColumns !== null) {
+            $source = $source->columns(...$this->deferredColumns);
+        }
+
+        return $source;
     }
 }

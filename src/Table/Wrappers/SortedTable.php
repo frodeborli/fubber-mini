@@ -1,8 +1,12 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Wrappers;
 
 use Closure;
+use mini\Table\AbstractTable;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\OrderDef;
+use mini\Table\Utility\TablePropertiesTrait;
 use stdClass;
 use Traversable;
 
@@ -90,17 +94,95 @@ class SortedTable extends AbstractTableWrapper
         $orderColumns = OrderDef::columns($this->orderBy);
         $allAdditional = array_unique([...$additionalColumns, ...$orderColumns]);
 
-        // Buffer and sort in-memory
+        $limit = $this->getLimit();
+        $offset = $this->getOffset();
+        $k = $limit !== null ? $limit + $offset : null;
+
+        // Optimization: use bounded heap when we have a small limit
+        // Only beneficial when k << n (we don't know n upfront, but k < 1000 is a good heuristic)
+        if ($k !== null && $k <= 1000) {
+            yield from $this->materializeWithBoundedHeap($allAdditional, $k, $offset, $limit);
+            return;
+        }
+
+        // Full sort for unlimited queries or large limits
         $buffer = iterator_to_array(parent::materialize(...$allAdditional));
         uasort($buffer, $this->buildRowComparator());
 
         // Apply limit/offset after sorting
         $skipped = 0;
         $emitted = 0;
-        $limit = $this->getLimit();
-        $offset = $this->getOffset();
 
         foreach ($buffer as $key => $row) {
+            if ($skipped < $offset) {
+                $skipped++;
+                continue;
+            }
+
+            yield $key => $row;
+            $emitted++;
+
+            if ($limit !== null && $emitted >= $limit) {
+                return;
+            }
+        }
+    }
+
+    /**
+     * Materialize using a bounded heap for efficient top-k selection
+     *
+     * Instead of sorting all n rows (O(n log n)), we maintain a heap of size k
+     * and process each row once (O(n log k)). This is much faster when k << n.
+     *
+     * @param array $additionalColumns Columns to include in materialization
+     * @param int $k Maximum heap size (limit + offset)
+     * @param int $offset Number of rows to skip
+     * @param int|null $limit Number of rows to return
+     */
+    private function materializeWithBoundedHeap(
+        array $additionalColumns,
+        int $k,
+        int $offset,
+        ?int $limit
+    ): Traversable {
+        $comparator = $this->buildRowComparator();
+
+        // Heap comparator: we want the WORST element at the top for easy eviction.
+        // For ORDER BY ASC, worst = largest, so we need max-heap.
+        // SplHeap puts elements with HIGHEST compare value at top.
+        // Our comparator returns positive when a > b, so it naturally gives max-heap.
+        $heapComparator = fn($a, $b) => $comparator($a[1], $b[1]);
+
+        // Use a custom heap with our comparator
+        $heap = new class($heapComparator) extends \SplHeap {
+            private $cmp;
+            public function __construct(callable $cmp) { $this->cmp = $cmp; }
+            protected function compare($a, $b): int { return ($this->cmp)($a, $b); }
+        };
+
+        // Stream through source, maintaining bounded heap
+        foreach (parent::materialize(...$additionalColumns) as $key => $row) {
+            $heap->insert([$key, $row]);
+
+            // Evict worst element if heap exceeds bound
+            if ($heap->count() > $k) {
+                $heap->extract();
+            }
+        }
+
+        // Extract results from heap (they come out in reverse order - worst first)
+        $results = [];
+        while (!$heap->isEmpty()) {
+            $results[] = $heap->extract();
+        }
+
+        // Reverse to get correct order (best first), then apply offset/limit
+        $results = array_reverse($results);
+
+        $skipped = 0;
+        $emitted = 0;
+
+        foreach ($results as [$key, $row]) {
             if ($skipped < $offset) {
                 $skipped++;
                 continue;

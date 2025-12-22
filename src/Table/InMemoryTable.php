@@ -2,6 +2,19 @@
 
 namespace mini\Table;
 
+use mini\Table\Contracts\MutableTableInterface;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
+use mini\Table\Types\Operator;
+use mini\Table\Utility\EmptyTable;
+use mini\Table\Wrappers\FilteredTable;
+use mini\Table\Wrappers\OrTable;
+use mini\Table\Wrappers\SortedTable;
+use mini\Table\Wrappers\ExceptTable;
+use mini\Table\Wrappers\UnionTable;
+use mini\Util\Math\Decimal;
 use SQLite3;
 use Traversable;
 
@@ -94,7 +107,13 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         $primaryKey = null;
 
         foreach ($columns as $col) {
-            $def = $this->quoteIdentifier($col->name) . ' ' . $col->type->sqlType();
+            // Decimal columns stored as scaled INTEGER for lossless storage
+            if ($col->type === ColumnType::Decimal) {
+                $sqlType = 'INTEGER';
+            } else {
+                $sqlType = $col->type->sqlType();
+            }
+            $def = $this->quoteIdentifier($col->name) . ' ' . $sqlType;
 
             if ($col->index === IndexType::Primary) {
                 // INTEGER PRIMARY KEY becomes rowid alias in SQLite
@@ -124,7 +143,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
     }
 
     // =========================================================================
-    // MutableTableInterface
+    // Mutation methods
     // =========================================================================
 
     public function insert(array $row): int|string
@@ -132,11 +151,13 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         $columns = [];
         $placeholders = [];
         $values = [];
+        $columnDefs = $this->getColumns();
 
         foreach ($row as $col => $value) {
             $columns[] = $this->quoteIdentifier($col);
             $placeholders[] = '?';
-            $values[] = $value;
+            // Coerce Decimal columns to proper scale
+            $values[] = $this->coerceValue($col, $value, $columnDefs);
         }
 
         $sql = "INSERT INTO {$this->tableName} (" . implode(', ', $columns) . ') VALUES (' . implode(', ', $placeholders) . ')';
@@ -150,21 +171,88 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         return $this->db->lastInsertRowID();
     }
 
-    public function update(array $changes): int
+    /**
+     * Coerce a value based on column type
+     *
+     * For Decimal columns, converts to scaled INTEGER for lossless storage.
+     * E.g., 9.99 with scale 2 → 999
+     */
+    private function coerceValue(string $column, mixed $value, array $columnDefs): mixed
     {
+        if ($value === null) {
+            return null;
+        }
+
+        $colDef = $columnDefs[$column] ?? null;
+        if ($colDef === null) {
+            return $value;
+        }
+
+        // Handle Decimal type: store as scaled integer
+        if ($colDef->type === ColumnType::Decimal) {
+            $scale = $colDef->getScale();
+            if ($value instanceof Decimal) {
+                // Get unscaled value at target scale
+                return (string) $value->rescale($scale)->unscaledValue();
+            }
+            if (is_string($value) || is_int($value) || is_float($value)) {
+                $decimal = Decimal::of((string) $value, $scale);
+                return (string) $decimal->unscaledValue();
+            }
+        }
+
+        return $value;
+    }
+
+    /**
+     * Coerce a filter value based on column type
+     *
+     * For Decimal columns, converts to scaled INTEGER for comparison.
+     */
+    private function coerceFilterValue(string $column, mixed $value): mixed
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $colDef = $this->getColumns()[$column] ?? null;
+        if ($colDef === null) {
+            return $value;
+        }
+
+        // Handle Decimal type: convert to scaled integer
+        if ($colDef->type === ColumnType::Decimal) {
+            $scale = $colDef->getScale();
+            if ($value instanceof Decimal) {
+                return (string) $value->rescale($scale)->unscaledValue();
+            }
+            if (is_string($value) || is_int($value) || is_float($value)) {
+                $decimal = Decimal::of((string) $value, $scale);
+                return (string) $decimal->unscaledValue();
+            }
+        }
+
+        return $value;
+    }
+
+    public function update(TableInterface $query, array $changes): int
+    {
+        $this->validateQuery($query);
+
         $sets = [];
         $params = [];
+        $columnDefs = $this->getColumns();
         $i = 0;
 
         foreach ($changes as $col => $value) {
             $paramName = ':set_' . ($i++);
             $sets[] = $this->quoteIdentifier($col) . ' = ' . $paramName;
-            $params[$paramName] = $value;
+            $params[$paramName] = $this->coerceValue($col, $value, $columnDefs);
         }
 
         $sql = "UPDATE {$this->tableName} SET " . implode(', ', $sets);
 
-        [$whereSql, $whereParams] = $this->buildWhereClause();
+        [$whereSql, $whereParams] = $query->buildWhereClause();
         if ($whereSql) {
             $sql .= ' WHERE ' . $whereSql;
             $params = array_merge($params, $whereParams);
@@ -179,11 +267,13 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         return $this->db->changes();
     }
 
-    public function delete(): int
+    public function delete(TableInterface $query): int
     {
+        $this->validateQuery($query);
+
         $sql = "DELETE FROM {$this->tableName}";
 
-        [$whereSql, $whereParams] = $this->buildWhereClause();
+        [$whereSql, $whereParams] = $query->buildWhereClause();
         if ($whereSql) {
             $sql .= ' WHERE ' . $whereSql;
         }
@@ -195,6 +285,23 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         $stmt->execute();
 
         return $this->db->changes();
+    }
+
+    /**
+     * Validate that a query is derived from this table
+     */
+    private function validateQuery(TableInterface $query): void
+    {
+        if (!$query instanceof self) {
+            throw new \InvalidArgumentException(
+                'Query must be an InMemoryTable derived from this table'
+            );
+        }
+        if ($query->db !== $this->db) {
+            throw new \InvalidArgumentException(
+                'Query must be derived from the same table instance'
+            );
+        }
     }
 
     // =========================================================================
@@ -209,7 +316,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         if ($value === null) {
             $clone->where[] = ['column' => $column, 'op' => 'IS', 'value' => null, 'paramName' => null];
         } else {
-            $clone->where[] = ['column' => $column, 'op' => '=', 'value' => $value, 'paramName' => $paramName];
+            $clone->where[] = ['column' => $column, 'op' => '=', 'value' => $clone->coerceFilterValue($column, $value), 'paramName' => $paramName];
         }
 
         return $clone;
@@ -219,7 +326,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
     {
         $clone = clone $this;
         $paramName = ':p' . (++$clone->paramCounter);
-        $clone->where[] = ['column' => $column, 'op' => '<', 'value' => $value, 'paramName' => $paramName];
+        $clone->where[] = ['column' => $column, 'op' => '<', 'value' => $clone->coerceFilterValue($column, $value), 'paramName' => $paramName];
         return $clone;
     }
 
@@ -227,7 +334,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
     {
         $clone = clone $this;
         $paramName = ':p' . (++$clone->paramCounter);
-        $clone->where[] = ['column' => $column, 'op' => '<=', 'value' => $value, 'paramName' => $paramName];
+        $clone->where[] = ['column' => $column, 'op' => '<=', 'value' => $clone->coerceFilterValue($column, $value), 'paramName' => $paramName];
         return $clone;
     }
 
@@ -235,7 +342,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
     {
         $clone = clone $this;
         $paramName = ':p' . (++$clone->paramCounter);
-        $clone->where[] = ['column' => $column, 'op' => '>', 'value' => $value, 'paramName' => $paramName];
+        $clone->where[] = ['column' => $column, 'op' => '>', 'value' => $clone->coerceFilterValue($column, $value), 'paramName' => $paramName];
         return $clone;
     }
 
@@ -243,7 +350,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
     {
         $clone = clone $this;
         $paramName = ':p' . (++$clone->paramCounter);
-        $clone->where[] = ['column' => $column, 'op' => '>=', 'value' => $value, 'paramName' => $paramName];
+        $clone->where[] = ['column' => $column, 'op' => '>=', 'value' => $clone->coerceFilterValue($column, $value), 'paramName' => $paramName];
         return $clone;
     }
 
@@ -720,12 +827,45 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         }
 
         $result = $stmt->execute();
+        $columnDefs = $this->getColumns();
 
         while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
             $rowid = $row['__rowid__'];
             unset($row['__rowid__']);
 
+            // Format Decimal columns to proper scale
+            $this->formatDecimalColumns($row, $columnDefs);
+
             yield $rowid => (object) $row;
+        }
+    }
+
+    /**
+     * Format Decimal column values from scaled integer to decimal string
+     *
+     * E.g., 999 with scale 2 → "9.99"
+     */
+    private function formatDecimalColumns(array &$row, array $columnDefs): void
+    {
+        foreach ($row as $col => &$value) {
+            if ($value === null) {
+                continue;
+            }
+            $colDef = $columnDefs[$col] ?? null;
+            if ($colDef !== null && $colDef->type === ColumnType::Decimal) {
+                $scale = $colDef->getScale();
+                // Convert scaled integer back to decimal string
+                $unscaled = (string) $value;
+                if ($scale === 0) {
+                    $value = $unscaled;
+                } else {
+                    // Pad with leading zeros if needed
+                    $unscaled = str_pad($unscaled, $scale + 1, '0', STR_PAD_LEFT);
+                    $intPart = substr($unscaled, 0, -$scale);
+                    $fracPart = substr($unscaled, -$scale);
+                    $value = $intPart . '.' . $fracPart;
+                }
+            }
         }
     }
 

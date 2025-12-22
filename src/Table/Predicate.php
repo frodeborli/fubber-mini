@@ -2,6 +2,10 @@
 
 namespace mini\Table;
 
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Types\Operator;
+
 /**
  * Immutable predicate for filtering conditions
  *
@@ -9,19 +13,19 @@ namespace mini\Table;
  * Supports both concrete values and bind parameters.
  *
  * ```php
- * use function mini\p;
+ * use const mini\p;
  *
- * // Use the p() helper for concise syntax
+ * // Use the p root instance helper for concise syntax
  * $users->or(
- *     p()->eq('status', 'active'),
- *     p()->gte('age', 65)
+ *     p->eq('status', 'active'),
+ *     p->gte('age', 65)
  * );
  *
  * // Chain multiple conditions (AND)
- * p()->eq('status', 'active')->lt('age', 30)
+ * p->eq('status', 'active')->lt('age', 30)
  *
  * // With bind parameters
- * p()->eqBind('id', ':id')->bind([':id' => 123])
+ * p->eqBind('id', ':id')->bind([':id' => 123])
  * ```
  */
 final class Predicate
@@ -31,10 +35,36 @@ final class Predicate
      */
     private array $conditions = [];
 
+    /** @var bool If true, test() always returns false */
+    private bool $matchesNothing = false;
+
     /**
      * Create an empty predicate (matches everything)
      */
     public function __construct() {}
+
+    /**
+     * Create a predicate that matches nothing
+     *
+     * Used for SQL `col = NULL` which per SQL standard always evaluates to UNKNOWN,
+     * meaning no rows should match.
+     */
+    public static function never(): self
+    {
+        $p = new self();
+        $p->matchesNothing = true;
+        return $p;
+    }
+
+    /**
+     * Create a predicate builder for a table
+     *
+     * @param TableInterface $table The table context (for future type validation)
+     */
+    public static function from(TableInterface $table): self
+    {
+        return new self();
+    }
 
     // -------------------------------------------------------------------------
     // Condition methods - return new Predicate with condition added
@@ -207,6 +237,22 @@ final class Predicate
         return empty($this->conditions);
     }
 
+    /**
+     * Create a new predicate with column names mapped through a callback
+     *
+     * Used by AliasTable to translate aliased column names to original names.
+     *
+     * @param callable(string): string $mapper Function that maps column names
+     */
+    public function mapColumns(callable $mapper): self
+    {
+        $new = clone $this;
+        foreach ($new->conditions as $i => $cond) {
+            $new->conditions[$i]['column'] = $mapper($cond['column']);
+        }
+        return $new;
+    }
+
     // -------------------------------------------------------------------------
     // Row testing
     // -------------------------------------------------------------------------
@@ -215,11 +261,16 @@ final class Predicate
      * Test if a row matches all conditions
      *
      * Empty predicate (no conditions) matches everything.
+     * Predicate::never() always returns false.
      *
      * @throws \LogicException If there are unbound parameters
      */
     public function test(object $row): bool
     {
+        if ($this->matchesNothing) {
+            return false;
+        }
+
         foreach ($this->conditions as $cond) {
             if (!$cond['bound']) {
                 throw new \LogicException("Predicate has unbound parameter '{$cond['value']}'");

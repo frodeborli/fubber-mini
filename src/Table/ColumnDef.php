@@ -2,6 +2,9 @@
 
 namespace mini\Table;
 
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
+
 /**
  * Column definition with type and optional index metadata
  *
@@ -21,10 +24,13 @@ namespace mini\Table;
  * new ColumnDef('email', ColumnType::Text, IndexType::Unique)
  *
  * // Composite index on (org_id, user_id) - define on leading column
- * new ColumnDef('org_id', ColumnType::Int, IndexType::Index, 'user_id')
+ * new ColumnDef('org_id', ColumnType::Int, IndexType::Index, [], 'user_id')
  *
  * // DateTime column (sorts correctly with binary comparison)
  * new ColumnDef('created_at', ColumnType::DateTime)
+ *
+ * // Decimal with fixed scale (2 decimal places)
+ * new ColumnDef('price', ColumnType::Decimal, typeParameters: ['scale' => 2])
  * ```
  */
 readonly class ColumnDef
@@ -36,15 +42,33 @@ readonly class ColumnDef
      * @param string $name Column name
      * @param ColumnType $type Data type for comparison semantics
      * @param IndexType $index Index type (None if not indexed)
+     * @param array $typeParameters Type-specific parameters (e.g., ['scale' => 2] for Decimal)
      * @param string ...$indexWith Additional columns in composite index
      */
     public function __construct(
         public string $name,
         public ColumnType $type = ColumnType::Text,
         public IndexType $index = IndexType::None,
+        public array $typeParameters = [],
         string ...$indexWith,
     ) {
         $this->indexWith = $indexWith;
+    }
+
+    /**
+     * Get type parameter with optional default
+     */
+    public function getTypeParam(string $key, mixed $default = null): mixed
+    {
+        return $this->typeParameters[$key] ?? $default;
+    }
+
+    /**
+     * Get scale for Decimal columns (default: 0)
+     */
+    public function getScale(): int
+    {
+        return (int) ($this->typeParameters['scale'] ?? 0);
     }
 
     /**
@@ -88,19 +112,19 @@ readonly class ColumnDef
      * Get the common denominator ColumnDef
      *
      * Returns a ColumnDef with the same type, weaker index type, and common
-     * prefix of indexWith columns.
+     * prefix of indexWith columns. Type parameters must match exactly.
      *
      * ```php
      * $a = new ColumnDef('id', ColumnType::Int, IndexType::Primary);
      * $b = new ColumnDef('id', ColumnType::Int, IndexType::Index);
      * $a->commonWith($b);  // ColumnDef('id', ColumnType::Int, IndexType::Index)
      *
-     * $a = new ColumnDef('a', ColumnType::Int, IndexType::Index, 'b', 'c');
-     * $b = new ColumnDef('a', ColumnType::Int, IndexType::Index, 'b', 'd');
-     * $a->commonWith($b);  // ColumnDef('a', ColumnType::Int, IndexType::Index, 'b')
+     * $a = new ColumnDef('a', ColumnType::Int, IndexType::Index, [], 'b', 'c');
+     * $b = new ColumnDef('a', ColumnType::Int, IndexType::Index, [], 'b', 'd');
+     * $a->commonWith($b);  // ColumnDef('a', ColumnType::Int, IndexType::Index, [], 'b')
      * ```
      *
-     * @throws \InvalidArgumentException if column names or types don't match
+     * @throws \InvalidArgumentException if column names, types, or type parameters don't match
      */
     public function commonWith(self $other): self
     {
@@ -116,11 +140,18 @@ readonly class ColumnDef
             );
         }
 
+        // Type parameters must match exactly (e.g., scale for Decimal)
+        if ($this->typeParameters !== $other->typeParameters) {
+            throw new \InvalidArgumentException(
+                "Cannot union columns with different type parameters: {$this->name}"
+            );
+        }
+
         // Take the weaker index type
         $index = $this->index->weakerOf($other->index);
 
         if (!$index->isIndexed()) {
-            return new self($this->name, $this->type);
+            return new self($this->name, $this->type, IndexType::None, $this->typeParameters);
         }
 
         // Find common prefix of indexWith
@@ -134,6 +165,6 @@ readonly class ColumnDef
             }
         }
 
-        return new self($this->name, $this->type, $index, ...$commonIndexWith);
+        return new self($this->name, $this->type, $index, $this->typeParameters, ...$commonIndexWith);
     }
 }

@@ -1,6 +1,14 @@
 <?php
-namespace mini\Table;
+namespace mini\Table\Wrappers;
 
+use mini\Table\AbstractTable;
+use mini\Table\ColumnDef;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Types\Operator;
+use mini\Table\OrderDef;
+use mini\Table\Utility\EmptyTable;
+use mini\Table\Utility\TablePropertiesTrait;
 use Traversable;
 
 /**
@@ -18,6 +26,8 @@ use Traversable;
  */
 class FilteredTable extends AbstractTableWrapper
 {
+    use TablePropertiesTrait;
+    
     private ColumnDef $columnDef;
 
     public function __construct(
@@ -62,6 +72,59 @@ class FilteredTable extends AbstractTableWrapper
     public function getFilterValue(): mixed
     {
         return $this->value;
+    }
+
+    /**
+     * Test if a row matches this filter
+     */
+    public function test(object $row): bool
+    {
+        $col = $this->column;
+        if (!property_exists($row, $col)) {
+            return true; // Open world assumption - missing properties pass
+        }
+        $rowValue = $row->$col;
+
+        return match ($this->operator) {
+            Operator::Eq => $this->testEq($rowValue),
+            Operator::Lt => $rowValue !== null && $rowValue < $this->value,
+            Operator::Lte => $rowValue !== null && $rowValue <= $this->value,
+            Operator::Gt => $rowValue !== null && $rowValue > $this->value,
+            Operator::Gte => $rowValue !== null && $rowValue >= $this->value,
+            Operator::In => $this->testIn($rowValue),
+            Operator::Like => $this->testLike($rowValue),
+        };
+    }
+
+    private function testEq(mixed $rowValue): bool
+    {
+        $value = $this->value;
+        if ($value === null) {
+            return $rowValue === null;
+        }
+        if (is_numeric($rowValue) && is_numeric($value)) {
+            return $rowValue == $value;
+        }
+        return $rowValue === $value;
+    }
+
+    private function testIn(mixed $rowValue): bool
+    {
+        $member = (object)[$this->column => $rowValue];
+        return $this->value->has($member);
+    }
+
+    private function testLike(mixed $rowValue): bool
+    {
+        if ($rowValue === null) {
+            return false;
+        }
+        $regex = '/^' . str_replace(
+            ['%', '_'],
+            ['.*', '.'],
+            preg_quote($this->value, '/')
+        ) . '$/i';
+        return preg_match($regex, (string)$rowValue) === 1;
     }
 
     protected function materialize(string ...$additionalColumns): Traversable
@@ -414,6 +477,24 @@ class FilteredTable extends AbstractTableWrapper
     public function eq(string $column, int|float|string|null $value): TableInterface
     {
         if ($column === $this->column) {
+            // IN + eq: check if value is in the set (only for simple Sets, not subqueries)
+            if ($this->operator === Operator::In && !$this->value instanceof TableInterface) {
+                $member = (object)[$column => $value];
+                if ($this->value->has($member)) {
+                    // Value in set: eq is more specific, use it
+                    return $this->withPagination($this->source->eq($column, $value));
+                }
+                return EmptyTable::from($this);
+            }
+
+            // LIKE + eq: check if value matches pattern
+            if ($this->operator === Operator::Like) {
+                if ($this->matchesLike($value)) {
+                    return $this->withPagination($this->source->eq($column, $value));
+                }
+                return EmptyTable::from($this);
+            }
+
             $cmp = $this->compare($value, $this->value);
             if ($this->operator === Operator::Eq) {
                 return $cmp === 0 ? $this : EmptyTable::from($this);

@@ -1,6 +1,6 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Types;
 
 /**
  * Type of index on a column

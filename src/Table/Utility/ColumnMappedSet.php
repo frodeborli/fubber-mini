@@ -1,8 +1,9 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Utility;
 
 use IteratorAggregate;
+use mini\Table\Contracts\SetInterface;
 use Traversable;
 
 /**

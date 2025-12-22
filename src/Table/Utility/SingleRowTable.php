@@ -1,7 +1,16 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Utility;
 
+use mini\Table\ColumnDef;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Predicate;
+use mini\Table\Types\ColumnType;
+use mini\Table\Utility\EmptyTable;
+use mini\Table\Utility\TablePropertiesTrait;
+use mini\Table\Wrappers\AliasTable;
+use mini\Table\Wrappers\UnionTable;
 use Traversable;
 
 /**
@@ -16,6 +25,8 @@ use Traversable;
  */
 final class SingleRowTable implements TableInterface
 {
+    use TablePropertiesTrait;
+
     /** @var array<string, mixed> column name => value */
     private array $values;
 
@@ -50,6 +61,11 @@ final class SingleRowTable implements TableInterface
     }
 
     public function getColumns(): array
+    {
+        return $this->columns;
+    }
+
+    public function getAllColumns(): array
     {
         return $this->columns;
     }
@@ -192,5 +208,10 @@ final class SingleRowTable implements TableInterface
     public function load(string|int $rowId): ?object
     {
         return $rowId === 1 ? (object) $this->values : null;
+    }
+
+    public function withAlias(?string $tableAlias = null, array $columnAliases = []): TableInterface
+    {
+        return new AliasTable($this, $tableAlias, $columnAliases);
     }
 }

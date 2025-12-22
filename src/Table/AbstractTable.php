@@ -3,6 +3,16 @@
 namespace mini\Table;
 
 use Closure;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Types\IndexType;
+use mini\Table\Types\Operator;
+use mini\Table\Utility\EmptyTable;
+use mini\Table\Utility\TablePropertiesTrait;
+use mini\Table\Wrappers\AliasTable;
+use mini\Table\Wrappers\DistinctTable;
+use mini\Table\Wrappers\ExceptTable;
+use mini\Table\Wrappers\UnionTable;
 use Traversable;
 
 /**
@@ -151,14 +161,7 @@ abstract class AbstractTable implements TableInterface
 
     public function withAlias(?string $tableAlias = null, array $columnAliases = []): TableInterface
     {
-        $current = $this;
-        if ($this->getProperty('alias') !== $tableAlias) {
-            $current = $current->withProperty('alias', $tableAlias);
-        }
-        if ($this->getProperty('columnAliases') !== $columnAliases) {
-            $current = $current->withProperty('columnAliases', $columnAliases);
-        }
-        return $current;
+        return new AliasTable($this, $tableAlias, $columnAliases);
     }
 
     /**
@@ -515,7 +518,14 @@ abstract class AbstractTable implements TableInterface
         if (empty($this->visibleColumns)) {
             return $this->columnDefs;
         }
-        return array_intersect_key($this->columnDefs, array_flip($this->visibleColumns));
+        // Preserve the order from visibleColumns, not columnDefs
+        $result = [];
+        foreach ($this->visibleColumns as $col) {
+            if (isset($this->columnDefs[$col])) {
+                $result[$col] = $this->columnDefs[$col];
+            }
+        }
+        return $result;
     }
 
     /**

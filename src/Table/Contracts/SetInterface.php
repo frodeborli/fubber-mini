@@ -1,6 +1,6 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Contracts;
 
 use Traversable;
 

@@ -1,13 +1,18 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Table\Wrappers;
 
+use mini\Table\AbstractTable;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\OrderDef;
+use mini\Table\Utility\TablePropertiesTrait;
 use Traversable;
 
 /**
  * Union of two tables (set union / OR operation)
  *
- * Yields rows from both tables, deduplicating by row ID.
+ * Yields rows from both tables, deduplicating by content via SetInterface::has().
  * Filter methods push down to both sides, allowing each to optimize independently.
  *
  * ```php
@@ -67,15 +72,12 @@ class UnionTable extends AbstractTable
         $a = $this->a->columns(...$cols);
         $b = $this->b->columns(...$cols);
 
-        $seen = [];
         $skipped = 0;
         $emitted = 0;
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
         foreach ($a as $id => $row) {
-            $seen[$id] = true;
-
             if ($skipped++ < $offset) {
                 continue;
             }
@@ -88,7 +90,8 @@ class UnionTable extends AbstractTable
         }
 
         foreach ($b as $id => $row) {
-            if (isset($seen[$id]) || $skipped++ < $offset) {
+            // Use SetInterface::has() - each table knows how to check membership efficiently
+            if ($a->has($row) || $skipped++ < $offset) {
                 continue;
             }
 
