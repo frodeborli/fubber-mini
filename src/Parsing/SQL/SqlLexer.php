@@ -60,7 +60,20 @@ class SqlLexer
     public const T_BETWEEN = 'BETWEEN';
     public const T_EXISTS = 'EXISTS';
     public const T_UNION = 'UNION';
+    public const T_INTERSECT = 'INTERSECT';
+    public const T_EXCEPT = 'EXCEPT';
     public const T_ALL = 'ALL';
+    public const T_ANY = 'ANY';
+    public const T_SOME = 'SOME';  // SOME is synonym for ANY in SQL
+    public const T_CASE = 'CASE';
+    public const T_WHEN = 'WHEN';
+    public const T_THEN = 'THEN';
+    public const T_ELSE = 'ELSE';
+    public const T_END = 'END';
+    public const T_OVER = 'OVER';
+    public const T_PARTITION = 'PARTITION';
+    public const T_WITH = 'WITH';
+    public const T_RECURSIVE = 'RECURSIVE';
     public const T_IDENTIFIER = 'IDENTIFIER';
     public const T_STRING = 'STRING';
     public const T_NUMBER = 'NUMBER';
@@ -208,7 +221,7 @@ class SqlLexer
             }
 
             // Operators / Punctuation
-            if (in_array($char, ['(', ')', ',', '.', '*', '/', '=', '>', '<', '!'])) {
+            if (in_array($char, ['(', ')', ',', '.', '*', '/', '=', '>', '<', '!', '%', '|'])) {
                 $type = match($char) {
                     '(' => self::T_LPAREN,
                     ')' => self::T_RPAREN,
@@ -227,6 +240,13 @@ class SqlLexer
                 // <> is alias for !=
                 if ($char === '<' && $next === '>') {
                     $tokens[] = ['type' => self::T_OP, 'value' => '<>', 'pos' => $start];
+                    $this->cursor += 2;
+                    continue;
+                }
+
+                // || string concatenation operator
+                if ($char === '|' && $next === '|') {
+                    $tokens[] = ['type' => self::T_OP, 'value' => '||', 'pos' => $start];
                     $this->cursor += 2;
                     continue;
                 }
@@ -306,7 +326,20 @@ class SqlLexer
                         'BETWEEN' => self::T_BETWEEN,
                         'EXISTS' => self::T_EXISTS,
                         'UNION' => self::T_UNION,
+                        'INTERSECT' => self::T_INTERSECT,
+                        'EXCEPT' => self::T_EXCEPT,
                         'ALL' => self::T_ALL,
+                        'ANY' => self::T_ANY,
+                        'SOME' => self::T_SOME,
+                        'CASE' => self::T_CASE,
+                        'WHEN' => self::T_WHEN,
+                        'THEN' => self::T_THEN,
+                        'ELSE' => self::T_ELSE,
+                        'END' => self::T_END,
+                        'OVER' => self::T_OVER,
+                        'PARTITION' => self::T_PARTITION,
+                        'WITH' => self::T_WITH,
+                        'RECURSIVE' => self::T_RECURSIVE,
                         default => self::T_IDENTIFIER
                     };
                 }

@@ -10,6 +10,7 @@ use mini\Parsing\SQL\AST\{
     DeleteStatement,
     ColumnNode,
     FunctionCallNode,
+    WindowFunctionNode,
     UnaryOperation,
     BinaryOperation,
     InOperation,
@@ -20,7 +21,9 @@ use mini\Parsing\SQL\AST\{
     LiteralNode,
     IdentifierNode,
     PlaceholderNode,
-    JoinNode
+    JoinNode,
+    CaseWhenNode,
+    WithStatement
 };
 
 /**
@@ -57,6 +60,11 @@ class SqlParser
         $this->tokens = $lexer->tokenize();
         $this->pos = 0;
 
+        // Handle WITH clause (CTEs)
+        if ($this->current()['type'] === SqlLexer::T_WITH) {
+            return $this->parseWithStatement();
+        }
+
         $token = $this->current();
         $stmt = match($token['type']) {
             SqlLexer::T_SELECT => $this->parseSelectStatement(),
@@ -70,11 +78,21 @@ class SqlParser
             )
         };
 
-        // Handle UNION [ALL] chains
-        while ($this->match(SqlLexer::T_UNION)) {
+        // Handle set operations: UNION [ALL], INTERSECT [ALL], EXCEPT [ALL]
+        while (true) {
+            $operator = null;
+            if ($this->match(SqlLexer::T_UNION)) {
+                $operator = 'UNION';
+            } elseif ($this->match(SqlLexer::T_INTERSECT)) {
+                $operator = 'INTERSECT';
+            } elseif ($this->match(SqlLexer::T_EXCEPT)) {
+                $operator = 'EXCEPT';
+            } else {
+                break;
+            }
             $all = $this->match(SqlLexer::T_ALL);
             $right = $this->parseSelectStatement();
-            $stmt = new AST\UnionNode($stmt, $right, $all);
+            $stmt = new AST\UnionNode($stmt, $right, $all, $operator);
         }
 
         if ($this->current()['type'] !== SqlLexer::T_EOF) {
@@ -155,16 +173,31 @@ class SqlParser
 
         // FROM is optional (for SELECT 1, SELECT expression, etc.)
         if ($this->match(SqlLexer::T_FROM)) {
-            $stmt->from = $this->parseIdentifier();
+            // Check for derived table: (SELECT ...)
+            if ($this->current()['type'] === SqlLexer::T_LPAREN) {
+                $stmt->from = $this->parseDerivedTable();
+                // Derived tables require an alias
+                if ($this->match(SqlLexer::T_AS)) {
+                    $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                    $stmt->fromAlias = $aliasToken['value'];
+                } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+                    $stmt->fromAlias = $this->current()['value'];
+                    $this->pos++;
+                } else {
+                    throw new \RuntimeException("Derived table requires an alias");
+                }
+            } else {
+                $stmt->from = $this->parseIdentifier();
 
-            // Optional table alias
-            if ($this->match(SqlLexer::T_AS)) {
-                $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
-                $stmt->fromAlias = $aliasToken['value'];
-            } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
-                // Implicit alias (without AS)
-                $stmt->fromAlias = $this->current()['value'];
-                $this->pos++;
+                // Optional table alias
+                if ($this->match(SqlLexer::T_AS)) {
+                    $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                    $stmt->fromAlias = $aliasToken['value'];
+                } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+                    // Implicit alias (without AS)
+                    $stmt->fromAlias = $this->current()['value'];
+                    $this->pos++;
+                }
             }
 
             // Parse JOINs
@@ -315,6 +348,116 @@ class SqlParser
         return $stmt;
     }
 
+    /**
+     * Parse WITH statement (Common Table Expressions)
+     *
+     * WITH [RECURSIVE]
+     *   cte_name [(column_list)] AS (select_statement)
+     *   [, cte_name [(column_list)] AS (select_statement)]...
+     * main_statement
+     */
+    private function parseWithStatement(): WithStatement
+    {
+        $this->expect(SqlLexer::T_WITH);
+
+        $recursive = $this->match(SqlLexer::T_RECURSIVE);
+
+        $ctes = [];
+        do {
+            $cte = $this->parseCteDefinition();
+            $ctes[] = $cte;
+        } while ($this->match(SqlLexer::T_COMMA));
+
+        // Parse the main query (SELECT only for now, can extend to INSERT/UPDATE/DELETE later)
+        if ($this->current()['type'] !== SqlLexer::T_SELECT) {
+            throw new SqlSyntaxException(
+                "Expected SELECT after WITH clause",
+                $this->sql,
+                $this->current()['pos']
+            );
+        }
+
+        $mainQuery = $this->parseSelectStatement();
+
+        // Handle UNION/INTERSECT/EXCEPT after the main query
+        while (true) {
+            $operator = null;
+            if ($this->match(SqlLexer::T_UNION)) {
+                $operator = 'UNION';
+            } elseif ($this->match(SqlLexer::T_INTERSECT)) {
+                $operator = 'INTERSECT';
+            } elseif ($this->match(SqlLexer::T_EXCEPT)) {
+                $operator = 'EXCEPT';
+            } else {
+                break;
+            }
+            $all = $this->match(SqlLexer::T_ALL);
+            $right = $this->parseSelectStatement();
+            $mainQuery = new AST\UnionNode($mainQuery, $right, $all, $operator);
+        }
+
+        if ($this->current()['type'] !== SqlLexer::T_EOF) {
+            throw new SqlSyntaxException(
+                "Unexpected trailing input",
+                $this->sql,
+                $this->current()['pos']
+            );
+        }
+
+        return new WithStatement($ctes, $recursive, $mainQuery);
+    }
+
+    /**
+     * Parse a single CTE definition: name [(columns)] AS (query)
+     */
+    private function parseCteDefinition(): array
+    {
+        $nameToken = $this->expect(SqlLexer::T_IDENTIFIER);
+        $name = $nameToken['value'];
+
+        // Optional column list: cte_name(col1, col2)
+        $columns = null;
+        if ($this->match(SqlLexer::T_LPAREN)) {
+            $columns = [];
+            do {
+                $colToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                $columns[] = $colToken['value'];
+            } while ($this->match(SqlLexer::T_COMMA));
+            $this->expect(SqlLexer::T_RPAREN);
+        }
+
+        $this->expect(SqlLexer::T_AS);
+        $this->expect(SqlLexer::T_LPAREN);
+
+        // Parse the CTE query (can be SELECT or UNION)
+        $query = $this->parseSelectStatement();
+
+        // Handle UNION inside CTE
+        while (true) {
+            $operator = null;
+            if ($this->match(SqlLexer::T_UNION)) {
+                $operator = 'UNION';
+            } elseif ($this->match(SqlLexer::T_INTERSECT)) {
+                $operator = 'INTERSECT';
+            } elseif ($this->match(SqlLexer::T_EXCEPT)) {
+                $operator = 'EXCEPT';
+            } else {
+                break;
+            }
+            $all = $this->match(SqlLexer::T_ALL);
+            $right = $this->parseSelectStatement();
+            $query = new AST\UnionNode($query, $right, $all, $operator);
+        }
+
+        $this->expect(SqlLexer::T_RPAREN);
+
+        return [
+            'name' => $name,
+            'columns' => $columns,
+            'query' => $query,
+        ];
+    }
+
     private function parseColumnList(): array
     {
         $columns = [];
@@ -389,6 +532,23 @@ class SqlParser
             in_array($this->current()['value'], self::COMPARISON_OPS, true)) {
             $op = $this->current()['value'];
             $this->pos++;
+
+            // Check for ALL/ANY/SOME quantifier
+            $quantifier = null;
+            if ($this->match(SqlLexer::T_ALL)) {
+                $quantifier = 'ALL';
+            } elseif ($this->match(SqlLexer::T_ANY) || $this->match(SqlLexer::T_SOME)) {
+                $quantifier = 'ANY';  // SOME is synonym for ANY
+            }
+
+            if ($quantifier !== null) {
+                // Must be followed by subquery
+                $this->expect(SqlLexer::T_LPAREN);
+                $subquery = $this->parseSelectStatement();
+                $this->expect(SqlLexer::T_RPAREN);
+                return new AST\QuantifiedComparisonNode($left, $op, $quantifier, new SubqueryNode($subquery));
+            }
+
             $right = $this->parseAdditive();
             return new BinaryOperation($left, $op, $right);
         }
@@ -474,6 +634,17 @@ class SqlParser
         return new AST\ExistsOperation(new SubqueryNode($subquery), $negated);
     }
 
+    /**
+     * Parse a derived table: (SELECT ...) in FROM position
+     */
+    private function parseDerivedTable(): SubqueryNode
+    {
+        $this->expect(SqlLexer::T_LPAREN);
+        $subquery = $this->parseSelectStatement();
+        $this->expect(SqlLexer::T_RPAREN);
+        return new SubqueryNode($subquery);
+    }
+
     private function parseAdditive(): ASTNode
     {
         $left = $this->parseMultiplicative();
@@ -491,21 +662,39 @@ class SqlParser
 
     private function parseMultiplicative(): ASTNode
     {
-        $left = $this->parseAtom();
+        $left = $this->parseConcatenation();
 
         while (true) {
             $token = $this->current();
             if ($token['type'] === SqlLexer::T_STAR) {
                 $this->pos++;
-                $right = $this->parseAtom();
+                $right = $this->parseConcatenation();
                 $left = new BinaryOperation($left, '*', $right);
             } elseif ($token['type'] === SqlLexer::T_OP && $token['value'] === '/') {
                 $this->pos++;
-                $right = $this->parseAtom();
+                $right = $this->parseConcatenation();
                 $left = new BinaryOperation($left, '/', $right);
+            } elseif ($token['type'] === SqlLexer::T_OP && $token['value'] === '%') {
+                $this->pos++;
+                $right = $this->parseConcatenation();
+                $left = new BinaryOperation($left, '%', $right);
             } else {
                 break;
             }
+        }
+
+        return $left;
+    }
+
+    private function parseConcatenation(): ASTNode
+    {
+        $left = $this->parseAtom();
+
+        while ($this->current()['type'] === SqlLexer::T_OP &&
+               $this->current()['value'] === '||') {
+            $this->pos++;
+            $right = $this->parseAtom();
+            $left = new BinaryOperation($left, '||', $right);
         }
 
         return $left;
@@ -522,11 +711,22 @@ class SqlParser
             return new UnaryOperation('-', $expr);
         }
 
-        // Handle Parentheses
+        // Handle Parentheses and Scalar Subqueries
         if ($this->match(SqlLexer::T_LPAREN)) {
+            // Check for scalar subquery: (SELECT ...)
+            if ($this->current()['type'] === SqlLexer::T_SELECT) {
+                $subquery = $this->parseSelectStatement();
+                $this->expect(SqlLexer::T_RPAREN);
+                return new SubqueryNode($subquery);
+            }
             $expr = $this->parseExpression();
             $this->expect(SqlLexer::T_RPAREN);
             return $expr;
+        }
+
+        // Handle CASE expressions
+        if ($this->match(SqlLexer::T_CASE)) {
+            return $this->parseCaseExpression();
         }
 
         // Handle Identifiers, Qualified Names (table.column), and Function Calls
@@ -573,11 +773,17 @@ class SqlParser
         );
     }
 
-    private function parseFunctionCall(): FunctionCallNode
+    private function parseFunctionCall(): FunctionCallNode|WindowFunctionNode
     {
         $nameToken = $this->expect(SqlLexer::T_IDENTIFIER);
         $this->expect(SqlLexer::T_LPAREN);
         $args = [];
+        $distinct = false;
+
+        // Handle DISTINCT inside function: COUNT(DISTINCT col)
+        if ($this->match(SqlLexer::T_DISTINCT)) {
+            $distinct = true;
+        }
 
         if ($this->current()['type'] !== SqlLexer::T_RPAREN) {
             do {
@@ -590,7 +796,97 @@ class SqlParser
         }
 
         $this->expect(SqlLexer::T_RPAREN);
-        return new FunctionCallNode($nameToken['value'], $args);
+        $func = new FunctionCallNode($nameToken['value'], $args, $distinct);
+
+        // Check for OVER clause (window function)
+        if ($this->match(SqlLexer::T_OVER)) {
+            return $this->parseWindowSpec($func);
+        }
+
+        return $func;
+    }
+
+    /**
+     * Parse OVER (PARTITION BY ... ORDER BY ...) clause
+     */
+    private function parseWindowSpec(FunctionCallNode $func): WindowFunctionNode
+    {
+        $this->expect(SqlLexer::T_LPAREN);
+
+        $partitionBy = [];
+        $orderBy = [];
+
+        // PARTITION BY
+        if ($this->match(SqlLexer::T_PARTITION)) {
+            $this->expect(SqlLexer::T_BY);
+            do {
+                $partitionBy[] = $this->parseExpression();
+            } while ($this->match(SqlLexer::T_COMMA));
+        }
+
+        // ORDER BY
+        if ($this->match(SqlLexer::T_ORDER)) {
+            $this->expect(SqlLexer::T_BY);
+            do {
+                $expr = $this->parseExpression();
+                $direction = 'ASC';
+                if ($this->match(SqlLexer::T_ASC)) {
+                    $direction = 'ASC';
+                } elseif ($this->match(SqlLexer::T_DESC)) {
+                    $direction = 'DESC';
+                }
+                $orderBy[] = ['expr' => $expr, 'direction' => $direction];
+            } while ($this->match(SqlLexer::T_COMMA));
+        }
+
+        $this->expect(SqlLexer::T_RPAREN);
+
+        return new WindowFunctionNode($func, $partitionBy, $orderBy);
+    }
+
+    /**
+     * Parse CASE expression
+     *
+     * Two forms:
+     * - Simple: CASE expr WHEN value THEN result [WHEN ...] [ELSE result] END
+     * - Searched: CASE WHEN condition THEN result [WHEN ...] [ELSE result] END
+     */
+    private function parseCaseExpression(): CaseWhenNode
+    {
+        // Check for simple vs searched CASE
+        $operand = null;
+        if ($this->current()['type'] !== SqlLexer::T_WHEN) {
+            // Simple CASE: CASE expr WHEN ...
+            $operand = $this->parseExpression();
+        }
+
+        // Parse WHEN clauses
+        $whenClauses = [];
+        while ($this->match(SqlLexer::T_WHEN)) {
+            $when = $this->parseExpression();
+            $this->expect(SqlLexer::T_THEN);
+            $then = $this->parseExpression();
+            $whenClauses[] = ['when' => $when, 'then' => $then];
+        }
+
+        if (empty($whenClauses)) {
+            throw new SqlSyntaxException(
+                "CASE requires at least one WHEN clause",
+                $this->sql,
+                $this->current()['pos']
+            );
+        }
+
+        // Optional ELSE clause
+        $elseResult = null;
+        if ($this->match(SqlLexer::T_ELSE)) {
+            $elseResult = $this->parseExpression();
+        }
+
+        // Required END
+        $this->expect(SqlLexer::T_END);
+
+        return new CaseWhenNode($operand, $whenClauses, $elseResult);
     }
 
     private function parseIdentifier(): IdentifierNode
@@ -642,17 +938,34 @@ class SqlParser
     private function parseJoin(): JoinNode
     {
         $joinType = $this->parseJoinType();
-        $table = $this->parseIdentifier();
 
-        // Optional alias
-        $alias = null;
-        if ($this->match(SqlLexer::T_AS)) {
-            $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
-            $alias = $aliasToken['value'];
-        } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
-            // Implicit alias - but be careful not to consume ON
-            $alias = $this->current()['value'];
-            $this->pos++;
+        // Check for derived table in JOIN
+        if ($this->current()['type'] === SqlLexer::T_LPAREN) {
+            $table = $this->parseDerivedTable();
+            // Derived tables require an alias
+            $alias = null;
+            if ($this->match(SqlLexer::T_AS)) {
+                $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                $alias = $aliasToken['value'];
+            } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+                $alias = $this->current()['value'];
+                $this->pos++;
+            } else {
+                throw new \RuntimeException("Derived table in JOIN requires an alias");
+            }
+        } else {
+            $table = $this->parseIdentifier();
+
+            // Optional alias
+            $alias = null;
+            if ($this->match(SqlLexer::T_AS)) {
+                $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                $alias = $aliasToken['value'];
+            } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+                // Implicit alias - but be careful not to consume ON
+                $alias = $this->current()['value'];
+                $this->pos++;
+            }
         }
 
         // ON condition (required for all except CROSS JOIN)

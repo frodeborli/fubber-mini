@@ -21,9 +21,24 @@ use mini\Parsing\SQL\AST\{
     BetweenOperation,
     ExistsOperation,
     SubqueryNode,
-    FunctionCallNode
+    FunctionCallNode,
+    WindowFunctionNode,
+    WithStatement
 };
-use mini\Table\{TableInterface, MutableTableInterface, SetInterface, SingleRowTable, Table, ConcatTable};
+use mini\Table\{Table, Predicate};
+use mini\Table\Contracts\MutableTableInterface;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Utility\ColumnMappedSet;
+use mini\Table\Utility\EmptyTable;
+use mini\Table\Utility\SingleRowTable;
+use mini\Table\Wrappers\ConcatTable;
+use mini\Table\Wrappers\CrossJoinTable;
+use mini\Table\Wrappers\FullJoinTable;
+use mini\Table\Wrappers\InnerJoinTable;
+use mini\Table\Wrappers\LeftJoinTable;
+use mini\Table\Wrappers\RightJoinTable;
+use mini\Table\GeneratorTable;
 
 /**
  * Virtual database that executes SQL against registered TableInterface instances
@@ -69,6 +84,7 @@ class VirtualDatabase implements DatabaseInterface
     public function __construct()
     {
         $this->evaluator = new ExpressionEvaluator();
+        $this->evaluator->setSubqueryExecutor(fn($query, $outerRow) => $this->executeSubqueryWithContext($query, $outerRow));
         $this->registerBuiltinAggregates();
     }
 
@@ -164,15 +180,51 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Check if any column contains a window function
+     */
+    private function hasWindowFunctions(array $columns): bool
+    {
+        foreach ($columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                continue;
+            }
+            if ($this->expressionHasWindowFunction($col->expression)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Recursively check if an expression contains a window function
+     */
+    private function expressionHasWindowFunction(\mini\Parsing\SQL\AST\ASTNode $node): bool
+    {
+        if ($node instanceof WindowFunctionNode) {
+            return true;
+        }
+
+        if ($node instanceof BinaryOperation) {
+            return $this->expressionHasWindowFunction($node->left)
+                || $this->expressionHasWindowFunction($node->right);
+        }
+
+        return false;
+    }
+
+    /**
      * Register built-in SQL aggregate functions
      */
     private function registerBuiltinAggregates(): void
     {
-        // COUNT(*) or COUNT(column)
+        // COUNT(*) or COUNT(column) - skips NULL values for COUNT(column)
         $this->createAggregate(
             'COUNT',
             function (&$context, $value = null) {
-                $context = ($context ?? 0) + 1;
+                // COUNT(column) skips NULLs, COUNT(*) passes 1 so never null
+                if ($value !== null) {
+                    $context = ($context ?? 0) + 1;
+                }
             },
             function (&$context) {
                 return $context ?? 0;
@@ -278,6 +330,10 @@ class VirtualDatabase implements DatabaseInterface
     public function query(string $sql, array $params = []): ResultSetInterface
     {
         $ast = $this->parseAndBind($sql, $params);
+
+        if ($ast instanceof WithStatement) {
+            return $this->executeWithStatement($ast);
+        }
 
         if ($ast instanceof UnionNode) {
             $table = $this->executeUnionAsTable($ast);
@@ -458,14 +514,14 @@ class VirtualDatabase implements DatabaseInterface
     {
         // Create an InMemoryTable with schema structure
         $schemaTable = new \mini\Table\InMemoryTable(
-            new \mini\Table\ColumnDef('table_name', \mini\Table\ColumnType::Text, \mini\Table\IndexType::Index),
-            new \mini\Table\ColumnDef('name', \mini\Table\ColumnType::Text),
-            new \mini\Table\ColumnDef('type', \mini\Table\ColumnType::Text),
-            new \mini\Table\ColumnDef('data_type', \mini\Table\ColumnType::Text),
-            new \mini\Table\ColumnDef('is_nullable', \mini\Table\ColumnType::Int),
-            new \mini\Table\ColumnDef('default_value', \mini\Table\ColumnType::Text),
-            new \mini\Table\ColumnDef('ordinal', \mini\Table\ColumnType::Int),
-            new \mini\Table\ColumnDef('extra', \mini\Table\ColumnType::Text),
+            new \mini\Table\ColumnDef('table_name', \mini\Table\Types\ColumnType::Text, \mini\Table\Types\IndexType::Index),
+            new \mini\Table\ColumnDef('name', \mini\Table\Types\ColumnType::Text),
+            new \mini\Table\ColumnDef('type', \mini\Table\Types\ColumnType::Text),
+            new \mini\Table\ColumnDef('data_type', \mini\Table\Types\ColumnType::Text),
+            new \mini\Table\ColumnDef('is_nullable', \mini\Table\Types\ColumnType::Int),
+            new \mini\Table\ColumnDef('default_value', \mini\Table\Types\ColumnType::Text),
+            new \mini\Table\ColumnDef('ordinal', \mini\Table\Types\ColumnType::Int),
+            new \mini\Table\ColumnDef('extra', \mini\Table\Types\ColumnType::Text),
         );
 
         // Populate with schema info
@@ -490,10 +546,10 @@ class VirtualDatabase implements DatabaseInterface
                 ]);
 
                 // Add index info if column has an index
-                if ($colDef->index !== \mini\Table\IndexType::None) {
+                if ($colDef->index !== \mini\Table\Types\IndexType::None) {
                     $indexType = match ($colDef->index) {
-                        \mini\Table\IndexType::Primary => 'primary',
-                        \mini\Table\IndexType::Unique => 'unique',
+                        \mini\Table\Types\IndexType::Primary => 'primary',
+                        \mini\Table\Types\IndexType::Unique => 'unique',
                         default => 'index',
                     };
                     $schemaTable->insert([
@@ -537,11 +593,62 @@ class VirtualDatabase implements DatabaseInterface
         $left = $this->executeUnionBranchAsTable($ast->left);
         $right = $this->executeUnionBranchAsTable($ast->right);
 
-        $concat = new ConcatTable($left, $right);
+        return match ($ast->operator) {
+            'UNION' => $ast->all
+                ? new ConcatTable($left, $right)
+                : (new ConcatTable($left, $right))->distinct(),
+            'INTERSECT' => $ast->all
+                ? $this->intersectTables($left, $right)
+                : $this->intersectTables($left, $right)->distinct(),
+            'EXCEPT' => $ast->all
+                ? $this->exceptTables($left, $right)
+                : $this->exceptTables($left, $right)->distinct(),
+            default => throw new \RuntimeException("Unknown set operator: {$ast->operator}"),
+        };
+    }
 
-        // UNION ALL: just concatenate
-        // UNION: wrap with distinct() for deduplication
-        return $ast->all ? $concat : $concat->distinct();
+    /**
+     * INTERSECT: rows that exist in both tables
+     */
+    private function intersectTables(TableInterface $left, TableInterface $right): TableInterface
+    {
+        // Materialize right side for comparison (positional, not by column name)
+        $rightValues = [];
+        foreach ($right as $row) {
+            $rightValues[] = array_values(get_object_vars($row));
+        }
+
+        $columns = array_values($left->getColumns());
+        return new GeneratorTable(function () use ($left, $rightValues) {
+            foreach ($left as $row) {
+                $leftVals = array_values(get_object_vars($row));
+                if (in_array($leftVals, $rightValues, false)) {
+                    yield $row;
+                }
+            }
+        }, ...$columns);
+    }
+
+    /**
+     * EXCEPT: rows from left that don't exist in right
+     */
+    private function exceptTables(TableInterface $left, TableInterface $right): TableInterface
+    {
+        // Materialize right side for comparison (positional, not by column name)
+        $rightValues = [];
+        foreach ($right as $row) {
+            $rightValues[] = array_values(get_object_vars($row));
+        }
+
+        $columns = array_values($left->getColumns());
+        return new GeneratorTable(function () use ($left, $rightValues) {
+            foreach ($left as $row) {
+                $leftVals = array_values(get_object_vars($row));
+                if (!in_array($leftVals, $rightValues, false)) {
+                    yield $row;
+                }
+            }
+        }, ...$columns);
     }
 
     /**
@@ -558,6 +665,310 @@ class VirtualDatabase implements DatabaseInterface
         throw new \RuntimeException("Unexpected UNION branch type: " . get_class($ast));
     }
 
+    /**
+     * Execute a WITH statement (CTE)
+     *
+     * @param WithStatement $ast The WITH statement AST
+     * @return ResultSetInterface The query result
+     */
+    private function executeWithStatement(WithStatement $ast): ResultSetInterface
+    {
+        // Track which CTEs we register so we can clean them up
+        $registeredCtes = [];
+
+        try {
+            // Process each CTE definition
+            foreach ($ast->ctes as $cte) {
+                $cteName = strtolower($cte['name']);
+
+                if ($ast->recursive && $this->isCteRecursive($cte, $cteName)) {
+                    // Recursive CTE - requires iterative execution
+                    $table = $this->executeRecursiveCte($cte, $cteName);
+                } else {
+                    // Non-recursive CTE - simple execution
+                    $table = $this->executeCteQuery($cte['query']);
+                }
+
+                // Apply column aliasing if specified
+                if ($cte['columns'] !== null) {
+                    $table = $this->renameCteColumns($table, $cte['columns']);
+                }
+
+                // Register as a temporary table
+                $this->tables[$cteName] = $table;
+                $registeredCtes[] = $cteName;
+            }
+
+            // Execute the main query and materialize results
+            // (must materialize before cleaning up CTE tables)
+            // Use executeSelect to properly evaluate expressions
+            if ($ast->query instanceof UnionNode) {
+                $table = $this->executeUnionAsTable($ast->query);
+            } else {
+                $rows = iterator_to_array($this->executeSelect($ast->query));
+                $table = $this->rowsToTable($rows);
+            }
+
+            return new ResultSet($table);
+        } finally {
+            // Clean up CTE tables (optional - they'd be overwritten anyway)
+            foreach ($registeredCtes as $cteName) {
+                unset($this->tables[$cteName]);
+            }
+        }
+    }
+
+    /**
+     * Check if a CTE references itself (is recursive)
+     */
+    private function isCteRecursive(array $cte, string $cteName): bool
+    {
+        // A recursive CTE must be a UNION and reference itself
+        if (!$cte['query'] instanceof UnionNode) {
+            return false;
+        }
+
+        // Check if any table reference in the query matches the CTE name
+        return $this->astReferencesTable($cte['query'], $cteName);
+    }
+
+    /**
+     * Check if an AST node references a specific table name
+     */
+    private function astReferencesTable($ast, string $tableName): bool
+    {
+        if ($ast instanceof SelectStatement) {
+            if ($ast->from instanceof IdentifierNode) {
+                if (strtolower($ast->from->getFullName()) === $tableName) {
+                    return true;
+                }
+            }
+            foreach ($ast->joins as $join) {
+                if ($join->table instanceof IdentifierNode) {
+                    if (strtolower($join->table->getFullName()) === $tableName) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        if ($ast instanceof UnionNode) {
+            return $this->astReferencesTable($ast->left, $tableName)
+                || $this->astReferencesTable($ast->right, $tableName);
+        }
+
+        return false;
+    }
+
+    /**
+     * Execute a recursive CTE
+     *
+     * Algorithm:
+     * 1. Execute the anchor (non-recursive part of UNION)
+     * 2. Create working table with anchor results
+     * 3. Iterate: execute recursive part with current working table
+     * 4. Append new rows to result, update working table
+     * 5. Stop when no new rows are generated
+     */
+    private function executeRecursiveCte(array $cte, string $cteName): TableInterface
+    {
+        $union = $cte['query'];
+        if (!$union instanceof UnionNode) {
+            throw new \RuntimeException("Recursive CTE must use UNION");
+        }
+
+        // Find the anchor (non-recursive) and recursive parts
+        // For simplicity, assume left is anchor, right is recursive
+        $anchorAst = $union->left;
+        $recursiveAst = $union->right;
+
+        // Execute anchor query (this is the base case)
+        $anchorTable = $this->executeCteQuery($anchorAst);
+        $anchorRows = array_values(iterator_to_array($anchorTable));
+
+        if (empty($anchorRows)) {
+            return $anchorTable;
+        }
+
+        // Get column names from anchor - these define the CTE's schema
+        $anchorColumnNames = array_keys(get_object_vars($anchorRows[0]));
+
+        // Build result table
+        $resultRows = $anchorRows;
+        $workingRows = $anchorRows;
+
+        // Iteration limit to prevent infinite loops
+        $maxIterations = 10000;
+        $iteration = 0;
+
+        while (!empty($workingRows) && $iteration < $maxIterations) {
+            $iteration++;
+
+            // Register current working set as the CTE table
+            $workingTable = $this->rowsToTable($workingRows);
+            $this->tables[$cteName] = $workingTable;
+
+            // Execute recursive part
+            $recursiveTable = $this->executeCteQuery($recursiveAst);
+            $newRows = array_values(iterator_to_array($recursiveTable));
+
+            if (empty($newRows)) {
+                break;
+            }
+
+            // Rename columns to match anchor's column names
+            // This is required because the recursive SELECT may generate different column names
+            $newRows = $this->renameRowColumns($newRows, $anchorColumnNames);
+
+            // For UNION (not UNION ALL), we should deduplicate
+            // For now, just handle UNION ALL
+            $resultRows = array_merge($resultRows, $newRows);
+            $workingRows = $newRows;
+        }
+
+        // Remove temporary CTE table
+        unset($this->tables[$cteName]);
+
+        return $this->rowsToTable($resultRows);
+    }
+
+    /**
+     * Rename row columns to match expected column names
+     */
+    private function renameRowColumns(array $rows, array $columnNames): array
+    {
+        if (empty($rows)) {
+            return $rows;
+        }
+
+        $result = [];
+        foreach ($rows as $row) {
+            $oldVars = get_object_vars($row);
+            $oldKeys = array_keys($oldVars);
+
+            if (count($oldKeys) !== count($columnNames)) {
+                throw new \RuntimeException(
+                    "Recursive CTE column count mismatch: got " . count($oldKeys) .
+                    " columns, expected " . count($columnNames)
+                );
+            }
+
+            $newRow = new \stdClass();
+            foreach ($columnNames as $i => $newName) {
+                $newRow->$newName = $oldVars[$oldKeys[$i]];
+            }
+            $result[] = $newRow;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Execute a CTE query and return as TableInterface
+     *
+     * Uses executeSelect (not executeSelectAsTable) to properly evaluate
+     * expressions in the column list, then materializes results to a table.
+     */
+    private function executeCteQuery($query): TableInterface
+    {
+        if ($query instanceof UnionNode) {
+            return $this->executeUnionAsTable($query);
+        }
+        if ($query instanceof SelectStatement) {
+            // Use executeSelect to properly evaluate expressions,
+            // then materialize to a table
+            $rows = iterator_to_array($this->executeSelect($query));
+            return $this->rowsToTable($rows);
+        }
+        throw new \RuntimeException("Unexpected CTE query type: " . get_class($query));
+    }
+
+    /**
+     * Convert stdClass rows to InMemoryTable
+     */
+    private function rowsToTable(array $rows): TableInterface
+    {
+        // Re-index to ensure sequential keys starting from 0
+        $rows = array_values($rows);
+
+        if (empty($rows)) {
+            // Return truly empty table
+            return new \mini\Table\InMemoryTable(
+                new \mini\Table\ColumnDef('_empty', \mini\Table\Types\ColumnType::Int)
+            );
+        }
+
+        // Build columns from first row
+        $firstRow = $rows[0];
+        $columns = [];
+        foreach (get_object_vars($firstRow) as $colName => $value) {
+            $type = match (true) {
+                is_int($value) => \mini\Table\Types\ColumnType::Int,
+                is_float($value) => \mini\Table\Types\ColumnType::Float,
+                is_bool($value) => \mini\Table\Types\ColumnType::Int,
+                default => \mini\Table\Types\ColumnType::Text,
+            };
+            $columns[] = new \mini\Table\ColumnDef($colName, $type);
+        }
+
+        // Create and populate table
+        $table = new \mini\Table\InMemoryTable(...$columns);
+        foreach ($rows as $row) {
+            $table->insert((array)$row);
+        }
+
+        return $table;
+    }
+
+    /**
+     * Rename CTE table columns according to specified column list
+     */
+    private function renameCteColumns(TableInterface $table, array $columnNames): TableInterface
+    {
+        // Get rows from table
+        $rows = iterator_to_array($table);
+
+        if (empty($rows)) {
+            // Create table with renamed columns
+            $columns = [];
+            foreach ($columnNames as $name) {
+                $columns[] = new \mini\Table\ColumnDef($name, \mini\Table\Types\ColumnType::Text);
+            }
+            return new \mini\Table\InMemoryTable(...$columns);
+        }
+
+        // Map old column names to new ones
+        $firstRow = $rows[0];
+        $oldNames = array_keys(get_object_vars($firstRow));
+
+        if (count($oldNames) !== count($columnNames)) {
+            throw new \RuntimeException(
+                "CTE column count mismatch: query returns " . count($oldNames) .
+                " columns but " . count($columnNames) . " names specified"
+            );
+        }
+
+        $nameMap = array_combine($oldNames, $columnNames);
+
+        // Create new columns with renamed names
+        $columns = [];
+        foreach ($columnNames as $name) {
+            $columns[] = new \mini\Table\ColumnDef($name, \mini\Table\Types\ColumnType::Text);
+        }
+
+        $newTable = new \mini\Table\InMemoryTable(...$columns);
+
+        foreach ($rows as $row) {
+            $newRow = [];
+            foreach (get_object_vars($row) as $oldName => $value) {
+                $newRow[$nameMap[$oldName]] = $value;
+            }
+            $newTable->insert($newRow);
+        }
+
+        return $newTable;
+    }
+
     private function executeSelect(SelectStatement $ast): iterable
     {
         // Get the source table
@@ -567,21 +978,38 @@ class VirtualDatabase implements DatabaseInterface
             return;
         }
 
-        $tableName = $ast->from->getFullName();
-        $table = $this->getTable($tableName);
+        // Handle derived table (subquery in FROM)
+        if ($ast->from instanceof SubqueryNode) {
+            $table = $this->executeDerivedTable($ast->from, $ast->fromAlias);
+            $tableName = $ast->fromAlias; // Use alias as table name
+        } else {
+            $tableName = $ast->from->getFullName();
+            $table = $this->getTable($tableName);
 
-        if ($table === null) {
-            throw new \RuntimeException("Table not found: $tableName");
+            if ($table === null) {
+                throw new \RuntimeException("Table not found: $tableName");
+            }
         }
 
-        // Phase 1: No JOIN support yet
+        // Process JOINs - only apply aliasing when there are joins
         if (!empty($ast->joins)) {
-            throw new \RuntimeException("JOINs not yet supported in Phase 1");
+            $baseAlias = $ast->fromAlias ?? $tableName;
+            $table = $table->withAlias($baseAlias);
+
+            foreach ($ast->joins as $join) {
+                $table = $this->applyJoin($table, $join);
+            }
         }
 
         // Apply WHERE - delegate to table backend
         if ($ast->where !== null) {
             $table = $this->applyWhereToTableInterface($table, $ast->where);
+        }
+
+        // Check for window functions - requires materializing rows first
+        if ($this->hasWindowFunctions($ast->columns)) {
+            yield from $this->executeWindowSelect($ast, $table);
+            return;
         }
 
         // Check for aggregate functions - requires different execution path
@@ -590,7 +1018,16 @@ class VirtualDatabase implements DatabaseInterface
             return;
         }
 
-        // Apply ORDER BY - delegate to table backend
+        // Check if ORDER BY needs expression evaluation (aliases or expressions)
+        $orderByNeedsEval = $ast->orderBy && $this->orderByNeedsExpressionEval($ast->orderBy, $ast->columns);
+
+        if ($orderByNeedsEval) {
+            // Expression-based ORDER BY: project first, then sort, then apply offset/limit
+            yield from $this->executeSelectWithExpressionOrderBy($ast, $table);
+            return;
+        }
+
+        // Apply ORDER BY - delegate to table backend (simple column names only)
         if ($ast->orderBy) {
             $table = $this->applyOrderBy($table, $ast->orderBy);
         }
@@ -626,47 +1063,656 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
-     * Execute an aggregate SELECT (e.g., SELECT COUNT(*), SUM(price) FROM orders)
+     * Execute a SELECT with window functions
      *
-     * Without GROUP BY: returns a single row with aggregate results.
-     * GROUP BY support to be added in future phase.
+     * Window functions are computed over the entire result set (or partitions),
+     * producing a value for each row while maintaining the row granularity.
      */
-    private function executeAggregateSelect(SelectStatement $ast, TableInterface $table): iterable
+    private function executeWindowSelect(SelectStatement $ast, TableInterface $table): iterable
     {
-        // Phase 1: GROUP BY not yet supported for aggregates
-        if (!empty($ast->groupBy)) {
-            throw new \RuntimeException("GROUP BY not yet supported");
+        // 1. Materialize all rows - window functions need the full dataset
+        $rows = [];
+        foreach ($table as $row) {
+            $rows[] = $row;
         }
 
-        // Initialize aggregate contexts for each aggregate column
-        $aggregateInfos = $this->collectAggregateInfos($ast->columns);
+        // 2. Collect window function info from columns
+        $windowFuncs = $this->collectWindowFunctions($ast->columns);
 
-        // Step phase: iterate through all rows
-        foreach ($table as $row) {
-            for ($i = 0; $i < count($aggregateInfos); $i++) {
-                $args = [];
-                foreach ($aggregateInfos[$i]['args'] as $argNode) {
-                    // Handle COUNT(*) - wildcard means "count rows", not evaluate a column
-                    if ($argNode instanceof IdentifierNode && $argNode->isWildcard()) {
-                        $args[] = 1; // Pass dummy value for COUNT(*)
-                    } else {
-                        $args[] = $this->evaluator->evaluate($argNode, $row);
-                    }
-                }
-                $step = $aggregateInfos[$i]['step'];
-                $step($aggregateInfos[$i]['context'], ...$args);
+        // 3. Compute window function values for each row
+        // windowValues[rowIndex][windowFuncAlias] = value
+        $windowValues = [];
+        foreach ($rows as $idx => $row) {
+            $windowValues[$idx] = [];
+        }
+
+        foreach ($windowFuncs as $alias => $wfn) {
+            $values = $this->computeWindowFunction($wfn, $rows);
+            foreach ($values as $idx => $val) {
+                $windowValues[$idx][$alias] = $val;
             }
         }
 
-        // Final phase: build result row
+        // 4. Apply ORDER BY if present (on the result rows, not the window ordering)
+        if ($ast->orderBy) {
+            // Sort the rows maintaining their window values
+            $indices = array_keys($rows);
+            usort($indices, function ($a, $b) use ($rows, $ast) {
+                return $this->compareRowsForOrderBy($rows[$a], $rows[$b], $ast->orderBy);
+            });
+            $sortedRows = [];
+            $sortedWindowValues = [];
+            foreach ($indices as $idx) {
+                $sortedRows[] = $rows[$idx];
+                $sortedWindowValues[] = $windowValues[$idx];
+            }
+            $rows = $sortedRows;
+            $windowValues = $sortedWindowValues;
+        }
+
+        // 5. Apply OFFSET/LIMIT
+        $offset = 0;
+        $limit = null;
+        if ($ast->offset !== null) {
+            $offset = (int)$this->evaluator->evaluate($ast->offset, null);
+        }
+        if ($ast->limit !== null) {
+            $limit = (int)$this->evaluator->evaluate($ast->limit, null);
+        }
+
+        $count = 0;
+        foreach ($rows as $idx => $row) {
+            if ($idx < $offset) {
+                continue;
+            }
+            if ($limit !== null && $count >= $limit) {
+                break;
+            }
+
+            // 6. Project the row with window function values
+            yield $this->projectRowWithWindowValues($row, $ast->columns, $windowValues[$idx]);
+            $count++;
+        }
+    }
+
+    /**
+     * Collect window functions from SELECT columns
+     * Returns: [alias => WindowFunctionNode, ...]
+     */
+    private function collectWindowFunctions(array $columns): array
+    {
+        $result = [];
+        foreach ($columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                continue;
+            }
+            $wfns = $this->extractWindowFunctions($col->expression);
+            foreach ($wfns as $wfn) {
+                // Use alias if available, otherwise generate one
+                $alias = $col->alias ?? $this->generateWindowFuncAlias($wfn);
+                $result[$alias] = $wfn;
+            }
+        }
+        return $result;
+    }
+
+    /**
+     * Extract all WindowFunctionNode instances from an expression
+     */
+    private function extractWindowFunctions(\mini\Parsing\SQL\AST\ASTNode $node): array
+    {
+        if ($node instanceof WindowFunctionNode) {
+            return [$node];
+        }
+        if ($node instanceof BinaryOperation) {
+            return array_merge(
+                $this->extractWindowFunctions($node->left),
+                $this->extractWindowFunctions($node->right)
+            );
+        }
+        return [];
+    }
+
+    /**
+     * Generate a unique alias for a window function
+     */
+    private function generateWindowFuncAlias(WindowFunctionNode $wfn): string
+    {
+        static $counter = 0;
+        return '__wfn_' . $wfn->function->name . '_' . (++$counter);
+    }
+
+    /**
+     * Compute window function values for all rows
+     * Returns: [rowIndex => value, ...]
+     */
+    private function computeWindowFunction(WindowFunctionNode $wfn, array $rows): array
+    {
+        // Group rows by partition key
+        $partitions = [];
+        foreach ($rows as $idx => $row) {
+            $key = $this->computePartitionKey($wfn->partitionBy, $row);
+            if (!isset($partitions[$key])) {
+                $partitions[$key] = [];
+            }
+            $partitions[$key][$idx] = $row;
+        }
+
+        $result = [];
+        foreach ($partitions as $partitionRows) {
+            // Sort partition by ORDER BY
+            if (!empty($wfn->orderBy)) {
+                $indices = array_keys($partitionRows);
+                usort($indices, function ($a, $b) use ($partitionRows, $wfn) {
+                    return $this->compareRowsForWindowOrderBy($partitionRows[$a], $partitionRows[$b], $wfn->orderBy);
+                });
+                $sortedPartition = [];
+                foreach ($indices as $idx) {
+                    $sortedPartition[$idx] = $partitionRows[$idx];
+                }
+                $partitionRows = $sortedPartition;
+            }
+
+            // Compute window function value for each row in partition
+            $values = $this->evaluateWindowFunctionForPartition($wfn, $partitionRows);
+            foreach ($values as $idx => $val) {
+                $result[$idx] = $val;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Compute partition key from PARTITION BY expressions
+     */
+    private function computePartitionKey(array $partitionBy, object $row): string
+    {
+        if (empty($partitionBy)) {
+            return '__all__'; // All rows in same partition
+        }
+        $parts = [];
+        foreach ($partitionBy as $expr) {
+            $parts[] = serialize($this->evaluator->evaluate($expr, $row));
+        }
+        return implode('|', $parts);
+    }
+
+    /**
+     * Compare two rows for window ORDER BY
+     */
+    private function compareRowsForWindowOrderBy(object $a, object $b, array $orderBy): int
+    {
+        foreach ($orderBy as $spec) {
+            $valA = $this->evaluator->evaluate($spec['expr'], $a);
+            $valB = $this->evaluator->evaluate($spec['expr'], $b);
+            $cmp = $valA <=> $valB;
+            if ($cmp !== 0) {
+                return $spec['direction'] === 'DESC' ? -$cmp : $cmp;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Evaluate window function for a sorted partition
+     * Returns: [originalRowIndex => value, ...]
+     */
+    private function evaluateWindowFunctionForPartition(WindowFunctionNode $wfn, array $sortedRows): array
+    {
+        $funcName = strtoupper($wfn->function->name);
+        $result = [];
+        $rank = 0;
+        $denseRank = 0;
+        $prevValues = null;
+        $rowNum = 0;
+
+        foreach ($sortedRows as $idx => $row) {
+            $rowNum++;
+
+            // Get ORDER BY values for RANK/DENSE_RANK
+            $currentValues = [];
+            foreach ($wfn->orderBy as $spec) {
+                $currentValues[] = $this->evaluator->evaluate($spec['expr'], $row);
+            }
+
+            switch ($funcName) {
+                case 'ROW_NUMBER':
+                    $result[$idx] = $rowNum;
+                    break;
+
+                case 'RANK':
+                    if ($prevValues === null || $currentValues !== $prevValues) {
+                        $rank = $rowNum; // Rank jumps to current row number on change
+                    }
+                    $result[$idx] = $rank;
+                    $prevValues = $currentValues;
+                    break;
+
+                case 'DENSE_RANK':
+                    if ($prevValues === null || $currentValues !== $prevValues) {
+                        $denseRank++; // Dense rank increments by 1 on change
+                    }
+                    $result[$idx] = $denseRank;
+                    $prevValues = $currentValues;
+                    break;
+
+                default:
+                    throw new \RuntimeException("Unknown window function: $funcName");
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Project a row with window function values
+     */
+    private function projectRowWithWindowValues(object $row, array $columns, array $windowValues): object
+    {
         $result = new \stdClass();
+
+        foreach ($columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                continue;
+            }
+
+            // Determine output column name (same logic as projectRow)
+            $name = $col->alias;
+            if ($name === null && $col->expression instanceof IdentifierNode) {
+                $name = $col->expression->getName();
+            }
+            if ($name === null) {
+                $name = 'col_' . spl_object_id($col);
+            }
+
+            $value = $this->evaluateExpressionWithWindowValues($col->expression, $row, $windowValues);
+            $result->$name = $value;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Evaluate expression, substituting window function results
+     */
+    private function evaluateExpressionWithWindowValues(
+        \mini\Parsing\SQL\AST\ASTNode $expr,
+        object $row,
+        array $windowValues
+    ): mixed {
+        if ($expr instanceof WindowFunctionNode) {
+            // Find the matching window value by alias or generate alias
+            $alias = $this->generateWindowFuncAlias($expr);
+            // Search for matching value in windowValues
+            foreach ($windowValues as $key => $val) {
+                // For now, return the first window value found (single window function per column)
+                return $val;
+            }
+            return null;
+        }
+
+        // For non-window expressions, use the standard evaluator
+        return $this->evaluator->evaluate($expr, $row);
+    }
+
+    /**
+     * Compare two rows for ORDER BY (for result sorting)
+     */
+    private function compareRowsForOrderBy(object $a, object $b, array $orderBy): int
+    {
+        foreach ($orderBy as $spec) {
+            $valA = $this->evaluator->evaluate($spec->expression, $a);
+            $valB = $this->evaluator->evaluate($spec->expression, $b);
+            $cmp = $valA <=> $valB;
+            if ($cmp !== 0) {
+                return strtoupper($spec->direction) === 'DESC' ? -$cmp : $cmp;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Execute an aggregate SELECT (e.g., SELECT COUNT(*), SUM(price) FROM orders)
+     *
+     * Without GROUP BY: returns a single row with aggregate results.
+     * With GROUP BY: returns one row per group with group columns + aggregate results.
+     */
+    private function executeAggregateSelect(SelectStatement $ast, TableInterface $table): iterable
+    {
+        // Collect aggregate function info
+        $aggregateInfos = $this->collectAggregateInfos($ast->columns);
+
+        // Collect non-aggregate columns (group key columns or expressions on them)
+        $nonAggregateColumns = $this->collectNonAggregateColumns($ast->columns);
+
+        if (empty($ast->groupBy)) {
+            // No GROUP BY: single implicit group
+            yield from $this->executeSimpleAggregate($ast, $table, $aggregateInfos, $nonAggregateColumns);
+        } else {
+            // GROUP BY: group rows by key and aggregate per group
+            yield from $this->executeGroupByAggregate($ast, $table, $aggregateInfos, $nonAggregateColumns);
+        }
+    }
+
+    /**
+     * Execute aggregate without GROUP BY (single group containing all rows)
+     */
+    private function executeSimpleAggregate(
+        SelectStatement $ast,
+        TableInterface $table,
+        array $aggregateInfos,
+        array $nonAggregateColumns
+    ): iterable {
+        // Step phase: iterate through all rows
+        $lastRow = null;
+        foreach ($table as $row) {
+            $lastRow = $row;
+            $this->stepAggregates($aggregateInfos, $row);
+        }
+
+        // Final phase: build result row
+        $result = $this->buildAggregateResultRow($aggregateInfos, $nonAggregateColumns, $lastRow);
+        yield $result;
+    }
+
+    /**
+     * Execute aggregate with GROUP BY
+     */
+    private function executeGroupByAggregate(
+        SelectStatement $ast,
+        TableInterface $table,
+        array $aggregateInfos,
+        array $nonAggregateColumns
+    ): iterable {
+        // Groups: key => ['aggregates' => [...], 'sampleRow' => object]
+        $groups = [];
+
+        // Step phase: iterate through all rows, grouping by key
+        foreach ($table as $row) {
+            // Compute group key from GROUP BY expressions
+            $keyParts = [];
+            foreach ($ast->groupBy as $groupExpr) {
+                $keyParts[] = $this->evaluator->evaluate($groupExpr, $row);
+            }
+            $groupKey = serialize($keyParts);
+
+            // Initialize group if new
+            if (!isset($groups[$groupKey])) {
+                $groups[$groupKey] = [
+                    'keyValues' => $keyParts,
+                    'sampleRow' => $row,
+                    'aggregates' => $this->cloneAggregateInfos($aggregateInfos),
+                ];
+            }
+
+            // Step aggregates for this group
+            $this->stepAggregates($groups[$groupKey]['aggregates'], $row);
+        }
+
+        // Final phase: build result rows
+        $results = [];
+        foreach ($groups as $group) {
+            $result = $this->buildAggregateResultRow(
+                $group['aggregates'],
+                $nonAggregateColumns,
+                $group['sampleRow']
+            );
+
+            // Apply HAVING filter
+            if ($ast->having !== null) {
+                $passes = $this->evaluator->evaluate($ast->having, $result);
+                if (!$passes) {
+                    continue;
+                }
+            }
+
+            $results[] = $result;
+        }
+
+        // Apply ORDER BY if present
+        if ($ast->orderBy) {
+            $results = $this->sortResults($results, $ast->orderBy);
+        }
+
+        // Apply OFFSET
+        $offset = 0;
+        if ($ast->offset !== null) {
+            $offset = (int)$this->evaluator->evaluate($ast->offset, null);
+        }
+
+        // Apply LIMIT
+        $limit = null;
+        if ($ast->limit !== null) {
+            $limit = (int)$this->evaluator->evaluate($ast->limit, null);
+        }
+
+        // Yield results with offset/limit
+        $count = 0;
+        foreach ($results as $i => $result) {
+            if ($i < $offset) {
+                continue;
+            }
+            if ($limit !== null && $count >= $limit) {
+                break;
+            }
+            yield $result;
+            $count++;
+        }
+    }
+
+    /**
+     * Clone aggregate infos with fresh contexts for a new group
+     */
+    private function cloneAggregateInfos(array $aggregateInfos): array
+    {
+        $cloned = [];
+        foreach ($aggregateInfos as $info) {
+            $cloned[] = [
+                'name' => $info['name'],
+                'step' => $info['step'],
+                'final' => $info['final'],
+                'args' => $info['args'],
+                'context' => null, // Fresh context for this group
+                'distinct' => $info['distinct'] ?? false,
+                'seenValues' => [], // Fresh seen values for this group
+            ];
+        }
+        return $cloned;
+    }
+
+    /**
+     * Step all aggregates with values from a row
+     */
+    private function stepAggregates(array &$aggregateInfos, object $row): void
+    {
+        for ($i = 0; $i < count($aggregateInfos); $i++) {
+            $args = [];
+            foreach ($aggregateInfos[$i]['args'] as $argNode) {
+                // Handle COUNT(*) - wildcard means "count rows", not evaluate a column
+                if ($argNode instanceof IdentifierNode && $argNode->isWildcard()) {
+                    $args[] = 1; // Pass dummy value for COUNT(*)
+                } else {
+                    $args[] = $this->evaluator->evaluate($argNode, $row);
+                }
+            }
+
+            // Handle DISTINCT: skip if we've seen this value before
+            if ($aggregateInfos[$i]['distinct'] && !empty($args)) {
+                // Use serialized args as key to track uniqueness
+                $key = serialize($args);
+                if (isset($aggregateInfos[$i]['seenValues'][$key])) {
+                    continue; // Skip duplicate value
+                }
+                $aggregateInfos[$i]['seenValues'][$key] = true;
+            }
+
+            $step = $aggregateInfos[$i]['step'];
+            $step($aggregateInfos[$i]['context'], ...$args);
+        }
+    }
+
+    /**
+     * Build result row from finalized aggregates and non-aggregate columns
+     */
+    private function buildAggregateResultRow(
+        array $aggregateInfos,
+        array $nonAggregateColumns,
+        ?object $sampleRow
+    ): \stdClass {
+        $result = new \stdClass();
+
+        // Add non-aggregate columns (evaluated from sample row)
+        foreach ($nonAggregateColumns as $colInfo) {
+            $value = $sampleRow !== null
+                ? $this->evaluator->evaluate($colInfo['expression'], $sampleRow)
+                : null;
+            $result->{$colInfo['name']} = $value;
+        }
+
+        // Add aggregate results
         for ($i = 0; $i < count($aggregateInfos); $i++) {
             $final = $aggregateInfos[$i]['final'];
             $value = $final($aggregateInfos[$i]['context']);
             $result->{$aggregateInfos[$i]['name']} = $value;
         }
 
-        yield $result;
+        return $result;
+    }
+
+    /**
+     * Collect non-aggregate columns from SELECT
+     *
+     * These are columns that reference GROUP BY expressions or constants.
+     */
+    private function collectNonAggregateColumns(array $columns): array
+    {
+        $nonAggregates = [];
+
+        foreach ($columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                continue;
+            }
+
+            // Skip aggregate functions
+            if ($col->expression instanceof FunctionCallNode) {
+                $funcName = strtoupper($col->expression->name);
+                if (isset($this->aggregates[$funcName])) {
+                    continue;
+                }
+            }
+
+            // Skip wildcards
+            if ($col->expression instanceof IdentifierNode && $col->expression->isWildcard()) {
+                continue;
+            }
+
+            // Determine output column name
+            $name = $col->alias;
+            if ($name === null && $col->expression instanceof IdentifierNode) {
+                $name = $col->expression->getName();
+            }
+            if ($name === null) {
+                $name = 'col_' . spl_object_id($col);
+            }
+
+            $nonAggregates[] = [
+                'name' => $name,
+                'expression' => $col->expression,
+            ];
+        }
+
+        return $nonAggregates;
+    }
+
+    /**
+     * Sort result rows by ORDER BY specification
+     */
+    private function sortResults(array $results, array $orderBy): array
+    {
+        usort($results, function ($a, $b) use ($orderBy) {
+            foreach ($orderBy as $item) {
+                $colExpr = $item['column'];
+                $direction = strtoupper($item['direction'] ?? 'ASC');
+
+                // Get column name - could be identifier or need evaluation
+                if ($colExpr instanceof IdentifierNode) {
+                    $colName = $colExpr->getName();
+                    $aVal = $a->$colName ?? null;
+                    $bVal = $b->$colName ?? null;
+                } else {
+                    // Evaluate expression against result row
+                    $aVal = $this->evaluator->evaluate($colExpr, $a);
+                    $bVal = $this->evaluator->evaluate($colExpr, $b);
+                }
+
+                if ($aVal === $bVal) {
+                    continue;
+                }
+
+                $cmp = $aVal <=> $bVal;
+                if ($direction === 'DESC') {
+                    $cmp = -$cmp;
+                }
+
+                return $cmp;
+            }
+            return 0;
+        });
+
+        return $results;
+    }
+
+    /**
+     * Sort results that include both projected and original row data
+     *
+     * Used for ORDER BY expressions that reference columns not in the SELECT list.
+     * Each result item is ['projected' => object, 'original' => object].
+     *
+     * @param array $results Array of ['projected' => ..., 'original' => ...] pairs
+     * @param array $orderBy ORDER BY items from AST
+     * @param array $aliasToExpr Map of SELECT aliases to their expressions
+     */
+    private function sortResultsWithOriginal(array $results, array $orderBy, array $aliasToExpr): array
+    {
+        usort($results, function ($a, $b) use ($orderBy, $aliasToExpr) {
+            foreach ($orderBy as $item) {
+                $colExpr = $item['column'];
+                $direction = strtoupper($item['direction'] ?? 'ASC');
+
+                // Determine which row to evaluate against
+                if ($colExpr instanceof IdentifierNode) {
+                    $name = $colExpr->getName();
+                    if (isset($aliasToExpr[$name])) {
+                        // It's a SELECT alias - use projected row
+                        $aVal = $a['projected']->$name ?? null;
+                        $bVal = $b['projected']->$name ?? null;
+                    } else {
+                        // Table column - use original row
+                        $aVal = $a['original']->$name ?? null;
+                        $bVal = $b['original']->$name ?? null;
+                    }
+                } else {
+                    // Expression - evaluate against original row
+                    $aVal = $this->evaluator->evaluate($colExpr, $a['original']);
+                    $bVal = $this->evaluator->evaluate($colExpr, $b['original']);
+                }
+
+                if ($aVal === $bVal) {
+                    continue;
+                }
+
+                $cmp = $aVal <=> $bVal;
+                if ($direction === 'DESC') {
+                    $cmp = -$cmp;
+                }
+
+                return $cmp;
+            }
+            return 0;
+        });
+
+        return $results;
     }
 
     /**
@@ -723,6 +1769,8 @@ class VirtualDatabase implements DatabaseInterface
                 'final' => $aggregate['final'],
                 'args' => $funcNode->arguments,
                 'context' => null,
+                'distinct' => $funcNode->distinct,
+                'seenValues' => [], // Track seen values for DISTINCT
             ];
         }
 
@@ -749,8 +1797,14 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("Table not found: $tableName");
         }
 
+        // Process JOINs - only apply aliasing when there are joins
         if (!empty($ast->joins)) {
-            throw new \RuntimeException("JOINs in subqueries not yet supported");
+            $baseAlias = $ast->fromAlias ?? $tableName;
+            $table = $table->withAlias($baseAlias);
+
+            foreach ($ast->joins as $join) {
+                $table = $this->applyJoin($table, $join);
+            }
         }
 
         // Apply WHERE
@@ -819,7 +1873,159 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         // Column names differ - wrap with mapping
-        return new \mini\Table\ColumnMappedSet($table, $subqueryColumn, $expectedColumn);
+        return new ColumnMappedSet($table, $subqueryColumn, $expectedColumn);
+    }
+
+    /**
+     * Execute a derived table (subquery in FROM position)
+     *
+     * Executes the subquery and returns an InMemoryTable with the results.
+     *
+     * @param SubqueryNode $subquery The subquery to execute
+     * @param string|null $alias The alias for the derived table
+     * @return TableInterface The materialized table
+     */
+    private function executeDerivedTable(SubqueryNode $subquery, ?string $alias): TableInterface
+    {
+        // Execute the inner SELECT
+        $rows = iterator_to_array($this->executeSelect($subquery->query));
+
+        if (empty($rows)) {
+            // Return empty table - need to infer columns from the query
+            $columns = $this->inferColumnsFromSelect($subquery->query);
+            return new \mini\Table\InMemoryTable(...$columns);
+        }
+
+        // Build columns from first row
+        $firstRow = $rows[0];
+        $columns = [];
+        foreach (get_object_vars($firstRow) as $colName => $value) {
+            $type = match (true) {
+                is_int($value) => \mini\Table\Types\ColumnType::Int,
+                is_float($value) => \mini\Table\Types\ColumnType::Float,
+                is_bool($value) => \mini\Table\Types\ColumnType::Int,
+                default => \mini\Table\Types\ColumnType::Text,
+            };
+            $columns[] = new \mini\Table\ColumnDef($colName, $type);
+        }
+
+        // Create and populate table
+        $table = new \mini\Table\InMemoryTable(...$columns);
+        foreach ($rows as $row) {
+            $table->insert((array)$row);
+        }
+
+        return $table;
+    }
+
+    /**
+     * Infer column definitions from a SELECT statement (for empty derived tables)
+     */
+    private function inferColumnsFromSelect(SelectStatement $query): array
+    {
+        $columns = [];
+        foreach ($query->columns as $col) {
+            if ($col instanceof ColumnNode) {
+                $name = $col->alias ?? ($col->expression instanceof IdentifierNode
+                    ? $col->expression->getName()
+                    : 'column');
+                $columns[] = new \mini\Table\ColumnDef($name, \mini\Table\Types\ColumnType::Text);
+            }
+        }
+        return $columns ?: [new \mini\Table\ColumnDef('column', \mini\Table\Types\ColumnType::Text)];
+    }
+
+    /**
+     * Execute a subquery with outer row context for correlated subqueries
+     *
+     * Used by ExpressionEvaluator when evaluating scalar subqueries in SELECT or WHERE.
+     *
+     * @param SelectStatement $query The subquery to execute
+     * @param object|null $outerRow The outer row for correlated subquery references
+     * @return iterable Result rows
+     */
+    private function executeSubqueryWithContext(SelectStatement $query, ?object $outerRow): iterable
+    {
+        // For non-correlated subqueries (no outer row), use standard execution
+        if ($outerRow === null) {
+            yield from $this->executeSelect($query);
+            return;
+        }
+
+        // For correlated subqueries, we need to evaluate with outer row context
+        // Detect outer references in WHERE
+        if ($query->from === null) {
+            // SELECT without FROM - just evaluate expressions
+            yield from $this->executeScalarSelect($query);
+            return;
+        }
+
+        $tableName = $query->from->getFullName();
+        $tableAlias = $query->fromAlias ?? $tableName;
+        $table = $this->getTable($tableName);
+
+        if ($table === null) {
+            throw new \RuntimeException("Table not found: $tableName");
+        }
+
+        // Find outer references in the subquery
+        $outerRefs = $query->where !== null
+            ? $this->findOuterReferences($query, $tableName, $tableAlias)
+            : [];
+
+        if (empty($outerRefs)) {
+            // No outer references - execute normally
+            yield from $this->executeSelect($query);
+            return;
+        }
+
+        // Correlated subquery - evaluate WHERE with outer context
+        // Build outer context map from outer row
+        $outerContext = [];
+        foreach ($outerRefs as $ref) {
+            $key = $ref['table'] . '.' . $ref['column'];
+            $qualifiedCol = $ref['table'] . '.' . $ref['column'];
+            $outerContext[$key] = $outerRow->$qualifiedCol ?? $outerRow->{$ref['column']} ?? null;
+        }
+
+        // Filter rows manually with outer context
+        $filteredRows = [];
+        foreach ($table as $row) {
+            if ($query->where === null || $this->evaluateWhereWithContext($query->where, $row, $outerContext)) {
+                $filteredRows[] = $row;
+            }
+        }
+
+        // Check for aggregates
+        if ($this->hasAggregates($query->columns)) {
+            // Execute aggregate over filtered rows
+            yield from $this->executeAggregateOnRows($query, $filteredRows);
+            return;
+        }
+
+        // Project and return
+        foreach ($filteredRows as $row) {
+            yield $this->projectRow($row, $query->columns);
+        }
+    }
+
+    /**
+     * Execute aggregate query on pre-filtered rows
+     */
+    private function executeAggregateOnRows(SelectStatement $ast, array $rows): iterable
+    {
+        $aggregateInfos = $this->collectAggregateInfos($ast->columns);
+        $nonAggregateColumns = $this->collectNonAggregateColumns($ast->columns);
+
+        // Step phase
+        $lastRow = null;
+        foreach ($rows as $row) {
+            $lastRow = $row;
+            $this->stepAggregates($aggregateInfos, $row);
+        }
+
+        // Build result
+        yield $this->buildAggregateResultRow($aggregateInfos, $nonAggregateColumns, $lastRow);
     }
 
     /**
@@ -858,7 +2064,11 @@ class VirtualDatabase implements DatabaseInterface
                 return null; // table.* - return all columns
             }
 
-            $names[] = $col->expression->getName();
+            // Use full qualified name for aliased tables (e.g., 'o.user_id' after JOIN)
+            // Use base name for unqualified columns (e.g., 'name' without table prefix)
+            $names[] = $col->expression->isQualified()
+                ? $col->expression->getFullName()
+                : $col->expression->getName();
         }
 
         return $names;
@@ -903,15 +2113,27 @@ class VirtualDatabase implements DatabaseInterface
         // Build template and evaluate per row (more efficient for AND-only cases)
         $template = $this->buildCorrelatedTemplate($subqueryAst, $outerRefs);
 
+        // Find primary key column for later filtering
+        $columns = $table->getColumns();
+        $pkColumn = null;
+        foreach ($columns as $colName => $colDef) {
+            if ($colDef->index === \mini\Table\Types\IndexType::Primary) {
+                $pkColumn = $colName;
+                break;
+            }
+        }
+
         // Filter rows where EXISTS evaluates to desired result
-        $matchingIds = [];
-        foreach ($table as $rowId => $row) {
+        $matchingPkValues = [];
+        foreach ($table as $row) {
             // Bind outer values
             $bindings = [];
             foreach ($outerRefs as $ref) {
                 $outerColumn = $ref['column'];
                 $paramName = ':outer_' . $ref['table'] . '_' . $outerColumn;
-                $bindings[$paramName] = $row->$outerColumn;
+                // Use qualified column name (e.g., 'u.id') when table is aliased
+                $qualifiedCol = $ref['table'] . '.' . $outerColumn;
+                $bindings[$paramName] = $row->$qualifiedCol ?? $row->$outerColumn ?? null;
             }
 
             $boundTable = $template->bind($bindings);
@@ -921,37 +2143,17 @@ class VirtualDatabase implements DatabaseInterface
                 $exists = !$exists;
             }
 
-            if ($exists) {
-                $matchingIds[] = $rowId;
+            if ($exists && $pkColumn !== null) {
+                $matchingPkValues[] = $row->$pkColumn;
             }
         }
 
-        // Build result from matching row IDs
-        if (empty($matchingIds)) {
+        // Build result from matching PK values
+        if (empty($matchingPkValues) || $pkColumn === null) {
             return $table->except($table);
         }
 
-        // Use in() with the matching IDs - need to get primary key column
-        $columns = $table->getColumns();
-        $pkColumn = null;
-        foreach ($columns as $colName => $colDef) {
-            if ($colDef->index === \mini\Table\IndexType::Primary) {
-                $pkColumn = $colName;
-                break;
-            }
-        }
-
-        if ($pkColumn !== null) {
-            return $table->in($pkColumn, new \mini\Table\Set($pkColumn, $matchingIds));
-        }
-
-        // Fallback: iterate and collect manually (less efficient)
-        $result = null;
-        foreach ($matchingIds as $id) {
-            $rowTable = $table->eq(array_key_first($columns), $id); // Approximate
-            $result = $result === null ? $rowTable : $result->union($rowTable);
-        }
-        return $result ?? $table->except($table);
+        return $table->in($pkColumn, new \mini\Table\Utility\Set($pkColumn, $matchingPkValues));
     }
 
     /**
@@ -1095,7 +2297,9 @@ class VirtualDatabase implements DatabaseInterface
             $outerContext = [];
             foreach ($outerRefs as $ref) {
                 $key = $ref['table'] . '.' . $ref['column'];
-                $outerContext[$key] = $row->{$ref['column']} ?? null;
+                // Use qualified column name (e.g., 'u.id') when table is aliased
+                $qualifiedCol = $ref['table'] . '.' . $ref['column'];
+                $outerContext[$key] = $row->$qualifiedCol ?? $row->{$ref['column']} ?? null;
             }
 
             // Evaluate EXISTS for this outer row
@@ -1119,14 +2323,14 @@ class VirtualDatabase implements DatabaseInterface
         $columns = $table->getColumns();
         $pkColumn = null;
         foreach ($columns as $colName => $colDef) {
-            if ($colDef->index === \mini\Table\IndexType::Primary) {
+            if ($colDef->index === \mini\Table\Types\IndexType::Primary) {
                 $pkColumn = $colName;
                 break;
             }
         }
 
         if ($pkColumn !== null) {
-            return $table->in($pkColumn, new \mini\Table\Set($pkColumn, $matchingIds));
+            return $table->in($pkColumn, new \mini\Table\Utility\Set($pkColumn, $matchingIds));
         }
 
         // Fallback: union individual rows (less efficient)
@@ -1316,7 +2520,7 @@ class VirtualDatabase implements DatabaseInterface
                 $column = $node->left->getName();
                 $value = $this->evaluator->evaluate($node->right, null);
                 return match ($node->operator) {
-                    '=' => $table->eq($column, $value),
+                    '=' => $value === null ? Table::from(EmptyTable::from($table)) : $table->eq($column, $value),
                     '<' => $table->lt($column, $value),
                     '<=' => $table->lte($column, $value),
                     '>' => $table->gt($column, $value),
@@ -1429,8 +2633,8 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         // Apply WHERE filter and execute update
-        $workingTable = $this->applyWhereToTable($table, $ast->where);
-        return $workingTable->update($changes);
+        $query = $this->applyWhereToTable($table, $ast->where);
+        return $table->update($query, $changes);
     }
 
     private function executeDelete(DeleteStatement $ast): int
@@ -1446,8 +2650,8 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("Table '$tableName' does not support DELETE");
         }
 
-        $workingTable = $this->applyWhereToTable($table, $ast->where);
-        return $workingTable->delete();
+        $query = $this->applyWhereToTable($table, $ast->where);
+        return $table->delete($query);
     }
 
     /**
@@ -1472,26 +2676,30 @@ class VirtualDatabase implements DatabaseInterface
         if ($node instanceof BinaryOperation) {
             $op = $node->operator;
 
-            // Left must be column, right must be literal
-            if (!$node->left instanceof IdentifierNode) {
-                throw new \RuntimeException("Left side of comparison must be a column");
-            }
-            if (!$node->right instanceof LiteralNode) {
-                throw new \RuntimeException("Right side of comparison must be a literal value");
+            // Check if we can push to table (column = literal pattern)
+            $canPushToTable = $node->left instanceof IdentifierNode
+                && ($node->right instanceof LiteralNode || $node->right instanceof SubqueryNode);
+
+            if ($canPushToTable) {
+                $column = $this->buildQualifiedColumnName($node->left);
+                // Evaluate right side - this handles both literals and subqueries
+                $value = $this->evaluator->evaluate($node->right, null);
+
+                // SQL standard: col = NULL always returns no rows (NULL = NULL is UNKNOWN, not TRUE)
+                // For IS NULL semantics, use the IsNullOperation branch instead
+                return match ($op) {
+                    '=' => $value === null ? EmptyTable::from($table) : $table->eq($column, $value),
+                    '<' => $table->lt($column, $value),
+                    '<=' => $table->lte($column, $value),
+                    '>' => $table->gt($column, $value),
+                    '>=' => $table->gte($column, $value),
+                    '!=', '<>' => $table->except($table->eq($column, $value)),
+                    default => throw new \RuntimeException("Unsupported operator: $op"),
+                };
             }
 
-            $column = $node->left->getName();
-            $value = $this->evaluator->evaluate($node->right, null);
-
-            return match ($op) {
-                '=' => $table->eq($column, $value),
-                '<' => $table->lt($column, $value),
-                '<=' => $table->lte($column, $value),
-                '>' => $table->gt($column, $value),
-                '>=' => $table->gte($column, $value),
-                '!=', '<>' => $table->except($table->eq($column, $value)),
-                default => throw new \RuntimeException("Unsupported operator: $op"),
-            };
+            // Fall back to expression-based filtering (for CASE, expressions, etc.)
+            return $this->filterByExpression($table, $node);
         }
 
         // LIKE operation
@@ -1499,7 +2707,7 @@ class VirtualDatabase implements DatabaseInterface
             if (!$node->left instanceof IdentifierNode) {
                 throw new \RuntimeException("Left side of LIKE must be a column");
             }
-            $column = $node->left->getName();
+            $column = $this->buildQualifiedColumnName($node->left);
             $pattern = $this->evaluator->evaluate($node->pattern, null);
             $result = $table->like($column, $pattern);
             return $node->negated ? $table->except($result) : $result;
@@ -1510,7 +2718,7 @@ class VirtualDatabase implements DatabaseInterface
             if (!$node->expression instanceof IdentifierNode) {
                 throw new \RuntimeException("IS NULL expression must be a column");
             }
-            $column = $node->expression->getName();
+            $column = $this->buildQualifiedColumnName($node->expression);
             $nullRows = $table->eq($column, null);
             return $node->negated ? $table->except($nullRows) : $nullRows;
         }
@@ -1520,7 +2728,7 @@ class VirtualDatabase implements DatabaseInterface
             if (!$node->left instanceof IdentifierNode) {
                 throw new \RuntimeException("Left side of IN must be a column");
             }
-            $column = $node->left->getName();
+            $column = $this->buildQualifiedColumnName($node->left);
 
             if ($node->isSubquery()) {
                 // Subquery: execute and pass as SetInterface
@@ -1531,7 +2739,7 @@ class VirtualDatabase implements DatabaseInterface
                 foreach ($node->values as $valueNode) {
                     $values[] = $this->evaluator->evaluate($valueNode, null);
                 }
-                $set = new \mini\Table\Set($column, $values);
+                $set = new \mini\Table\Utility\Set($column, $values);
             }
 
             $result = $table->in($column, $set);
@@ -1548,7 +2756,7 @@ class VirtualDatabase implements DatabaseInterface
             if (!$node->expression instanceof IdentifierNode) {
                 throw new \RuntimeException("BETWEEN expression must be a column");
             }
-            $column = $node->expression->getName();
+            $column = $this->buildQualifiedColumnName($node->expression);
             $low = $this->evaluator->evaluate($node->low, null);
             $high = $this->evaluator->evaluate($node->high, null);
             $result = $table->gte($column, $low)->lte($column, $high);
@@ -1561,7 +2769,151 @@ class VirtualDatabase implements DatabaseInterface
             return $table->except($matching);
         }
 
+        // ALL/ANY quantified comparison
+        if ($node instanceof \mini\Parsing\SQL\AST\QuantifiedComparisonNode) {
+            return $this->applyQuantifiedComparison($table, $node);
+        }
+
         throw new \RuntimeException("Unsupported WHERE expression: " . get_class($node));
+    }
+
+    /**
+     * Filter table rows by evaluating an expression against each row
+     *
+     * Used when WHERE contains expressions that can't be pushed to the table
+     * (e.g., CASE expressions, complex arithmetic, etc.)
+     */
+    private function filterByExpression(TableInterface $table, \mini\Parsing\SQL\AST\ASTNode $condition): TableInterface
+    {
+        $filteredRows = [];
+        $columns = null;
+
+        foreach ($table as $row) {
+            if ($columns === null) {
+                $columns = $table->getColumns();
+            }
+
+            // Evaluate the condition against this row
+            if ($this->evaluator->evaluateAsBool($condition, $row)) {
+                $filteredRows[] = $row;
+            }
+        }
+
+        // Build result table with same schema
+        $result = new \mini\Table\InMemoryTable(...array_values($columns ?? []));
+        foreach ($filteredRows as $row) {
+            $result->insert((array)$row);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Apply ALL/ANY quantified comparison
+     *
+     * - ALL: row matches if comparison is true for ALL values in subquery
+     * - ANY: row matches if comparison is true for at least one value in subquery
+     *
+     * Empty subquery:
+     * - ALL: returns true (vacuous truth)
+     * - ANY: returns false (no match possible)
+     */
+    private function applyQuantifiedComparison(
+        TableInterface $table,
+        \mini\Parsing\SQL\AST\QuantifiedComparisonNode $node
+    ): TableInterface {
+        // Execute subquery to get comparison values
+        $subqueryRows = iterator_to_array($this->executeSelect($node->subquery->query));
+
+        // Extract first column values from subquery
+        $subqueryValues = [];
+        foreach ($subqueryRows as $row) {
+            $props = get_object_vars($row);
+            $subqueryValues[] = reset($props); // First column value
+        }
+
+        // Handle empty subquery
+        if (empty($subqueryValues)) {
+            if ($node->quantifier === 'ALL') {
+                // ALL with empty set is vacuously true - return all rows
+                return $table;
+            } else {
+                // ANY with empty set has no match - return empty
+                return \mini\Table\Wrappers\EmptyTable::from($table);
+            }
+        }
+
+        // Filter rows by quantified comparison
+        $filteredRows = [];
+        $columns = null;
+
+        foreach ($table as $row) {
+            if ($columns === null) {
+                $columns = $table->getColumns();
+            }
+
+            // Evaluate left side for this row
+            $leftValue = $this->evaluator->evaluate($node->left, $row);
+
+            // Check against all subquery values based on quantifier
+            $matches = $node->quantifier === 'ALL'
+                ? $this->compareAll($leftValue, $node->operator, $subqueryValues)
+                : $this->compareAny($leftValue, $node->operator, $subqueryValues);
+
+            if ($matches) {
+                $filteredRows[] = $row;
+            }
+        }
+
+        // Build result table
+        $result = new \mini\Table\InMemoryTable(...array_values($columns ?? []));
+        foreach ($filteredRows as $row) {
+            $result->insert((array)$row);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Check if comparison is true for ALL values (ALL quantifier)
+     */
+    private function compareAll(mixed $left, string $op, array $values): bool
+    {
+        foreach ($values as $right) {
+            if (!$this->compare($left, $op, $right)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Check if comparison is true for at least one value (ANY quantifier)
+     */
+    private function compareAny(mixed $left, string $op, array $values): bool
+    {
+        foreach ($values as $right) {
+            if ($this->compare($left, $op, $right)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Perform a single comparison
+     */
+    private function compare(mixed $left, string $op, mixed $right): bool
+    {
+        return match ($op) {
+            '=' => $left == $right,
+            '!=' , '<>' => $left != $right,
+            '<' => $left < $right,
+            '<=' => $left <= $right,
+            '>' => $left > $right,
+            '>=' => $left >= $right,
+            default => throw new \RuntimeException("Unsupported comparison operator: $op"),
+        };
     }
 
     /**
@@ -1587,8 +2939,13 @@ class VirtualDatabase implements DatabaseInterface
                 throw new \RuntimeException("Right side of comparison must be a literal value");
             }
 
-            $column = $node->left->getName();
+            $column = $this->buildQualifiedColumnName($node->left);
             $value = $this->evaluator->evaluate($node->right, null);
+
+            // SQL standard: col = NULL always evaluates to UNKNOWN (no matches)
+            if ($value === null && $op === '=') {
+                return \mini\Table\Predicate::never();
+            }
 
             $p = new \mini\Table\Predicate();
             return match ($op) {
@@ -1610,7 +2967,7 @@ class VirtualDatabase implements DatabaseInterface
             if ($node->negated) {
                 throw new \RuntimeException("NOT LIKE not yet supported in OR predicates");
             }
-            $column = $node->left->getName();
+            $column = $this->buildQualifiedColumnName($node->left);
             $pattern = $this->evaluator->evaluate($node->pattern, null);
             return (new \mini\Table\Predicate())->like($column, $pattern);
         }
@@ -1623,7 +2980,7 @@ class VirtualDatabase implements DatabaseInterface
             if ($node->negated) {
                 throw new \RuntimeException("IS NOT NULL not yet supported in OR predicates");
             }
-            $column = $node->expression->getName();
+            $column = $this->buildQualifiedColumnName($node->expression);
             return (new \mini\Table\Predicate())->eq($column, null);
         }
 
@@ -1652,8 +3009,14 @@ class VirtualDatabase implements DatabaseInterface
                 throw new \RuntimeException("Right side of comparison must be a literal value");
             }
 
-            $column = $node->left->getName();
+            $column = $this->buildQualifiedColumnName($node->left);
             $value = $this->evaluator->evaluate($node->right, null);
+
+            // SQL standard: col = NULL always evaluates to UNKNOWN (no matches)
+            // Return Predicate::never() to indicate this branch can't match
+            if ($value === null && $op === '=') {
+                return \mini\Table\Predicate::never();
+            }
 
             return match ($op) {
                 '=' => $predicate->eq($column, $value),
@@ -1674,7 +3037,7 @@ class VirtualDatabase implements DatabaseInterface
             if ($node->negated) {
                 throw new \RuntimeException("NOT LIKE not yet supported in OR predicates");
             }
-            $column = $node->left->getName();
+            $column = $this->buildQualifiedColumnName($node->left);
             $pattern = $this->evaluator->evaluate($node->pattern, null);
             return $predicate->like($column, $pattern);
         }
@@ -1687,7 +3050,7 @@ class VirtualDatabase implements DatabaseInterface
             if ($node->negated) {
                 throw new \RuntimeException("IS NOT NULL not yet supported in OR predicates");
             }
-            $column = $node->expression->getName();
+            $column = $this->buildQualifiedColumnName($node->expression);
             return $predicate->eq($column, null);
         }
 
@@ -1708,28 +3071,151 @@ class VirtualDatabase implements DatabaseInterface
                 throw new \RuntimeException("ORDER BY expression must be a column");
             }
 
-            $parts[] = $colExpr->getName() . ' ' . $direction;
+            $parts[] = $this->buildQualifiedColumnName($colExpr) . ' ' . $direction;
         }
 
         return $table->order(implode(', ', $parts));
     }
 
     /**
-     * Apply a WHERE clause AST to a MutableTableInterface
+     * Check if ORDER BY contains expressions or aliases that need evaluation
+     *
+     * Returns true if any ORDER BY item:
+     * - Is not a simple IdentifierNode (e.g., expressions like price * stock)
+     * - References a SELECT alias instead of a table column
+     *
+     * @param array $orderBy ORDER BY items from AST
+     * @param array $selectColumns SELECT column nodes (for alias resolution)
      */
-    private function applyWhereToTable(MutableTableInterface $table, ?\mini\Parsing\SQL\AST\ASTNode $where): MutableTableInterface
+    private function orderByNeedsExpressionEval(array $orderBy, array $selectColumns): bool
+    {
+        // Build alias set from SELECT columns
+        $aliases = [];
+        foreach ($selectColumns as $col) {
+            if ($col instanceof ColumnNode && $col->alias !== null) {
+                $aliases[$col->alias] = true;
+            }
+        }
+
+        foreach ($orderBy as $item) {
+            $colExpr = $item['column'];
+
+            // Not an identifier = expression (needs eval)
+            if (!$colExpr instanceof IdentifierNode) {
+                return true;
+            }
+
+            // References a SELECT alias (needs eval)
+            $name = $colExpr->getName();
+            if (isset($aliases[$name])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Execute SELECT with expression-based ORDER BY
+     *
+     * Used when ORDER BY references aliases or expressions that can't be
+     * delegated to the table backend. Projects rows first, then sorts.
+     */
+    private function executeSelectWithExpressionOrderBy(SelectStatement $ast, TableInterface $table): iterable
+    {
+        // Build alias→expression map from SELECT columns
+        $aliasToExpr = [];
+        foreach ($ast->columns as $col) {
+            if ($col instanceof ColumnNode && $col->alias !== null) {
+                $aliasToExpr[$col->alias] = $col->expression;
+            }
+        }
+
+        // Determine which ORDER BY items need original row context
+        // (expressions that reference columns not in SELECT aliases)
+        $needsOriginalRow = false;
+        foreach ($ast->orderBy as $item) {
+            $colExpr = $item['column'];
+            if (!$colExpr instanceof IdentifierNode) {
+                $needsOriginalRow = true;
+                break;
+            }
+            $name = $colExpr->getName();
+            if (!isset($aliasToExpr[$name])) {
+                // Not an alias - might be a table column
+                $needsOriginalRow = true;
+                break;
+            }
+        }
+
+        // Collect rows - keep original row if needed for ORDER BY expressions
+        $results = [];
+        if ($ast->distinct) {
+            $seen = new \mini\Table\Index\TreapIndex();
+            foreach ($table as $row) {
+                $projected = $this->projectRow($row, $ast->columns);
+                $key = serialize($projected);
+                if (!$seen->has($key)) {
+                    $seen->insert($key, 0);
+                    $results[] = $needsOriginalRow
+                        ? ['projected' => $projected, 'original' => $row]
+                        : $projected;
+                }
+            }
+        } else {
+            foreach ($table as $row) {
+                $projected = $this->projectRow($row, $ast->columns);
+                $results[] = $needsOriginalRow
+                    ? ['projected' => $projected, 'original' => $row]
+                    : $projected;
+            }
+        }
+
+        // Sort results
+        if ($needsOriginalRow) {
+            $results = $this->sortResultsWithOriginal($results, $ast->orderBy, $aliasToExpr);
+            // Extract just the projected rows
+            $results = array_map(fn($r) => $r['projected'], $results);
+        } else {
+            $results = $this->sortResults($results, $ast->orderBy);
+        }
+
+        // Apply OFFSET
+        $offset = 0;
+        if ($ast->offset !== null) {
+            $offset = (int)$this->evaluator->evaluate($ast->offset, null);
+        }
+
+        // Apply LIMIT
+        $limit = null;
+        if ($ast->limit !== null) {
+            $limit = (int)$this->evaluator->evaluate($ast->limit, null);
+        }
+
+        // Yield results with offset/limit
+        $count = 0;
+        foreach ($results as $i => $result) {
+            if ($i < $offset) {
+                continue;
+            }
+            if ($limit !== null && $count >= $limit) {
+                break;
+            }
+            yield $result;
+            $count++;
+        }
+    }
+
+    /**
+     * Apply a WHERE clause AST to build a query for mutations
+     */
+    private function applyWhereToTable(TableInterface $table, ?\mini\Parsing\SQL\AST\ASTNode $where): TableInterface
     {
         if ($where === null) {
             return $table;
         }
 
-        $result = $this->applyWhereToTableInterface($table, $where);
-
-        if (!$result instanceof MutableTableInterface) {
-            throw new \RuntimeException("Filtered table must remain MutableTableInterface");
-        }
-
-        return $result;
+        return $this->applyWhereToTableInterface($table, $where);
     }
 
     /**
@@ -1793,5 +3279,153 @@ class VirtualDatabase implements DatabaseInterface
 
         // Fallback
         return '?';
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // JOIN support
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Apply a JOIN clause to a table
+     *
+     * @param TableInterface $left The left table (already aliased)
+     * @param \mini\Parsing\SQL\AST\JoinNode $join The JOIN AST node
+     * @return TableInterface The joined table
+     */
+    private function applyJoin(TableInterface $left, \mini\Parsing\SQL\AST\JoinNode $join): TableInterface
+    {
+        // Handle derived table in JOIN
+        if ($join->table instanceof SubqueryNode) {
+            $rightTable = $this->executeDerivedTable($join->table, $join->alias);
+            $rightAlias = $join->alias;
+        } else {
+            $rightTableName = $join->table->getFullName();
+            $rightTable = $this->getTable($rightTableName);
+
+            if ($rightTable === null) {
+                throw new \RuntimeException("Table not found: $rightTableName");
+            }
+
+            // Apply alias to right table
+            $rightAlias = $join->alias ?? $rightTableName;
+        }
+
+        $rightTable = $rightTable->withAlias($rightAlias);
+
+        // CROSS JOIN: no condition needed
+        if (strtoupper($join->joinType) === 'CROSS') {
+            return new CrossJoinTable($left, $rightTable);
+        }
+
+        // Build predicate from ON condition
+        if ($join->condition === null) {
+            throw new \RuntimeException(strtoupper($join->joinType) . " JOIN requires ON condition");
+        }
+
+        $bindPredicate = $this->buildJoinPredicate($join->condition, $rightAlias);
+        $leftWithBind = $left->withProperty('__bind__', $bindPredicate);
+
+        return match (strtoupper($join->joinType)) {
+            'INNER', 'JOIN' => new InnerJoinTable($leftWithBind, $rightTable),
+            'LEFT', 'LEFT OUTER' => new LeftJoinTable($leftWithBind, $rightTable),
+            'RIGHT', 'RIGHT OUTER' => new RightJoinTable($leftWithBind, $rightTable),
+            'FULL', 'FULL OUTER' => new FullJoinTable($leftWithBind, $rightTable),
+            default => throw new \RuntimeException("Unsupported join type: {$join->joinType}"),
+        };
+    }
+
+    /**
+     * Build a Predicate with bind parameters from a JOIN ON condition
+     *
+     * Converts ON conditions like `u.id = o.user_id` into a Predicate with
+     * eqBind('u.id', ':o.user_id') where the bind parameter references the
+     * right table column.
+     *
+     * @param \mini\Parsing\SQL\AST\ASTNode $condition The ON condition AST
+     * @param string $rightAlias The right table alias
+     * @return Predicate
+     */
+    private function buildJoinPredicate(\mini\Parsing\SQL\AST\ASTNode $condition, string $rightAlias): Predicate
+    {
+        $predicate = new Predicate();
+        return $this->appendJoinConditions($predicate, $condition, $rightAlias);
+    }
+
+    /**
+     * Append join conditions to a predicate
+     */
+    private function appendJoinConditions(
+        Predicate $predicate,
+        \mini\Parsing\SQL\AST\ASTNode $node,
+        string $rightAlias
+    ): Predicate {
+        // Handle AND: both sides are conditions
+        if ($node instanceof BinaryOperation && strtoupper($node->operator) === 'AND') {
+            $predicate = $this->appendJoinConditions($predicate, $node->left, $rightAlias);
+            return $this->appendJoinConditions($predicate, $node->right, $rightAlias);
+        }
+
+        // Handle simple comparison: left = right
+        if ($node instanceof BinaryOperation) {
+            $op = $node->operator;
+
+            if (!$node->left instanceof IdentifierNode || !$node->right instanceof IdentifierNode) {
+                throw new \RuntimeException("JOIN ON condition must compare columns (e.g., u.id = o.user_id)");
+            }
+
+            $leftCol = $this->buildQualifiedColumnName($node->left);
+            $rightCol = $this->buildQualifiedColumnName($node->right);
+
+            // Determine which side references the right table
+            $leftQualifier = $node->left->getQualifier()[0] ?? null;
+            $rightQualifier = $node->right->getQualifier()[0] ?? null;
+
+            $leftIsRight = $leftQualifier !== null && strtolower($leftQualifier) === strtolower($rightAlias);
+            $rightIsRight = $rightQualifier !== null && strtolower($rightQualifier) === strtolower($rightAlias);
+
+            // Build bind: the right-table column becomes the bind parameter
+            if ($rightIsRight && !$leftIsRight) {
+                // Normal case: left.col = right.col → eqBind(left.col, :right.col)
+                $bindParam = ':' . $rightCol;
+                return match ($op) {
+                    '=' => $predicate->eqBind($leftCol, $bindParam),
+                    '<' => $predicate->ltBind($leftCol, $bindParam),
+                    '<=' => $predicate->lteBind($leftCol, $bindParam),
+                    '>' => $predicate->gtBind($leftCol, $bindParam),
+                    '>=' => $predicate->gteBind($leftCol, $bindParam),
+                    default => throw new \RuntimeException("Unsupported JOIN operator: $op"),
+                };
+            } elseif ($leftIsRight && !$rightIsRight) {
+                // Swapped case: right.col = left.col → eqBind(left.col, :right.col)
+                $bindParam = ':' . $leftCol;
+                // Swap the comparison direction
+                return match ($op) {
+                    '=' => $predicate->eqBind($rightCol, $bindParam),
+                    '<' => $predicate->gtBind($rightCol, $bindParam),
+                    '<=' => $predicate->gteBind($rightCol, $bindParam),
+                    '>' => $predicate->ltBind($rightCol, $bindParam),
+                    '>=' => $predicate->lteBind($rightCol, $bindParam),
+                    default => throw new \RuntimeException("Unsupported JOIN operator: $op"),
+                };
+            } else {
+                throw new \RuntimeException(
+                    "JOIN ON condition must compare left and right tables (found: $leftCol vs $rightCol)"
+                );
+            }
+        }
+
+        throw new \RuntimeException("Unsupported JOIN ON expression: " . get_class($node));
+    }
+
+    /**
+     * Build qualified column name from identifier node
+     */
+    private function buildQualifiedColumnName(IdentifierNode $node): string
+    {
+        if ($node->isQualified()) {
+            $qualifier = $node->getQualifier()[0] ?? '';
+            return $qualifier . '.' . $node->getName();
+        }
+        return $node->getName();
     }
 }
