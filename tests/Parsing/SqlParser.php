@@ -460,4 +460,34 @@ assert_eq('Alice', $bound->where->left->right->value);
 assert_eq('18', $bound->where->right->right->value);
 echo "✓ Named placeholders bind correctly\n";
 
+// --- Scalar Subquery Tests ---
+
+use mini\Parsing\SQL\AST\SubqueryNode;
+use mini\Parsing\SQL\AST\UnionNode;
+use mini\Parsing\SQL\AST\WithStatement;
+
+// Test: Simple scalar subquery
+$ast = $parser->parse('SELECT (SELECT MAX(id) FROM users) AS max_id FROM dual');
+assert_true($ast->columns[0]->expression instanceof SubqueryNode);
+assert_true($ast->columns[0]->expression->query instanceof SelectStatement);
+echo "✓ Simple scalar subquery works\n";
+
+// Test: Scalar subquery with UNION
+$ast = $parser->parse('SELECT (SELECT 1 UNION SELECT 2) AS val FROM dual');
+assert_true($ast->columns[0]->expression instanceof SubqueryNode);
+assert_true($ast->columns[0]->expression->query instanceof UnionNode);
+echo "✓ Scalar subquery with UNION works\n";
+
+// Test: Scalar subquery with WITH (CTE)
+$ast = $parser->parse('SELECT (WITH cte AS (SELECT 1 AS n) SELECT n FROM cte) AS val FROM dual');
+assert_true($ast->columns[0]->expression instanceof SubqueryNode);
+assert_true($ast->columns[0]->expression->query instanceof WithStatement);
+echo "✓ Scalar subquery with WITH (CTE) works\n";
+
+// Test: Scalar subquery in WHERE clause
+$ast = $parser->parse('SELECT * FROM t WHERE x = (SELECT MAX(y) FROM s)');
+assert_true($ast->where instanceof BinaryOperation);
+assert_true($ast->where->right instanceof SubqueryNode);
+echo "✓ Scalar subquery in WHERE clause works\n";
+
 echo "\n✓ All SQL parser tests passed!\n";

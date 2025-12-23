@@ -701,9 +701,10 @@ class SqlParser
 
         // Handle Parentheses and Scalar Subqueries
         if ($this->match(SqlLexer::T_LPAREN)) {
-            // Check for scalar subquery: (SELECT ...)
-            if ($this->current()['type'] === SqlLexer::T_SELECT) {
-                $subquery = $this->parseSelectStatement();
+            // Check for scalar subquery: (SELECT ...), (SELECT ... UNION ...), (WITH ... SELECT ...)
+            $currentType = $this->current()['type'];
+            if ($currentType === SqlLexer::T_SELECT || $currentType === SqlLexer::T_WITH) {
+                $subquery = $this->parseSelectOrUnion();
                 $this->expect(SqlLexer::T_RPAREN);
                 return new SubqueryNode($subquery);
             }
