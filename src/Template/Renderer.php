@@ -104,6 +104,7 @@ class Renderer implements RendererInterface
         ob_start();
         try {
             $ctx->include($templatePath, $vars);
+            $ctx->assertNoUnclosedBlocks();
         } catch (\Throwable $e) {
             ob_end_clean();
             throw $e;

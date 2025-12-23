@@ -38,7 +38,8 @@ use mini\Table\Wrappers\FullJoinTable;
 use mini\Table\Wrappers\InnerJoinTable;
 use mini\Table\Wrappers\LeftJoinTable;
 use mini\Table\Wrappers\RightJoinTable;
-use mini\Table\GeneratorTable;
+use mini\Table\Wrappers\SqlExceptTable;
+use mini\Table\Wrappers\SqlIntersectTable;
 
 /**
  * Virtual database that executes SQL against registered TableInterface instances
@@ -609,46 +610,22 @@ class VirtualDatabase implements DatabaseInterface
 
     /**
      * INTERSECT: rows that exist in both tables
+     *
+     * Uses SqlIntersectTable wrapper which maintains predicate pushdown.
      */
     private function intersectTables(TableInterface $left, TableInterface $right): TableInterface
     {
-        // Materialize right side for comparison (positional, not by column name)
-        $rightValues = [];
-        foreach ($right as $row) {
-            $rightValues[] = array_values(get_object_vars($row));
-        }
-
-        $columns = array_values($left->getColumns());
-        return new GeneratorTable(function () use ($left, $rightValues) {
-            foreach ($left as $row) {
-                $leftVals = array_values(get_object_vars($row));
-                if (in_array($leftVals, $rightValues, false)) {
-                    yield $row;
-                }
-            }
-        }, ...$columns);
+        return new SqlIntersectTable($left, $right);
     }
 
     /**
      * EXCEPT: rows from left that don't exist in right
+     *
+     * Uses SqlExceptTable wrapper which maintains predicate pushdown.
      */
     private function exceptTables(TableInterface $left, TableInterface $right): TableInterface
     {
-        // Materialize right side for comparison (positional, not by column name)
-        $rightValues = [];
-        foreach ($right as $row) {
-            $rightValues[] = array_values(get_object_vars($row));
-        }
-
-        $columns = array_values($left->getColumns());
-        return new GeneratorTable(function () use ($left, $rightValues) {
-            foreach ($left as $row) {
-                $leftVals = array_values(get_object_vars($row));
-                if (!in_array($leftVals, $rightValues, false)) {
-                    yield $row;
-                }
-            }
-        }, ...$columns);
+        return new SqlExceptTable($left, $right);
     }
 
     /**
@@ -2676,6 +2653,62 @@ class VirtualDatabase implements DatabaseInterface
         if ($node instanceof BinaryOperation) {
             $op = $node->operator;
 
+            // Optimization: constant folding (both sides are literals)
+            // WHERE 1 = 1 → always true, WHERE 1 = 0 → always false
+            if ($node->left instanceof LiteralNode && $node->right instanceof LiteralNode
+                && in_array($op, ['=', '!=', '<>', '<', '<=', '>', '>='], true)
+            ) {
+                $leftVal = $node->left->value;
+                $rightVal = $node->right->value;
+
+                // NULL comparisons are always UNKNOWN (no rows match)
+                if ($leftVal === null || $rightVal === null) {
+                    return EmptyTable::from($table);
+                }
+
+                $result = match ($op) {
+                    '=' => $leftVal == $rightVal,
+                    '!=', '<>' => $leftVal != $rightVal,
+                    '<' => $leftVal < $rightVal,
+                    '<=' => $leftVal <= $rightVal,
+                    '>' => $leftVal > $rightVal,
+                    '>=' => $leftVal >= $rightVal,
+                    default => null,
+                };
+
+                if ($result === true) {
+                    return $table; // No filter needed
+                }
+                if ($result === false) {
+                    return EmptyTable::from($table);
+                }
+            }
+
+            // Optimization: null propagation in arithmetic
+            // WHERE col + NULL > 5 → always NULL → EmptyTable
+            if ($this->expressionContainsNull($node->left) || $this->expressionContainsNull($node->right)) {
+                return EmptyTable::from($table);
+            }
+
+            // Optimization: flip literal on left - 7 < col → col > 7
+            if ($node->left instanceof LiteralNode && $node->right instanceof IdentifierNode
+                && in_array($op, ['=', '!=', '<>', '<', '<=', '>', '>='], true)
+            ) {
+                $column = $this->buildQualifiedColumnName($node->right);
+                $value = $node->left->value;
+                $flippedOp = $this->flipComparisonOp($op);
+
+                return match ($flippedOp) {
+                    '=' => $value === null ? EmptyTable::from($table) : $table->eq($column, $value),
+                    '<' => $table->lt($column, $value),
+                    '<=' => $table->lte($column, $value),
+                    '>' => $table->gt($column, $value),
+                    '>=' => $table->gte($column, $value),
+                    '!=', '<>' => $table->except($table->eq($column, $value)),
+                    default => $this->filterByExpression($table, $node),
+                };
+            }
+
             // Check if we can push to table (column = literal pattern)
             $canPushToTable = $node->left instanceof IdentifierNode
                 && ($node->right instanceof LiteralNode || $node->right instanceof SubqueryNode);
@@ -2695,6 +2728,22 @@ class VirtualDatabase implements DatabaseInterface
                     '>=' => $table->gte($column, $value),
                     '!=', '<>' => $table->except($table->eq($column, $value)),
                     default => throw new \RuntimeException("Unsupported operator: $op"),
+                };
+            }
+
+            // Try to simplify arithmetic expressions: (col + 5) > 7  →  col > 2
+            $simplified = $this->trySimplifyArithmeticComparison($node);
+            if ($simplified !== null) {
+                return match ($simplified['op']) {
+                    '=' => $simplified['value'] === null
+                        ? EmptyTable::from($table)
+                        : $table->eq($simplified['column'], $simplified['value']),
+                    '<' => $table->lt($simplified['column'], $simplified['value']),
+                    '<=' => $table->lte($simplified['column'], $simplified['value']),
+                    '>' => $table->gt($simplified['column'], $simplified['value']),
+                    '>=' => $table->gte($simplified['column'], $simplified['value']),
+                    '!=', '<>' => $table->except($table->eq($simplified['column'], $simplified['value'])),
+                    default => $this->filterByExpression($table, $node),
                 };
             }
 
@@ -2742,7 +2791,7 @@ class VirtualDatabase implements DatabaseInterface
                 $set = new \mini\Table\Utility\Set($column, $values);
             }
 
-            $result = $table->in($column, $set);
+            $result = $this->applyInWithIndexAwareness($table, $column, $set);
             return $node->negated ? $table->except($result) : $result;
         }
 
@@ -2806,6 +2855,75 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         return $result;
+    }
+
+    /**
+     * Apply IN filter with index-aware optimization
+     *
+     * If the outer table has an index on the IN column but the set doesn't,
+     * we iterate the set values and probe the outer table using eq().
+     * This leverages indexes on the outer table for O(k log n) instead of O(n)
+     * where k is set size and n is outer table size.
+     */
+    private function applyInWithIndexAwareness(
+        TableInterface $table,
+        string $column,
+        SetInterface $set
+    ): TableInterface {
+        // Check if outer table has index on the IN column
+        $outerCols = $table->getColumns();
+        $outerHasIndex = isset($outerCols[$column])
+            && $outerCols[$column]->index !== \mini\Table\Types\IndexType::None;
+
+        // Check if set has useful index on its first column
+        $setCols = $set->getColumns();
+        $setColNames = array_keys($setCols);
+        $setFirstCol = $setColNames[0] ?? null;
+        $setHasIndex = $setFirstCol !== null
+            && $setCols[$setFirstCol]->index !== \mini\Table\Types\IndexType::None;
+
+        // Optimization: iterate set and probe indexed outer table
+        if ($outerHasIndex && !$setHasIndex) {
+            // Collect matching rows by probing outer table for each set value
+            // Use content-based deduplication since row IDs may not be unique across eq() calls
+            $results = [];
+            $seenValues = [];
+            $seenRows = [];
+
+            foreach ($set as $setRow) {
+                $value = $setRow->$setFirstCol ?? null;
+
+                // Skip duplicate values in set
+                $key = serialize($value);
+                if (isset($seenValues[$key])) {
+                    continue;
+                }
+                $seenValues[$key] = true;
+
+                // Probe outer table using index
+                foreach ($table->eq($column, $value) as $row) {
+                    // Deduplicate by row content (handles join tables with regenerated IDs)
+                    $rowKey = serialize($row);
+                    if (!isset($seenRows[$rowKey])) {
+                        $seenRows[$rowKey] = true;
+                        $results[] = $row;
+                    }
+                }
+            }
+
+            // Return as GeneratorTable to preserve immutability
+            return new \mini\Table\GeneratorTable(
+                function () use ($results) {
+                    foreach ($results as $id => $row) {
+                        yield $id => $row;
+                    }
+                },
+                ...array_values($outerCols)
+            );
+        }
+
+        // Default: use standard in() which iterates outer and checks set membership
+        return $table->in($column, $set);
     }
 
     /**
@@ -2914,6 +3032,201 @@ class VirtualDatabase implements DatabaseInterface
             '>=' => $left >= $right,
             default => throw new \RuntimeException("Unsupported comparison operator: $op"),
         };
+    }
+
+    /**
+     * Try to simplify arithmetic comparison to pushable form
+     *
+     * Handles patterns like:
+     * - (col + 5) > 7  →  col > 2
+     * - (col - 3) >= 10  →  col >= 13
+     * - (5 + col) < 10  →  col < 5
+     * - (10 - col) > 3  →  col < 7  (operator flips!)
+     * - (col * 2) > 10  →  col > 5
+     * - (col / 2) >= 5  →  col >= 10
+     *
+     * @return array{column: string, op: string, value: mixed}|null
+     */
+    private function trySimplifyArithmeticComparison(BinaryOperation $node): ?array
+    {
+        $cmpOp = $node->operator;
+        if (!in_array($cmpOp, ['=', '!=', '<>', '<', '<=', '>', '>='], true)) {
+            return null;
+        }
+
+        // Right side must be a constant
+        if (!$node->right instanceof LiteralNode) {
+            return null;
+        }
+        $rightValue = $node->right->value;
+
+        // Left side must be arithmetic: (col OP const) or (const OP col)
+        if (!$node->left instanceof BinaryOperation) {
+            return null;
+        }
+        $arith = $node->left;
+        $arithOp = $arith->operator;
+
+        if (!in_array($arithOp, ['+', '-', '*', '/'], true)) {
+            return null;
+        }
+
+        // Pattern 1: col OP const (e.g., col + 5)
+        if ($arith->left instanceof IdentifierNode && $arith->right instanceof LiteralNode) {
+            $column = $this->buildQualifiedColumnName($arith->left);
+            $constValue = $arith->right->value;
+
+            return $this->solveForColumn($column, $arithOp, $constValue, $cmpOp, $rightValue, false);
+        }
+
+        // Pattern 2: const OP col (e.g., 5 + col, 10 - col)
+        if ($arith->left instanceof LiteralNode && $arith->right instanceof IdentifierNode) {
+            $column = $this->buildQualifiedColumnName($arith->right);
+            $constValue = $arith->left->value;
+
+            return $this->solveForColumn($column, $arithOp, $constValue, $cmpOp, $rightValue, true);
+        }
+
+        return null;
+    }
+
+    /**
+     * Solve for column in arithmetic comparison
+     *
+     * @param string $column Column name
+     * @param string $arithOp Arithmetic operator (+, -, *, /)
+     * @param mixed $constValue Constant in arithmetic expression
+     * @param string $cmpOp Comparison operator
+     * @param mixed $rightValue Right side of comparison
+     * @param bool $constOnLeft Whether constant is on left (e.g., 5 - col)
+     * @return array{column: string, op: string, value: mixed}|null
+     */
+    private function solveForColumn(
+        string $column,
+        string $arithOp,
+        mixed $constValue,
+        string $cmpOp,
+        mixed $rightValue,
+        bool $constOnLeft
+    ): ?array {
+        // Only handle numeric operations
+        if (!is_numeric($constValue) || !is_numeric($rightValue)) {
+            return null;
+        }
+
+        $solvedValue = null;
+        $solvedOp = $cmpOp;
+
+        if ($constOnLeft) {
+            // const OP col CMP right  →  solve for col
+            switch ($arithOp) {
+                case '+':
+                    // const + col CMP right  →  col CMP (right - const)
+                    $solvedValue = $rightValue - $constValue;
+                    break;
+                case '-':
+                    // const - col CMP right  →  -col CMP (right - const)  →  col FLIP(CMP) (const - right)
+                    $solvedValue = $constValue - $rightValue;
+                    $solvedOp = $this->flipComparisonOp($cmpOp);
+                    break;
+                case '*':
+                    if ($constValue == 0) return null;
+                    // const * col CMP right  →  col CMP (right / const)
+                    $solvedValue = $rightValue / $constValue;
+                    if ($constValue < 0) {
+                        $solvedOp = $this->flipComparisonOp($cmpOp);
+                    }
+                    break;
+                case '/':
+                    // const / col CMP right - too complex, skip
+                    return null;
+            }
+        } else {
+            // col OP const CMP right  →  solve for col
+            switch ($arithOp) {
+                case '+':
+                    // col + const CMP right  →  col CMP (right - const)
+                    $solvedValue = $rightValue - $constValue;
+                    break;
+                case '-':
+                    // col - const CMP right  →  col CMP (right + const)
+                    $solvedValue = $rightValue + $constValue;
+                    break;
+                case '*':
+                    if ($constValue == 0) return null;
+                    // col * const CMP right  →  col CMP (right / const)
+                    $solvedValue = $rightValue / $constValue;
+                    if ($constValue < 0) {
+                        $solvedOp = $this->flipComparisonOp($cmpOp);
+                    }
+                    break;
+                case '/':
+                    if ($constValue == 0) return null;
+                    // col / const CMP right  →  col CMP (right * const)
+                    $solvedValue = $rightValue * $constValue;
+                    if ($constValue < 0) {
+                        $solvedOp = $this->flipComparisonOp($cmpOp);
+                    }
+                    break;
+            }
+        }
+
+        if ($solvedValue === null) {
+            return null;
+        }
+
+        // Normalize to integer if it's a whole number
+        if (is_float($solvedValue) && floor($solvedValue) == $solvedValue) {
+            $solvedValue = (int) $solvedValue;
+        }
+
+        return [
+            'column' => $column,
+            'op' => $solvedOp,
+            'value' => $solvedValue,
+        ];
+    }
+
+    /**
+     * Flip comparison operator (for negative multiplier or subtraction from constant)
+     */
+    private function flipComparisonOp(string $op): string
+    {
+        return match ($op) {
+            '<' => '>',
+            '<=' => '>=',
+            '>' => '<',
+            '>=' => '<=',
+            '=', '!=', '<>' => $op, // equality doesn't flip
+            default => $op,
+        };
+    }
+
+    /**
+     * Check if an arithmetic expression contains NULL literal
+     *
+     * NULL propagates through arithmetic: col + NULL, 1 * NULL, etc. are all NULL.
+     * This means any comparison with such expression is UNKNOWN → no rows match.
+     */
+    private function expressionContainsNull(\mini\Parsing\SQL\AST\ASTNode $node): bool
+    {
+        // Direct NULL literal
+        if ($node instanceof LiteralNode && $node->value === null) {
+            return true;
+        }
+
+        // Arithmetic with NULL propagates
+        if ($node instanceof BinaryOperation && in_array($node->operator, ['+', '-', '*', '/', '%'], true)) {
+            return $this->expressionContainsNull($node->left)
+                || $this->expressionContainsNull($node->right);
+        }
+
+        // Unary minus on NULL
+        if ($node instanceof UnaryOperation && $node->operator === '-') {
+            return $this->expressionContainsNull($node->expression);
+        }
+
+        return false;
     }
 
     /**

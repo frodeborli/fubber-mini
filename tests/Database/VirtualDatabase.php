@@ -11,8 +11,8 @@ use mini\Test;
 use mini\Database\VirtualDatabase;
 use mini\Table\InMemoryTable;
 use mini\Table\ColumnDef;
-use mini\Table\ColumnType;
-use mini\Table\IndexType;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
 
 $test = new class extends Test {
 
@@ -816,6 +816,308 @@ $test = new class extends Test {
         // Orders: 100 (shipped), 200 (pending), 150 (shipped), 300 (pending)
         // Shipped: 100 + 150 = 250
         $this->assertSame(250, $rows[0]->shipped_total);
+    }
+
+    // =========================================================================
+    // GROUP BY tests
+    // =========================================================================
+
+    private function createProductsTable(): InMemoryTable
+    {
+        $table = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('name', ColumnType::Text),
+            new ColumnDef('category', ColumnType::Text),
+            new ColumnDef('price', ColumnType::Float),
+            new ColumnDef('stock', ColumnType::Int),
+        );
+
+        $table->insert(['id' => 1, 'name' => 'Widget', 'category' => 'gadgets', 'price' => 9.99, 'stock' => 100]);
+        $table->insert(['id' => 2, 'name' => 'Gizmo', 'category' => 'gadgets', 'price' => 24.99, 'stock' => 50]);
+        $table->insert(['id' => 3, 'name' => 'Thingamajig', 'category' => 'tools', 'price' => 14.99, 'stock' => 75]);
+        $table->insert(['id' => 4, 'name' => 'Doohickey', 'category' => 'tools', 'price' => 4.99, 'stock' => 200]);
+
+        return $table;
+    }
+
+    public function testGroupByBasic(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, COUNT(*) AS cnt FROM products GROUP BY category ORDER BY category'
+        ));
+
+        $this->assertCount(2, $rows);
+        $this->assertSame('gadgets', $rows[0]->category);
+        $this->assertSame(2, $rows[0]->cnt);
+        $this->assertSame('tools', $rows[1]->category);
+        $this->assertSame(2, $rows[1]->cnt);
+    }
+
+    public function testGroupByWithSum(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, SUM(price) AS total FROM products GROUP BY category ORDER BY category'
+        ));
+
+        $this->assertCount(2, $rows);
+        $this->assertSame('gadgets', $rows[0]->category);
+        $this->assertEquals(34.98, $rows[0]->total, '', 0.01);
+        $this->assertSame('tools', $rows[1]->category);
+        $this->assertEquals(19.98, $rows[1]->total, '', 0.01);
+    }
+
+    public function testGroupByMultipleAggregates(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, COUNT(*) AS cnt, SUM(price) AS total, AVG(price) AS avg_price, MIN(price) AS min_price, MAX(price) AS max_price FROM products GROUP BY category ORDER BY category'
+        ));
+
+        $this->assertCount(2, $rows);
+
+        // gadgets: 9.99, 24.99
+        $this->assertSame('gadgets', $rows[0]->category);
+        $this->assertSame(2, $rows[0]->cnt);
+        $this->assertEquals(34.98, $rows[0]->total, '', 0.01);
+        $this->assertEquals(17.49, $rows[0]->avg_price, '', 0.01);
+        $this->assertEquals(9.99, $rows[0]->min_price, '', 0.01);
+        $this->assertEquals(24.99, $rows[0]->max_price, '', 0.01);
+    }
+
+    public function testGroupByOrderByAggregate(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, SUM(price) AS total FROM products GROUP BY category ORDER BY total DESC'
+        ));
+
+        $this->assertCount(2, $rows);
+        // gadgets has higher total (34.98) than tools (19.98)
+        $this->assertSame('gadgets', $rows[0]->category);
+        $this->assertSame('tools', $rows[1]->category);
+    }
+
+    public function testGroupByWithLimit(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, COUNT(*) AS cnt FROM products GROUP BY category ORDER BY category LIMIT 1'
+        ));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('gadgets', $rows[0]->category);
+    }
+
+    public function testGroupByMultipleColumns(): void
+    {
+        $table = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('user_id', ColumnType::Int),
+            new ColumnDef('status', ColumnType::Text),
+            new ColumnDef('amount', ColumnType::Float),
+        );
+
+        $table->insert(['id' => 1, 'user_id' => 1, 'status' => 'shipped', 'amount' => 100]);
+        $table->insert(['id' => 2, 'user_id' => 1, 'status' => 'pending', 'amount' => 50]);
+        $table->insert(['id' => 3, 'user_id' => 2, 'status' => 'shipped', 'amount' => 200]);
+        $table->insert(['id' => 4, 'user_id' => 2, 'status' => 'shipped', 'amount' => 150]);
+        $table->insert(['id' => 5, 'user_id' => 3, 'status' => 'pending', 'amount' => 75]);
+
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('orders', $table);
+
+        $rows = iterator_to_array($vdb->query(
+            'SELECT user_id, status, COUNT(*) AS cnt, SUM(amount) AS total FROM orders GROUP BY user_id, status ORDER BY user_id, status'
+        ));
+
+        $this->assertCount(4, $rows);
+
+        // user_id=1, pending
+        $this->assertSame(1, $rows[0]->user_id);
+        $this->assertSame('pending', $rows[0]->status);
+        $this->assertSame(1, $rows[0]->cnt);
+        $this->assertEquals(50, $rows[0]->total);
+
+        // user_id=1, shipped
+        $this->assertSame(1, $rows[1]->user_id);
+        $this->assertSame('shipped', $rows[1]->status);
+        $this->assertSame(1, $rows[1]->cnt);
+        $this->assertEquals(100, $rows[1]->total);
+
+        // user_id=2, shipped (2 orders)
+        $this->assertSame(2, $rows[2]->user_id);
+        $this->assertSame('shipped', $rows[2]->status);
+        $this->assertSame(2, $rows[2]->cnt);
+        $this->assertEquals(350, $rows[2]->total);
+
+        // user_id=3, pending
+        $this->assertSame(3, $rows[3]->user_id);
+        $this->assertSame('pending', $rows[3]->status);
+        $this->assertSame(1, $rows[3]->cnt);
+        $this->assertEquals(75, $rows[3]->total);
+    }
+
+    // =========================================================================
+    // HAVING tests
+    // =========================================================================
+
+    public function testHavingBasic(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        // Both categories have 2 products, so both pass HAVING cnt >= 2
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, COUNT(*) AS cnt FROM products GROUP BY category HAVING cnt >= 2 ORDER BY category'
+        ));
+
+        $this->assertCount(2, $rows);
+    }
+
+    public function testHavingFiltersGroups(): void
+    {
+        $table = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('category', ColumnType::Text),
+        );
+
+        $table->insert(['id' => 1, 'category' => 'A']);
+        $table->insert(['id' => 2, 'category' => 'A']);
+        $table->insert(['id' => 3, 'category' => 'A']);
+        $table->insert(['id' => 4, 'category' => 'B']);
+        $table->insert(['id' => 5, 'category' => 'C']);
+        $table->insert(['id' => 6, 'category' => 'C']);
+
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('items', $table);
+
+        // Only category A has 3 items, B has 1, C has 2
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, COUNT(*) AS cnt FROM items GROUP BY category HAVING cnt > 2'
+        ));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('A', $rows[0]->category);
+        $this->assertSame(3, $rows[0]->cnt);
+    }
+
+    public function testHavingWithSum(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        // gadgets total: 34.98, tools total: 19.98
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, SUM(price) AS total FROM products GROUP BY category HAVING total > 30'
+        ));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('gadgets', $rows[0]->category);
+    }
+
+    public function testHavingWithOrderBy(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, SUM(price) AS total FROM products GROUP BY category HAVING total > 10 ORDER BY total DESC'
+        ));
+
+        $this->assertCount(2, $rows);
+        $this->assertSame('gadgets', $rows[0]->category);
+        $this->assertSame('tools', $rows[1]->category);
+    }
+
+    public function testHavingWithLimit(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, COUNT(*) AS cnt FROM products GROUP BY category HAVING cnt >= 1 ORDER BY category LIMIT 1'
+        ));
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('gadgets', $rows[0]->category);
+    }
+
+    public function testGroupByWithWhere(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        // Filter to only products with price > 10, then group
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, COUNT(*) AS cnt, SUM(price) AS total FROM products WHERE price > 10 GROUP BY category ORDER BY category'
+        ));
+
+        // gadgets: only Gizmo (24.99), tools: only Thingamajig (14.99)
+        $this->assertCount(2, $rows);
+        $this->assertSame('gadgets', $rows[0]->category);
+        $this->assertSame(1, $rows[0]->cnt);
+        $this->assertSame('tools', $rows[1]->category);
+        $this->assertSame(1, $rows[1]->cnt);
+    }
+
+    public function testGroupByWithWhereAndHaving(): void
+    {
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('products', $this->createProductsTable());
+
+        // Filter products with price < 20, group, then filter groups with count >= 2
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, COUNT(*) AS cnt FROM products WHERE price < 20 GROUP BY category HAVING cnt >= 2'
+        ));
+
+        // gadgets: only Widget (9.99) - count 1, doesn't pass
+        // tools: Thingamajig (14.99) and Doohickey (4.99) - count 2, passes
+        $this->assertCount(1, $rows);
+        $this->assertSame('tools', $rows[0]->category);
+        $this->assertSame(2, $rows[0]->cnt);
+    }
+
+    public function testHavingComparisonOperators(): void
+    {
+        $table = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('category', ColumnType::Text),
+            new ColumnDef('value', ColumnType::Int),
+        );
+
+        $table->insert(['id' => 1, 'category' => 'A', 'value' => 10]);
+        $table->insert(['id' => 2, 'category' => 'A', 'value' => 20]);
+        $table->insert(['id' => 3, 'category' => 'B', 'value' => 5]);
+        $table->insert(['id' => 4, 'category' => 'C', 'value' => 100]);
+
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('items', $table);
+
+        // Test HAVING with = operator
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, SUM(value) AS total FROM items GROUP BY category HAVING total = 30'
+        ));
+        $this->assertCount(1, $rows);
+        $this->assertSame('A', $rows[0]->category);
+
+        // Test HAVING with < operator
+        $rows = iterator_to_array($vdb->query(
+            'SELECT category, SUM(value) AS total FROM items GROUP BY category HAVING total < 10 ORDER BY category'
+        ));
+        $this->assertCount(1, $rows);
+        $this->assertSame('B', $rows[0]->category);
     }
 };
 

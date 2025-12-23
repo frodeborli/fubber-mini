@@ -13,7 +13,9 @@ use mini\Parsing\SQL\AST\{
     InOperation,
     IsNullOperation,
     LikeOperation,
-    BetweenOperation
+    BetweenOperation,
+    CaseWhenNode,
+    SubqueryNode
 };
 
 /**
@@ -23,6 +25,24 @@ use mini\Parsing\SQL\AST\{
  */
 class ExpressionEvaluator
 {
+    /**
+     * Callable that executes a subquery and returns result rows
+     * Signature: fn(SelectStatement $query, ?object $outerRow): iterable
+     *
+     * @var callable|null
+     */
+    private $subqueryExecutor = null;
+
+    /**
+     * Set the subquery executor for handling scalar subqueries
+     *
+     * @param callable $executor fn(SelectStatement $query, ?object $outerRow): iterable
+     */
+    public function setSubqueryExecutor(callable $executor): void
+    {
+        $this->subqueryExecutor = $executor;
+    }
+
     /**
      * Evaluate an expression node against a row
      *
@@ -76,6 +96,16 @@ class ExpressionEvaluator
         // BETWEEN operation
         if ($node instanceof BetweenOperation) {
             return $this->evaluateBetween($node, $row, $context);
+        }
+
+        // CASE WHEN expression
+        if ($node instanceof CaseWhenNode) {
+            return $this->evaluateCaseWhen($node, $row, $context);
+        }
+
+        // Scalar subquery
+        if ($node instanceof SubqueryNode) {
+            return $this->evaluateSubquery($node, $row, $context);
         }
 
         throw new \RuntimeException("Cannot evaluate expression type: " . get_class($node));
@@ -191,9 +221,10 @@ class ExpressionEvaluator
             '-' => $left - $right,
             '*' => $left * $right,
             '/' => $right != 0 ? $left / $right : null,
+            '%' => $right != 0 ? $left % $right : null,
 
             // String concatenation (|| in standard SQL)
-            '||' => $left . $right,
+            '||' => (string)$left . (string)$right,
 
             default => throw new \RuntimeException("Unsupported operator: $op"),
         };
@@ -230,6 +261,9 @@ class ExpressionEvaluator
             'CONCAT' => implode('', array_map(fn($a) => (string)($a ?? ''), $args)),
             'REPLACE' => isset($args[0], $args[1], $args[2])
                 ? str_replace((string)$args[1], (string)$args[2], (string)$args[0])
+                : null,
+            'INSTR' => isset($args[0], $args[1])
+                ? (($pos = strpos((string)$args[0], (string)$args[1])) !== false ? $pos + 1 : 0)
                 : null,
 
             // Numeric functions
@@ -342,5 +376,84 @@ class ExpressionEvaluator
         $inRange = $value >= $low && $value <= $high;
 
         return $node->negated ? !$inRange : $inRange;
+    }
+
+    /**
+     * Evaluate CASE WHEN expression
+     *
+     * Two forms:
+     * - Simple: CASE operand WHEN value THEN result... Returns result where operand = value
+     * - Searched: CASE WHEN condition THEN result... Returns result where condition is true
+     */
+    private function evaluateCaseWhen(CaseWhenNode $node, ?object $row, array $context): mixed
+    {
+        // Simple CASE: compare operand to each WHEN value
+        if ($node->operand !== null) {
+            $operandValue = $this->evaluate($node->operand, $row, $context);
+
+            foreach ($node->whenClauses as $clause) {
+                $whenValue = $this->evaluate($clause['when'], $row, $context);
+                if ($operandValue == $whenValue) {
+                    return $this->evaluate($clause['then'], $row, $context);
+                }
+            }
+        } else {
+            // Searched CASE: evaluate each WHEN condition as boolean
+            foreach ($node->whenClauses as $clause) {
+                if ($this->evaluateAsBool($clause['when'], $row, $context)) {
+                    return $this->evaluate($clause['then'], $row, $context);
+                }
+            }
+        }
+
+        // No match - return ELSE value or NULL
+        if ($node->elseResult !== null) {
+            return $this->evaluate($node->elseResult, $row, $context);
+        }
+
+        return null;
+    }
+
+    /**
+     * Evaluate scalar subquery
+     *
+     * Executes the subquery and returns:
+     * - The single value if exactly one row/column
+     * - NULL if no rows
+     * - Throws if multiple rows (SQL standard for scalar context)
+     */
+    private function evaluateSubquery(SubqueryNode $node, ?object $row, array $context): mixed
+    {
+        if ($this->subqueryExecutor === null) {
+            throw new \RuntimeException("Subquery executor not configured");
+        }
+
+        // Execute the subquery, passing the outer row for correlated subqueries
+        $results = ($this->subqueryExecutor)($node->query, $row);
+
+        // Collect results (might be a generator)
+        $rows = [];
+        foreach ($results as $resultRow) {
+            $rows[] = $resultRow;
+            // For scalar context, we only need to check if there's more than one
+            if (count($rows) > 1) {
+                throw new \RuntimeException("Scalar subquery returned more than one row");
+            }
+        }
+
+        // No rows = NULL
+        if (empty($rows)) {
+            return null;
+        }
+
+        // Get the first (and only) column value
+        $resultRow = $rows[0];
+        $props = get_object_vars($resultRow);
+
+        if (count($props) > 1) {
+            throw new \RuntimeException("Scalar subquery returned more than one column");
+        }
+
+        return reset($props); // Return first column value
     }
 }

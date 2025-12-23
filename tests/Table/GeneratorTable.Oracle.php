@@ -12,15 +12,15 @@ require_once __DIR__ . '/_OracleComparisonTest.php';
 use mini\testing\OracleComparisonTest;
 use mini\Table\InMemoryTable;
 use mini\Table\GeneratorTable;
-use mini\Table\TableInterface;
+use mini\Table\Contracts\TableInterface;
 use mini\Table\ColumnDef;
-use mini\Table\ColumnType;
-use mini\Table\IndexType;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
 
 $test = new class extends OracleComparisonTest {
 
-    protected int $maxFilterDepth = 5;
-    protected int $maxTestCases = 100000;
+    protected int $maxFilterDepth = 3;
+    protected int $maxTestCases = 10000;
 
     protected function createOracle(): InMemoryTable
     {

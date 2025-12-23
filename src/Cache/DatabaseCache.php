@@ -128,12 +128,12 @@ class DatabaseCache implements CacheInterface
         }
 
         // Check if expired
-        if ($row['expires_at'] !== null && $row['expires_at'] < time()) {
+        if ($row->expires_at !== null && $row->expires_at < time()) {
             $this->delete($key);
             return $default;
         }
 
-        return unserialize($row['value']);
+        return unserialize($row->value);
     }
 
     public function set(string $key, mixed $value, null|int|\DateInterval $ttl = null): bool
@@ -228,7 +228,7 @@ class DatabaseCache implements CacheInterface
         }
 
         // Check if expired
-        if ($row['expires_at'] !== null && $row['expires_at'] < time()) {
+        if ($row->expires_at !== null && $row->expires_at < time()) {
             $this->delete($key);
             return false;
         }

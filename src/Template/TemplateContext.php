@@ -35,11 +35,19 @@ final class TemplateContext
     /**
      * Mark this template as extending a parent layout
      *
+     * Must be called once, before defining any blocks.
+     *
      * @param string|null $file Parent template filename (uses default if null)
-     * @throws \LogicException If no layout specified and no default set
+     * @throws \LogicException If called twice, after blocks, or no layout available
      */
     public function extend(?string $file = null): void
     {
+        if ($this->layout !== null) {
+            throw new \LogicException('extend() called twice - only one parent layout allowed');
+        }
+        if ($this->blocks) {
+            throw new \LogicException('extend() must be called before defining blocks');
+        }
         $this->layout = $file ?? $this->defaultLayout ?? throw new \LogicException(
             'No layout specified and no $layout default set'
         );
@@ -99,5 +107,18 @@ final class TemplateContext
     {
         extract($__vars, EXTR_SKIP);
         require $__file;
+    }
+
+    /**
+     * Check for unclosed blocks after template execution
+     *
+     * @throws \LogicException If any blocks were started but not closed
+     */
+    public function assertNoUnclosedBlocks(): void
+    {
+        if ($this->stack) {
+            $unclosed = implode(', ', $this->stack);
+            throw new \LogicException("Unclosed block(s): $unclosed - missing \$this->end() call(s)");
+        }
     }
 }

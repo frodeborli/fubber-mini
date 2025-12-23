@@ -2,11 +2,11 @@
 
 namespace mini\Database;
 
-use mini\Table\SetInterface;
-use mini\Table\TableInterface;
-use mini\Table\TablePropertiesTrait;
-use mini\Table\AliasTable;
-use mini\Table\DistinctTable;
+use mini\Table\Contracts\SetInterface;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Utility\TablePropertiesTrait;
+use mini\Table\Wrappers\AliasTable;
+use mini\Table\Wrappers\DistinctTable;
 use mini\Parsing\GenericParser;
 use mini\Parsing\TextNode;
 use stdClass;
@@ -972,6 +972,16 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      * Use columns() to specify projection.
      */
     public function getColumns(): array
+    {
+        return [];
+    }
+
+    /**
+     * Get all column definitions (including hidden columns)
+     *
+     * PartialQuery doesn't track column metadata - returns empty array.
+     */
+    public function getAllColumns(): array
     {
         return [];
     }

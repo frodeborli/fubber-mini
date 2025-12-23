@@ -9,8 +9,8 @@
 namespace mini\testing;
 
 use mini\Test;
-use mini\Table\TableInterface;
-use mini\Table\Set;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\Utility\Set;
 
 abstract class TableImplementationTest extends Test
 {

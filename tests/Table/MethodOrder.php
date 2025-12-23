@@ -17,10 +17,10 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 
 use mini\Test;
 use mini\Table\GeneratorTable;
-use mini\Table\TableInterface;
+use mini\Table\Contracts\TableInterface;
 use mini\Table\ColumnDef;
-use mini\Table\ColumnType;
-use mini\Table\Set;
+use mini\Table\Types\ColumnType;
+use mini\Table\Utility\Set;
 
 $test = new class extends Test {
 

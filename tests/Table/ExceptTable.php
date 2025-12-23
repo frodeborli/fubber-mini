@@ -9,10 +9,10 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 
 use mini\Test;
 use mini\Table\GeneratorTable;
-use mini\Table\Set;
+use mini\Table\Utility\Set;
 use mini\Table\ColumnDef;
-use mini\Table\ColumnType;
-use mini\Table\IndexType;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
 
 $test = new class extends Test {
 

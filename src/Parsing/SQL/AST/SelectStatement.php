@@ -10,7 +10,8 @@ class SelectStatement extends ASTNode
     public string $type = 'SELECT_STATEMENT';
     public bool $distinct = false;
     public array $columns = [];
-    public ?IdentifierNode $from = null;
+    /** Table name (IdentifierNode) or derived table (SubqueryNode) */
+    public IdentifierNode|SubqueryNode|null $from = null;
     public ?string $fromAlias = null;
     /** @var JoinNode[] */
     public array $joins = [];

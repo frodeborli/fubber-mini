@@ -92,15 +92,52 @@ class ArgManager
     /** @var string|null Matched subcommand (if any) */
     private ?string $matchedSubcommand = null;
 
+    /** @var array|null Custom argv array (null = use $_SERVER['argv']) */
+    private ?array $customArgv = null;
+
     /**
      * Create a new ArgManager instance
      *
-     * @param int $start_index Index in $_SERVER['argv'] where this command starts (default: 0)
+     * @param int $start_index Index in argv where this command starts (default: 0)
      */
     public function __construct(
         private readonly int $start_index = 0
     ) {
         $this->next_index = $this->start_index + 1;
+    }
+
+    /**
+     * Create an ArgManager from a custom argv array
+     *
+     * Use this for parsing command strings in REPLs or testing.
+     *
+     * ```php
+     * // Parse a REPL command line
+     * $args = ArgManager::parse(['schema', '--verbose', 'users'])
+     *     ->withFlag('v', 'verbose')
+     *     ->withSubcommand('users', 'orders');
+     *
+     * $args->getCommand();      // 'schema'
+     * $args->getFlag('verbose'); // 1
+     * $args->nextCommand();      // ArgManager for 'users'
+     * ```
+     *
+     * @param array $argv Array of arguments (like $_SERVER['argv'])
+     * @return static New ArgManager instance parsing the given array
+     */
+    public static function parse(array $argv): static
+    {
+        $instance = new static(0);
+        $instance->customArgv = array_values($argv); // Ensure 0-indexed
+        return $instance;
+    }
+
+    /**
+     * Get the argv array to parse
+     */
+    private function getArgv(): array
+    {
+        return $this->customArgv ?? $_SERVER['argv'] ?? [];
     }
 
     /**
@@ -285,7 +322,7 @@ class ArgManager
      */
     public function getCommand(): ?string
     {
-        return $_SERVER['argv'][$this->start_index] ?? null;
+        return $this->getArgv()[$this->start_index] ?? null;
     }
 
     /**
@@ -304,7 +341,9 @@ class ArgManager
             return null;
         }
 
-        return new self($this->next_index);
+        $child = new self($this->next_index);
+        $child->customArgv = $this->customArgv; // Inherit custom argv
+        return $child;
     }
 
     /**
@@ -318,7 +357,7 @@ class ArgManager
      */
     public function getRemainingArgs(): array
     {
-        $remaining = array_slice($_SERVER['argv'], $this->next_index);
+        $remaining = array_slice($this->getArgv(), $this->next_index);
 
         // Strip leading '--' - it was meant for our parser, not the delegate
         if ($remaining !== [] && $remaining[0] === '--') {
@@ -396,7 +435,7 @@ class ArgManager
             return;
         }
 
-        $argv = $_SERVER['argv'] ?? [];
+        $argv = $this->getArgv();
         $argc = count($argv);
         $opts = [];
         $unparsed = [];

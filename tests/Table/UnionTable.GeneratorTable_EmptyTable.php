@@ -9,12 +9,12 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/_TableImplementationTest.php';
 
 use mini\testing\TableImplementationTest;
-use mini\Table\EmptyTable;
+use mini\Table\Utility\EmptyTable;
 use mini\Table\GeneratorTable;
 use mini\Table\ColumnDef;
-use mini\Table\ColumnType;
-use mini\Table\IndexType;
-use mini\Table\TableInterface;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
+use mini\Table\Contracts\TableInterface;
 
 $test = new class extends TableImplementationTest {
 

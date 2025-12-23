@@ -4,11 +4,10 @@ This guide covers practical template patterns in Mini, from basic usage to real-
 
 ## Quick Start
 
-Templates are PHP files in `_views/`. Render them from routes:
+Templates are PHP files in `_views/`. Render them from controllers:
 
 ```php
-// _routes/profile.php
-echo render('profile.php', ['user' => $user]);
+$html = render('profile.php', ['user' => $user]);
 ```
 
 ```php
@@ -18,6 +17,25 @@ echo render('profile.php', ['user' => $user]);
 ```
 
 Variables passed to `render()` are extracted into the template scope.
+
+## Template Resolution
+
+When you call `render('profile.php')`, Mini searches for the template in this order:
+
+1. **Application's `_views/`** - Your project's templates (checked first)
+2. **Composer packages' `_views/`** - Any package that registers with `Mini::$mini->paths->views`
+3. **Mini framework's `views/`** - Built-in fallback templates
+
+The first match wins. This means you can override any template by placing a file with the same path in your application's `_views/` folder.
+
+**Reusable template packages:** Composer packages can provide base layouts or reusable parts:
+
+```php
+// In a composer package's bootstrap file
+Mini::$mini->paths->views->add(__DIR__ . '/_views');
+```
+
+For example, a `acme/bootstrap-layout` package could provide `_layout.php` and common parts. Your application can use them directly or override specific templates as needed.
 
 ## Template Inheritance
 
@@ -71,7 +89,9 @@ Templates can extend layouts using `$this->extend()`, define content with `$this
 | `$this->extend($layout)` | Extend a parent layout. No argument uses the default from `_viewstart.php` |
 | `$this->block($name, $value)` | Define a block. Inline if value given, or start buffering |
 | `$this->end()` | End a buffered block |
-| `$this->show($name, $default)` | Output a block in parent templates |
+| `$this->show($name, $default)` | Output a block in parent templates. Default is only evaluated if block is missing |
+
+**Call order:** `extend()` must be called once, before defining any blocks.
 
 **Inline vs Buffered blocks:**
 
@@ -86,6 +106,8 @@ Templates can extend layouts using `$this->extend()`, define content with `$this
 <?php $this->end(); ?>
 ```
 
+**Block override behavior:** If you define the same block twice, the last definition wins. Inline blocks overwrite buffered ones and vice versa.
+
 ## ViewStart: Setting Up Templates
 
 `_viewstart.php` files run before templates render. Use them to set defaults and bring in common variables.
@@ -99,7 +121,8 @@ Templates can extend layouts using `$this->extend()`, define content with `$this
 $layout = '_layout.php';
 
 // Common helpers available in all templates
-$h = fn($s) => htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
+$h = fn($s) => htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8');  // HTML text
+$a = fn($s) => htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8');  // HTML attributes (same, but semantic)
 $fmt = mini\fmt();
 $t = fn($text, $vars = []) => mini\t($text, $vars);
 
@@ -107,7 +130,7 @@ $t = fn($text, $vars = []) => mini\t($text, $vars);
 $currentUser = mini\auth()->user();
 ```
 
-Now every template has access to `$h()`, `$fmt`, `$t()`, and `$currentUser` without passing them explicitly.
+Now every template has access to `$h()`, `$a()`, `$fmt`, `$t()`, and `$currentUser` without passing them explicitly.
 
 ### Section-Specific ViewStart
 
@@ -489,19 +512,31 @@ $pagedUsers = $users
 3. **Lazy evaluation** - Count and fetch happen only when needed
 4. **Testability** - Mock the query object for template testing
 
+**Guidelines:** Templates may perform read-only query operations (pagination, counting, fetching). Avoid joins, conditional mutations, or business logic branching in templates—keep that in controllers.
+
 ## Escaping Output
 
-Always escape user-provided data. Use the `$h()` helper set up in `_viewstart.php`:
+Always escape user-provided data. Use the `$h()` and `$a()` helpers set up in `_viewstart.php`:
 
 ```php
-// Safe
+// Text content - use $h()
 <h1><?= $h($user->name) ?></h1>
 
-// Also safe (more verbose)
-<h1><?= htmlspecialchars($user->name, ENT_QUOTES, 'UTF-8') ?></h1>
+// Attribute values - use $a() (semantically clearer, same function)
+<input type="text" value="<?= $a($user->name) ?>" placeholder="<?= $a($placeholder) ?>">
 
 // UNSAFE - never do this with user data
 <h1><?= $user->name ?></h1>
+```
+
+**Escaping contexts:** `$h()` and `$a()` escape for HTML text and attribute contexts only. For other contexts:
+
+```php
+// URL query parameters - use urlencode()
+<a href="/search?q=<?= urlencode($query) ?>">Search</a>
+
+// JavaScript - use json_encode()
+<script>const user = <?= json_encode($user->name) ?>;</script>
 ```
 
 **When NOT to escape:**
@@ -511,9 +546,6 @@ Always escape user-provided data. Use the `$h()` helper set up in `_viewstart.ph
 ```php
 // Pre-sanitized content (trust the storage, not the display)
 <div class="content"><?= $post->html_content ?></div>
-
-// URL with escaped parameter
-<a href="/search?q=<?= urlencode($query) ?>">Search</a>
 ```
 
 ## Template Organization Tips
@@ -590,7 +622,8 @@ _views/
 // _views/_viewstart.php
 <?php
 $layout = '_layout.php';
-$h = fn($s) => htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
+$h = fn($s) => htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8');
+$a = fn($s) => htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8');
 $fmt = mini\fmt();
 $currentUser = mini\auth()->user();
 ```

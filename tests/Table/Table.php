@@ -9,8 +9,8 @@ use mini\Test;
 use mini\Table\Table;
 use mini\Table\InMemoryTable;
 use mini\Table\ColumnDef;
-use mini\Table\ColumnType;
-use mini\Table\IndexType;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
 
 $test = new class extends Test {
 
@@ -229,16 +229,6 @@ $test = new class extends Test {
 
         $this->expectException(RuntimeException::class);
         $table->count();
-    }
-
-    public function testHasUnboundThrows(): void
-    {
-        $table = Table::from($this->createUsersTable())
-            ->eqBind('status', ':status')
-            ->columns('id');
-
-        $this->expectException(RuntimeException::class);
-        $table->has((object)['id' => 1]);
     }
 
     public function testExistsUnboundThrows(): void

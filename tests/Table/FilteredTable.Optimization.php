@@ -12,11 +12,11 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 
 use mini\Test;
 use mini\Table\GeneratorTable;
-use mini\Table\FilteredTable;
-use mini\Table\EmptyTable;
+use mini\Table\Wrappers\FilteredTable;
+use mini\Table\Utility\EmptyTable;
 use mini\Table\ColumnDef;
-use mini\Table\ColumnType;
-use mini\Table\IndexType;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
 
 $test = new class extends Test {
 

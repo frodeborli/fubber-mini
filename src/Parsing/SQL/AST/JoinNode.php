@@ -14,13 +14,13 @@ class JoinNode extends ASTNode
 
     /**
      * @param string $joinType JOIN type: 'INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS'
-     * @param IdentifierNode $table Table being joined
+     * @param IdentifierNode|SubqueryNode $table Table being joined (or derived table)
      * @param ASTNode|null $condition ON condition (null for CROSS JOIN)
-     * @param string|null $alias Optional table alias
+     * @param string|null $alias Optional table alias (required for derived tables)
      */
     public function __construct(
         public string $joinType,
-        public IdentifierNode $table,
+        public IdentifierNode|SubqueryNode $table,
         public ?ASTNode $condition = null,
         public ?string $alias = null
     ) {}

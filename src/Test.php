@@ -100,6 +100,19 @@ abstract class Test
             $this->runnerPipe = @fopen('php://fd/3', 'w');
         }
 
+        // Check if test can run (e.g., required extensions)
+        if (!$this->canRun()) {
+            $reason = $this->skipReason();
+            if ($this->verbose) {
+                echo "{$this->indent}{$this->white}[{$this->normal}-{$this->white}]{$this->normal} Skipped" . ($reason ? ": $reason" : "") . "\n";
+            }
+            $this->reportToRunner(['skipped' => true, 'reason' => $reason]);
+            if ($exit) {
+                exit(0); // Skipped tests are not failures
+            }
+            return 0;
+        }
+
         $this->setUp();
 
         if (Mini::$mini->phase->getCurrentState() !== Phase::Ready) {
@@ -255,6 +268,25 @@ abstract class Test
     // ─────────────────────────────────────────────────────────────────────────
     // Lifecycle
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Check if test can run (override to skip based on requirements)
+     *
+     * Use this to check for required extensions, PHP versions, etc.
+     * Return false to skip the entire test class.
+     */
+    protected function canRun(): bool
+    {
+        return true;
+    }
+
+    /**
+     * Reason for skipping (shown when canRun() returns false)
+     */
+    protected function skipReason(): string
+    {
+        return '';
+    }
 
     protected function setUp(): void {}
 

@@ -63,7 +63,8 @@
         "bin/mini-translations.php",
         "bin/mini-migrations.php",
         "bin/mini-benchmark.php",
-        "bin/mini-docs.php"
+        "bin/mini-docs.php",
+        "bin/mini-db.php"
     ],
     "require": {
         "php": ">=8.3",

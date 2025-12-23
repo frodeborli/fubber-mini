@@ -10,12 +10,12 @@
 namespace mini\testing;
 
 use mini\Test;
-use mini\Table\TableInterface;
+use mini\Table\Contracts\TableInterface;
 use mini\Table\InMemoryTable;
 use mini\Table\ColumnDef;
-use mini\Table\ColumnType;
+use mini\Table\Types\ColumnType;
 use mini\Table\Predicate;
-use mini\Table\Set;
+use mini\Table\Utility\Set;
 
 abstract class OracleComparisonTest extends Test
 {

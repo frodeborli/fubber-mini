@@ -4,9 +4,13 @@
  * Database REPL - Interactive SQL shell for Mini framework
  *
  * Usage:
- *   bin/mini db              - Connect to app database
- *   bin/mini vdb             - Use VirtualDatabase (for testing)
- *   bin/mini db 'SELECT ...' - Execute query directly
+ *   bin/mini db                      - Connect to app database
+ *   bin/mini vdb                     - Use VirtualDatabase (for testing)
+ *   bin/mini db 'SELECT ...'         - Execute query directly
+ *   bin/mini vdb '.tables'           - Run dot-command directly
+ *   bin/mini vdb --format=json 'SELECT ...'  - Output as JSON
+ *
+ * Formats: markdown (default), json, csv
  */
 
 require_once dirname(__DIR__) . '/vendor/autoload.php';
@@ -18,10 +22,17 @@ use mini\Database\VirtualDatabase;
 
 // Parse arguments
 $args = ArgManager::parse($argv)
-    ->withFlag('v', 'virtual');
+    ->withFlag('v', 'virtual')
+    ->withOptionalValue('f', 'format', 'markdown');
 $useVirtual = $args->getFlag('v') > 0;
+$format = $args->getOption('format') ?? 'markdown';
 $unparsed = $args->getUnparsedArgs();
 $query = $unparsed[0] ?? null;
+
+if (!in_array($format, ['markdown', 'json', 'csv'])) {
+    fwrite(STDERR, "Error: Invalid format '$format'. Use: markdown, json, csv\n");
+    exit(1);
+}
 
 // Get database connection
 if ($useVirtual) {
@@ -29,27 +40,34 @@ if ($useVirtual) {
     if (file_exists($configPath)) {
         $db = require $configPath;
         if (!$db instanceof VirtualDatabase) {
-            echo "Error: Config must return a VirtualDatabase instance\n";
+            fwrite(STDERR, "Error: Config must return a VirtualDatabase instance\n");
             exit(1);
         }
     } else {
         $db = new VirtualDatabase();
-        echo "Note: No VirtualDatabase config found at _config/mini/Database/VirtualDatabase.php\n";
-        echo "Using empty VirtualDatabase\n";
+        if ($query === null) {
+            // Only show note in interactive mode
+            echo "Note: No VirtualDatabase config found at _config/mini/Database/VirtualDatabase.php\n";
+            echo "Using empty VirtualDatabase\n";
+        }
     }
     $prompt = 'vdb> ';
 } else {
     if (!function_exists('mini\\db')) {
-        echo "Error: mini\\db() not available. Run from a Mini project directory.\n";
+        fwrite(STDERR, "Error: mini\\db() not available. Run from a Mini project directory.\n");
         exit(1);
     }
     $db = \mini\db();
     $prompt = 'sql> ';
 }
 
-// If query provided as argument, execute and exit
+// If query/command provided as argument, execute and exit
 if ($query !== null) {
-    executeQuery($db, $query);
+    if (str_starts_with($query, '.')) {
+        handleDotCommand($db, $query, $useVirtual, $format);
+    } else {
+        executeQuery($db, $query, $format);
+    }
     exit(0);
 }
 
@@ -65,7 +83,7 @@ $keywords = [
     'NULL', 'IS', 'TRUE', 'FALSE', 'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX',
 ];
 
-$identifiers = ['.help', '.tables', '.schema', '.quit', '.exit'];
+$identifiers = ['.help', '.tables', '.schema', '.quit', '.exit', '.format'];
 
 // Add table and column names for VirtualDatabase
 if ($db instanceof VirtualDatabase) {
@@ -171,7 +189,8 @@ if (file_exists($historyFile)) {
 }
 
 echo "Mini Database REPL" . ($useVirtual ? " (VirtualDatabase)" : "") . "\n";
-echo "Type SQL queries, .help for commands, or Ctrl+D to exit\n\n";
+echo "Type SQL queries, .help for commands, or Ctrl+D to exit\n";
+echo "Output format: $format (change with .format <markdown|json|csv>)\n\n";
 
 $multilinePrompt = '...> ';
 
@@ -190,7 +209,7 @@ while (($line = $rl->prompt($multilineBuffer ? $multilinePrompt : null)) !== nul
 
     // Check for dot commands (must be single line)
     if ($multilineBuffer[0] === '.' && strpos($multilineBuffer, "\n") === false) {
-        handleDotCommand($db, $multilineBuffer, $useVirtual);
+        handleDotCommand($db, $multilineBuffer, $useVirtual, $format);
         $multilineBuffer = '';
         continue;
     }
@@ -205,25 +224,29 @@ while (($line = $rl->prompt($multilineBuffer ? $multilinePrompt : null)) !== nul
     $rl->addHistory($multilineBuffer);
     file_put_contents($historyFile, $multilineBuffer . "\n", FILE_APPEND);
 
-    executeQuery($db, $multilineBuffer);
+    executeQuery($db, $multilineBuffer, $format);
     $multilineBuffer = '';
 }
 
 echo "\nBye!\n";
 
-function executeQuery(DatabaseInterface $db, string $sql): void
+function executeQuery(DatabaseInterface $db, string $sql, string $format): void
 {
     $sql = rtrim($sql, "; \t\n\r");
 
     try {
         $result = $db->query($sql);
-        displayResults($result);
+        displayResults($result, $format);
     } catch (Throwable $e) {
-        echo "Error: " . $e->getMessage() . "\n";
+        if ($format === 'json') {
+            echo json_encode(['error' => $e->getMessage()], JSON_PRETTY_PRINT) . "\n";
+        } else {
+            fwrite(STDERR, "Error: " . $e->getMessage() . "\n");
+        }
     }
 }
 
-function displayResults(iterable $result): void
+function displayResults(iterable $result, string $format): void
 {
     $rows = [];
     $columns = [];
@@ -236,6 +259,48 @@ function displayResults(iterable $result): void
         $rows[] = $row;
     }
 
+    match ($format) {
+        'json' => displayJson($rows),
+        'csv' => displayCsv($rows, $columns),
+        default => displayMarkdown($rows, $columns),
+    };
+}
+
+function displayJson(array $rows): void
+{
+    echo json_encode($rows, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+}
+
+function displayCsv(array $rows, array $columns): void
+{
+    if (empty($rows)) {
+        return;
+    }
+
+    // Header
+    echo implode(',', array_map('escapeCsvField', $columns)) . "\n";
+
+    // Rows
+    foreach ($rows as $row) {
+        $values = [];
+        foreach ($columns as $col) {
+            $values[] = escapeCsvField($row[$col] ?? '');
+        }
+        echo implode(',', $values) . "\n";
+    }
+}
+
+function escapeCsvField(mixed $value): string
+{
+    $str = (string) $value;
+    if (str_contains($str, ',') || str_contains($str, '"') || str_contains($str, "\n")) {
+        return '"' . str_replace('"', '""', $str) . '"';
+    }
+    return $str;
+}
+
+function displayMarkdown(array $rows, array $columns): void
+{
     if (empty($rows)) {
         echo "(0 rows)\n";
         return;
@@ -254,18 +319,18 @@ function displayResults(iterable $result): void
     }
 
     // Print header
-    $line = '+';
-    foreach ($columns as $col) {
-        $line .= str_repeat('-', $widths[$col] + 2) . '+';
-    }
-    echo $line . "\n";
-
     $header = '|';
     foreach ($columns as $col) {
         $header .= ' ' . str_pad($col, $widths[$col]) . ' |';
     }
     echo $header . "\n";
-    echo $line . "\n";
+
+    // Print separator
+    $sep = '|';
+    foreach ($columns as $col) {
+        $sep .= str_repeat('-', $widths[$col] + 2) . '|';
+    }
+    echo $sep . "\n";
 
     // Print rows
     foreach ($rows as $row) {
@@ -276,11 +341,11 @@ function displayResults(iterable $result): void
         }
         echo $output . "\n";
     }
-    echo $line . "\n";
-    echo "(" . count($rows) . " row" . (count($rows) !== 1 ? "s" : "") . ")\n";
+
+    echo "\n(" . count($rows) . " row" . (count($rows) !== 1 ? "s" : "") . ")\n";
 }
 
-function handleDotCommand(DatabaseInterface $db, string $cmd, bool $isVirtual): void
+function handleDotCommand(DatabaseInterface $db, string $cmd, bool $isVirtual, string &$format): void
 {
     $parts = preg_split('/\s+/', trim($cmd), 2);
     $command = $parts[0];
@@ -292,14 +357,28 @@ function handleDotCommand(DatabaseInterface $db, string $cmd, bool $isVirtual): 
             echo "  .help              Show this help\n";
             echo "  .tables            List all tables\n";
             echo "  .schema [table]    Show table schema\n";
+            echo "  .format <fmt>      Set output format (markdown, json, csv)\n";
             echo "  .quit              Exit the REPL\n";
+            break;
+
+        case '.format':
+            if (!in_array($arg, ['markdown', 'json', 'csv'])) {
+                echo "Usage: .format <markdown|json|csv>\n";
+                break;
+            }
+            $format = $arg;
+            echo "Output format set to: $format\n";
             break;
 
         case '.tables':
             if ($isVirtual && $db instanceof VirtualDatabase) {
                 $tables = $db->getTableNames();
-                foreach ($tables as $table) {
-                    echo "  $table\n";
+                if ($format === 'json') {
+                    echo json_encode($tables, JSON_PRETTY_PRINT) . "\n";
+                } else {
+                    foreach ($tables as $table) {
+                        echo "$table\n";
+                    }
                 }
             } else {
                 echo "Not implemented for this database type\n";
@@ -309,14 +388,32 @@ function handleDotCommand(DatabaseInterface $db, string $cmd, bool $isVirtual): 
         case '.schema':
             if ($isVirtual && $db instanceof VirtualDatabase) {
                 $tables = $arg ? [$arg] : $db->getTableNames();
+                $schema = [];
                 foreach ($tables as $table) {
                     $t = $db->getTable($table);
                     if ($t) {
-                        echo "$table:\n";
+                        $tableCols = [];
                         foreach ($t->getColumns() as $name => $col) {
-                            echo "  {$name} ({$col->type->name})" .
-                                ($col->index !== \mini\Table\IndexType::None ? " [{$col->index->name}]" : "") . "\n";
+                            $tableCols[$name] = [
+                                'type' => $col->type->name,
+                                'index' => $col->index !== \mini\Table\Types\IndexType::None ? $col->index->name : null,
+                            ];
                         }
+                        $schema[$table] = $tableCols;
+                    }
+                }
+                if ($format === 'json') {
+                    echo json_encode($schema, JSON_PRETTY_PRINT) . "\n";
+                } else {
+                    foreach ($schema as $table => $cols) {
+                        echo "## $table\n\n";
+                        echo "| Column | Type | Index |\n";
+                        echo "|--------|------|-------|\n";
+                        foreach ($cols as $name => $info) {
+                            $index = $info['index'] ?? '-';
+                            echo "| $name | {$info['type']} | $index |\n";
+                        }
+                        echo "\n";
                     }
                 }
             } else {

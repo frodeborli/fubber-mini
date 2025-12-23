@@ -9,8 +9,8 @@ use mini\Test;
 use mini\Table\GeneratorTable;
 use mini\Table\Predicate;
 use mini\Table\ColumnDef;
-use mini\Table\ColumnType;
-use mini\Table\IndexType;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
 
 $test = new class extends Test {
 
@@ -140,21 +140,21 @@ $test = new class extends Test {
         $result = $table->or();
 
         // No predicates → EmptyTable
-        $this->assertInstanceOf(\mini\Table\EmptyTable::class, $result);
+        $this->assertInstanceOf(\mini\Table\Utility\EmptyTable::class, $result);
         $this->assertSame(0, $result->count());
     }
 
-    public function testOrFiltersOutEmptyTablePredicates(): void
+    public function testOrFiltersOutNeverPredicates(): void
     {
         $table = $this->createTable();
         $p = Predicate::from($table);
-        $empty = \mini\Table\EmptyTable::from($table);
+        $never = Predicate::never();
 
-        // Mix of real predicates and EmptyTable
+        // Mix of real predicates and never() predicates
         $result = $table->or(
-            $empty,
+            $never,
             $p->eq('status', 'active'),
-            $empty
+            $never
         );
 
         $ids = [];
@@ -162,18 +162,18 @@ $test = new class extends Test {
             $ids[] = $row->id;
         }
 
-        // Only active rows (EmptyTable predicates filtered out)
+        // Only active rows (never predicates filtered out)
         $this->assertSame([1, 3, 5], $ids);
     }
 
-    public function testOrWithOnlyEmptyTablePredicatesReturnsEmpty(): void
+    public function testOrWithOnlyNeverPredicatesReturnsEmpty(): void
     {
         $table = $this->createTable();
-        $empty = \mini\Table\EmptyTable::from($table);
+        $never = Predicate::never();
 
-        $result = $table->or($empty, $empty);
+        $result = $table->or($never, $never);
 
-        $this->assertInstanceOf(\mini\Table\EmptyTable::class, $result);
+        $this->assertInstanceOf(\mini\Table\Utility\EmptyTable::class, $result);
     }
 
     public function testOrWithSinglePredicateNoUnionOverhead(): void
@@ -185,7 +185,7 @@ $test = new class extends Test {
         $result = $table->or($p->eq('status', 'active'));
 
         // Should not be UnionTable
-        $this->assertFalse($result instanceof \mini\Table\UnionTable);
+        $this->assertFalse($result instanceof \mini\Table\Wrappers\UnionTable);
 
         $ids = [];
         foreach ($result as $row) {
@@ -218,12 +218,13 @@ $test = new class extends Test {
     // Predicate inspection tests
     // =========================================================================
 
-    public function testPredicateHasNoData(): void
+    public function testPredicateIsEmpty(): void
     {
         $p = Predicate::from($this->createTable());
 
-        $this->assertSame(0, $p->count());
-        $this->assertFalse($p->exists());
+        // Fresh predicate has no conditions
+        $this->assertTrue($p->isEmpty());
+        $this->assertTrue($p->isBound());
     }
 
     public function testPredicateChainBuildsCorrectly(): void
@@ -232,8 +233,10 @@ $test = new class extends Test {
 
         $chain = $p->eq('status', 'active')->lt('age', 30);
 
-        // Chain should be FilteredTable wrapping FilteredTable wrapping Predicate
-        $this->assertInstanceOf(\mini\Table\FilteredTable::class, $chain);
+        // Chain should be a Predicate with multiple conditions
+        $this->assertInstanceOf(Predicate::class, $chain);
+        $this->assertFalse($chain->isEmpty());
+        $this->assertCount(2, $chain->getConditions());
     }
 };
 
