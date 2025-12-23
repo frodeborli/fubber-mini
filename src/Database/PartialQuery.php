@@ -298,11 +298,15 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             return $this->where("$col IN ($placeholders)", array_values($values));
         }
 
-        // PartialQuery subquery case - can potentially use SQL subquery
+        // PartialQuery subquery case - use real SQL subquery
         if ($values instanceof self) {
-            // Cross-database or dialect without subquery support: materialize to value list
-            if ($this->db !== $values->db || !$this->db->getDialect()->supportsSubquery()) {
-                $list = $this->db->queryColumn($values->buildSql(PHP_INT_MAX), $values->getAllParams());
+            // Cross-database: must materialize (can't use subquery across connections)
+            if ($this->db !== $values->db) {
+                $list = [];
+                foreach ($values as $row) {
+                    $vars = get_object_vars($row);
+                    $list[] = reset($vars);
+                }
                 if ($list === []) {
                     return $this->where('1 = 0');
                 }
@@ -310,21 +314,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
                 return $this->where("$col IN ($placeholders)", $list);
             }
 
-            // Same database with subquery support:
-            // Require explicit single-column select for subqueries
-            if ($values->getSelect() === null) {
-                throw new \InvalidArgumentException(
-                    "Subquery for IN() must have an explicit select() or columns(). " .
-                    "Use ->select('column_name') or ->columns('column_name') to specify which column to match."
-                );
-            }
-
-            // Merge CTEs from the inner query into this query
+            // Same database: use real SQL subquery (no materialization)
             $new = $this->withCTEsFrom($values);
 
-            // Inline the inner query core as a literal subquery
-            $subSql    = $values->buildCoreSql(PHP_INT_MAX);
-            $subParams = $values->getMainParams();
+            // Build subquery SQL (no default limit for subqueries)
+            $subSql    = $values->buildSql(null);
+            $subParams = $values->getAllParams();
 
             return $new->where("$col IN ($subSql)", $subParams);
         }
