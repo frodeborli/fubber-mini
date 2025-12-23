@@ -11,63 +11,33 @@ namespace mini\Database;
 interface DatabaseInterface
 {
     /**
-     * Execute a SELECT query and return results as ResultSet
+     * Execute a SELECT query and return a composable PartialQuery
      *
-     * Returns a ResultSet that can be iterated, converted to array, or JSON serialized.
-     * Rows are returned as stdClass objects with column names as properties.
-     * Supports hydration to entity classes via withEntityClass() or withHydrator().
+     * Returns a PartialQuery that can be iterated, further composed, or used
+     * for updates/deletes (if single-table). Rows are returned as stdClass objects.
      *
      * Example:
      * ```php
-     * // Iterate
+     * // Iterate directly
      * foreach (db()->query('SELECT * FROM users WHERE active = ?', [1]) as $row) {
      *     echo $row->name;
      * }
      *
-     * // Get all as array
-     * $users = db()->query('SELECT * FROM users')->toArray();
+     * // Compose further
+     * $admins = db()->query('SELECT * FROM users')
+     *     ->eq('role', 'admin')
+     *     ->order('name')
+     *     ->limit(10);
      *
-     * // JSON serialize (e.g., in route handlers)
-     * return db()->query('SELECT * FROM users');
-     *
-     * // With hydration
-     * $users = db()->query('SELECT * FROM users')
-     *     ->withEntityClass(User::class)
-     *     ->toArray();
+     * // Use for delete (single-table queries only)
+     * db()->delete(db()->query('SELECT * FROM users')->eq('status', 'inactive'));
      * ```
      *
      * @param string $sql SQL query with parameter placeholders
      * @param array $params Parameters to bind to the query
-     * @return ResultSetInterface<object>
+     * @return PartialQuery Composable query object
      */
-    public function query(string $sql, array $params = []): ResultSetInterface;
-
-    /**
-     * Create a PartialQuery for composable query building
-     *
-     * Returns an immutable query builder that can be further refined with
-     * WHERE clauses, ORDER BY, LIMIT, etc. Use this when you need to:
-     * - Build queries compositionally
-     * - Reuse query scopes
-     * - Use delete() or update() with composed conditions
-     *
-     * For simple table queries:
-     * ```php
-     * db()->partialQuery('users')->eq('active', 1)->limit(10)
-     * ```
-     *
-     * For complex base SQL (JOINs, subqueries, etc):
-     * ```php
-     * db()->partialQuery('posts', 'SELECT p.* FROM posts p JOIN users u ON u.id = p.user_id')
-     *     ->eq('u.active', 1)
-     * ```
-     *
-     * @param string $table Table name (required for delete/update operations)
-     * @param string|null $sql Optional base SELECT query (if null, selects from $table)
-     * @param array $params Parameters for placeholders in base SQL
-     * @return PartialQuery<array> Immutable partial query
-     */
-    public function partialQuery(string $table, ?string $sql = null, array $params = []): PartialQuery;
+    public function query(string $sql, array $params = []): PartialQuery;
 
     /**
      * Execute query and return first row only as object

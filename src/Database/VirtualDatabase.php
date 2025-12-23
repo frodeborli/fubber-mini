@@ -328,24 +328,34 @@ class VirtualDatabase implements DatabaseInterface
      * @param array $params Bound parameters
      * @return ResultSetInterface<object> Rows as stdClass objects
      */
-    public function query(string $sql, array $params = []): ResultSetInterface
+    public function query(string $sql, array $params = []): PartialQuery
     {
-        $ast = $this->parseAndBind($sql, $params);
+        return PartialQuery::fromSql($this, $this->rawExecutor(), $sql, $params);
+    }
 
-        if ($ast instanceof WithStatement) {
-            return $this->executeWithStatement($ast);
-        }
+    /**
+     * Get a raw query executor closure for PartialQuery
+     */
+    private function rawExecutor(): \Closure
+    {
+        return function (string $sql, array $params): \Traversable {
+            $ast = $this->parseAndBind($sql, $params);
 
-        if ($ast instanceof UnionNode) {
-            $table = $this->executeUnionAsTable($ast);
-            return new ResultSet($table);
-        }
+            if ($ast instanceof WithStatement) {
+                return $this->executeWithStatement($ast);
+            }
 
-        if (!$ast instanceof SelectStatement) {
-            throw new \RuntimeException("query() only accepts SELECT statements");
-        }
+            if ($ast instanceof UnionNode) {
+                $table = $this->executeUnionAsTable($ast);
+                return new ResultSet($table);
+            }
 
-        return new ResultSet($this->executeSelect($ast));
+            if (!$ast instanceof SelectStatement) {
+                throw new \RuntimeException("query() only accepts SELECT statements");
+            }
+
+            return new ResultSet($this->executeSelect($ast));
+        };
     }
 
     /**
@@ -379,7 +389,10 @@ class VirtualDatabase implements DatabaseInterface
      */
     public function queryOne(string $sql, array $params = []): ?object
     {
-        return $this->query($sql, $params)->one();
+        foreach ($this->query($sql, $params)->limit(1) as $row) {
+            return $row;
+        }
+        return null;
     }
 
     /**
@@ -387,7 +400,12 @@ class VirtualDatabase implements DatabaseInterface
      */
     public function queryField(string $sql, array $params = []): mixed
     {
-        return $this->query($sql, $params)->field();
+        $row = $this->queryOne($sql, $params);
+        if ($row === null) {
+            return null;
+        }
+        $vars = get_object_vars($row);
+        return reset($vars);
     }
 
     /**
@@ -395,7 +413,12 @@ class VirtualDatabase implements DatabaseInterface
      */
     public function queryColumn(string $sql, array $params = []): array
     {
-        return $this->query($sql, $params)->column();
+        $result = [];
+        foreach ($this->query($sql, $params) as $row) {
+            $vars = get_object_vars($row);
+            $result[] = reset($vars);
+        }
+        return $result;
     }
 
     /**
@@ -455,14 +478,6 @@ class VirtualDatabase implements DatabaseInterface
     public function quoteIdentifier(string $identifier): string
     {
         return '"' . str_replace('"', '""', $identifier) . '"';
-    }
-
-    /**
-     * {@inheritdoc}
-     */
-    public function partialQuery(string $table, ?string $sql = null, array $params = []): PartialQuery
-    {
-        throw new \RuntimeException("partialQuery() not yet supported in VirtualDatabase");
     }
 
     /**

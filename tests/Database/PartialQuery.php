@@ -26,13 +26,13 @@ $test = new class extends Test {
 
     public function testImplementsResultSetInterface(): void
     {
-        $pq = \mini\db()->partialQuery('users');
+        $pq = \mini\db()->query('SELECT * FROM users');
         $this->assertInstanceOf(ResultSetInterface::class, $pq);
     }
 
     public function testSimpleTableQuery(): void
     {
-        $pq = \mini\db()->partialQuery('users');
+        $pq = \mini\db()->query('SELECT * FROM users');
         $sql = (string) $pq;
 
         $this->assertContains('SELECT * FROM users', $sql);
@@ -42,7 +42,7 @@ $test = new class extends Test {
 
     public function testExplicitLimitInString(): void
     {
-        $pq = \mini\db()->partialQuery('users')->limit(50);
+        $pq = \mini\db()->query('SELECT * FROM users')->limit(50);
         $sql = (string) $pq;
 
         $this->assertContains('LIMIT 50', $sql);
@@ -50,7 +50,7 @@ $test = new class extends Test {
 
     public function testEqAddsWhereClause(): void
     {
-        $pq = \mini\db()->partialQuery('users')->eq('id', 1);
+        $pq = \mini\db()->query('SELECT * FROM users')->eq('id', 1);
         $sql = (string) $pq;
 
         $this->assertContains('WHERE', $sql);
@@ -60,7 +60,7 @@ $test = new class extends Test {
 
     public function testEqWithNullUsesIsNull(): void
     {
-        $pq = \mini\db()->partialQuery('users')->eq('deleted_at', null);
+        $pq = \mini\db()->query('SELECT * FROM users')->eq('deleted_at', null);
         $sql = (string) $pq;
 
         $this->assertContains('"deleted_at" IS NULL', $sql);
@@ -68,7 +68,7 @@ $test = new class extends Test {
 
     public function testLtAddsLessThan(): void
     {
-        $pq = \mini\db()->partialQuery('users')->lt('age', 18);
+        $pq = \mini\db()->query('SELECT * FROM users')->lt('age', 18);
         $sql = (string) $pq;
 
         $this->assertContains('age', $sql);
@@ -77,7 +77,7 @@ $test = new class extends Test {
 
     public function testLteAddsLessThanOrEqual(): void
     {
-        $pq = \mini\db()->partialQuery('users')->lte('age', 18);
+        $pq = \mini\db()->query('SELECT * FROM users')->lte('age', 18);
         $sql = (string) $pq;
 
         $this->assertContains('age', $sql);
@@ -86,7 +86,7 @@ $test = new class extends Test {
 
     public function testGtAddsGreaterThan(): void
     {
-        $pq = \mini\db()->partialQuery('users')->gt('age', 18);
+        $pq = \mini\db()->query('SELECT * FROM users')->gt('age', 18);
         $sql = (string) $pq;
 
         $this->assertContains('age', $sql);
@@ -95,7 +95,7 @@ $test = new class extends Test {
 
     public function testGteAddsGreaterThanOrEqual(): void
     {
-        $pq = \mini\db()->partialQuery('users')->gte('age', 18);
+        $pq = \mini\db()->query('SELECT * FROM users')->gte('age', 18);
         $sql = (string) $pq;
 
         $this->assertContains('age', $sql);
@@ -104,7 +104,7 @@ $test = new class extends Test {
 
     public function testInWithArray(): void
     {
-        $pq = \mini\db()->partialQuery('users')->in('id', [1, 2, 3]);
+        $pq = \mini\db()->query('SELECT * FROM users')->in('id', [1, 2, 3]);
         $sql = (string) $pq;
 
         $this->assertContains('id', $sql);
@@ -113,7 +113,7 @@ $test = new class extends Test {
 
     public function testInWithEmptyArrayReturnsFalseCondition(): void
     {
-        $pq = \mini\db()->partialQuery('users')->in('id', []);
+        $pq = \mini\db()->query('SELECT * FROM users')->in('id', []);
         $sql = (string) $pq;
 
         $this->assertContains('1 = 0', $sql);
@@ -121,7 +121,7 @@ $test = new class extends Test {
 
     public function testWhereAddsRawClause(): void
     {
-        $pq = \mini\db()->partialQuery('users')->where('active = ? AND role = ?', [1, 'admin']);
+        $pq = \mini\db()->query('SELECT * FROM users')->where('active = ? AND role = ?', [1, 'admin']);
         $sql = (string) $pq;
 
         $this->assertContains('active =', $sql);
@@ -131,7 +131,7 @@ $test = new class extends Test {
 
     public function testMultipleWhereClausesAreAnded(): void
     {
-        $pq = \mini\db()->partialQuery('users')
+        $pq = \mini\db()->query('SELECT * FROM users')
             ->eq('active', 1)
             ->eq('role', 'admin');
         $sql = (string) $pq;
@@ -143,7 +143,7 @@ $test = new class extends Test {
 
     public function testOrderBySetsOrderClause(): void
     {
-        $pq = \mini\db()->partialQuery('users')->order('created_at DESC');
+        $pq = \mini\db()->query('SELECT * FROM users')->order('created_at DESC');
         $sql = (string) $pq;
 
         $this->assertContains('ORDER BY created_at DESC', $sql);
@@ -151,7 +151,7 @@ $test = new class extends Test {
 
     public function testLimitSetsLimit(): void
     {
-        $pq = \mini\db()->partialQuery('users')->limit(10);
+        $pq = \mini\db()->query('SELECT * FROM users')->limit(10);
         $sql = (string) $pq;
 
         $this->assertContains('LIMIT 10', $sql);
@@ -159,7 +159,7 @@ $test = new class extends Test {
 
     public function testOffsetSetsOffset(): void
     {
-        $pq = \mini\db()->partialQuery('users')->offset(20)->limit(10);
+        $pq = \mini\db()->query('SELECT * FROM users')->offset(20)->limit(10);
         $sql = (string) $pq;
 
         $this->assertContains('LIMIT 10 OFFSET 20', $sql);
@@ -167,15 +167,17 @@ $test = new class extends Test {
 
     public function testSelectOverridesColumns(): void
     {
-        $pq = \mini\db()->partialQuery('users')->select('id, name');
+        $pq = \mini\db()->query('SELECT * FROM users')->select('id, name');
         $sql = (string) $pq;
 
-        $this->assertContains('SELECT id, name FROM users', $sql);
+        // When composing, base query is wrapped as subquery
+        $this->assertContains('SELECT id, name FROM', $sql);
+        $this->assertContains('SELECT * FROM users', $sql);
     }
 
     public function testImmutability(): void
     {
-        $pq1 = \mini\db()->partialQuery('users');
+        $pq1 = \mini\db()->query('SELECT * FROM users');
         $pq2 = $pq1->eq('id', 1);
         $pq3 = $pq1->eq('id', 2);
 
@@ -203,7 +205,7 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_entities');
         \mini\db()->exec("INSERT INTO test_entities (id, name) VALUES (1, 'Test')");
 
-        $entities = \mini\db()->partialQuery('test_entities')
+        $entities = \mini\db()->query('SELECT * FROM test_entities')
             ->withEntityClass(TestEntity::class)
             ->toArray();
 
@@ -222,12 +224,12 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_toarray');
         \mini\db()->exec('INSERT INTO test_toarray (id) VALUES (1), (2), (3)');
 
-        $rows = \mini\db()->partialQuery('test_toarray')->toArray();
+        $rows = \mini\db()->query('SELECT * FROM test_toarray')->toArray();
 
         $this->assertCount(3, $rows);
-        $this->assertSame(1, $rows[0]['id']);
-        $this->assertSame(2, $rows[1]['id']);
-        $this->assertSame(3, $rows[2]['id']);
+        $this->assertSame(1, (int) $rows[0]->id);
+        $this->assertSame(2, (int) $rows[1]->id);
+        $this->assertSame(3, (int) $rows[2]->id);
 
         \mini\db()->exec('DROP TABLE test_toarray');
     }
@@ -238,11 +240,11 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_one');
         \mini\db()->exec("INSERT INTO test_one (id, name) VALUES (1, 'First'), (2, 'Second')");
 
-        $row = \mini\db()->partialQuery('test_one')->order('id')->one();
+        $row = \mini\db()->query('SELECT * FROM test_one')->order('id')->one();
 
         $this->assertNotNull($row);
-        $this->assertSame(1, $row['id']);
-        $this->assertSame('First', $row['name']);
+        $this->assertSame(1, (int) $row->id);
+        $this->assertSame('First', $row->name);
 
         \mini\db()->exec('DROP TABLE test_one');
     }
@@ -252,7 +254,7 @@ $test = new class extends Test {
         \mini\db()->exec('CREATE TABLE IF NOT EXISTS test_one_empty (id INTEGER PRIMARY KEY)');
         \mini\db()->exec('DELETE FROM test_one_empty');
 
-        $row = \mini\db()->partialQuery('test_one_empty')->one();
+        $row = \mini\db()->query('SELECT * FROM test_one_empty')->one();
 
         $this->assertNull($row);
 
@@ -265,7 +267,7 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_column');
         \mini\db()->exec("INSERT INTO test_column (id, name) VALUES (1, 'A'), (2, 'B'), (3, 'C')");
 
-        $ids = \mini\db()->partialQuery('test_column')->order('id')->column();
+        $ids = \mini\db()->query('SELECT * FROM test_column')->order('id')->column();
 
         $this->assertCount(3, $ids);
         $this->assertEquals([1, 2, 3], $ids); // Use assertEquals for loose comparison
@@ -279,7 +281,7 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_field');
         \mini\db()->exec("INSERT INTO test_field (id, name) VALUES (1, 'Test')");
 
-        $id = \mini\db()->partialQuery('test_field')->field();
+        $id = \mini\db()->query('SELECT * FROM test_field')->field();
 
         $this->assertEquals(1, $id); // Use assertEquals for loose comparison
 
@@ -292,12 +294,12 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_count');
         \mini\db()->exec('INSERT INTO test_count (id) VALUES (1), (2), (3), (4), (5)');
 
-        $count = \mini\db()->partialQuery('test_count')->count();
+        $count = \mini\db()->query('SELECT * FROM test_count')->count();
 
         $this->assertSame(5, $count);
 
         // Count with WHERE
-        $count = \mini\db()->partialQuery('test_count')->gt('id', 2)->count();
+        $count = \mini\db()->query('SELECT * FROM test_count')->gt('id', 2)->count();
         $this->assertSame(3, $count);
 
         \mini\db()->exec('DROP TABLE test_count');
@@ -309,7 +311,7 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_json');
         \mini\db()->exec("INSERT INTO test_json (id, name) VALUES (1, 'Test')");
 
-        $json = json_encode(\mini\db()->partialQuery('test_json'));
+        $json = json_encode(\mini\db()->query('SELECT * FROM test_json'));
 
         $this->assertContains('"id":', $json);
         $this->assertContains('"name":"Test"', $json);
@@ -324,8 +326,7 @@ $test = new class extends Test {
         \mini\db()->exec("INSERT INTO test_complex (id, status) VALUES (1, 'active'), (2, 'inactive')");
 
         // Complex SQL wrapped as subquery
-        $pq = \mini\db()->partialQuery(
-            'test_complex',
+        $pq = \mini\db()->query(
             'SELECT * FROM test_complex WHERE status = ?',
             ['active']
         )->eq('id', 1);
@@ -333,7 +334,7 @@ $test = new class extends Test {
         $row = $pq->one();
 
         $this->assertNotNull($row);
-        $this->assertSame(1, $row['id']);
+        $this->assertSame(1, (int) $row->id);
 
         \mini\db()->exec('DROP TABLE test_complex');
     }

@@ -9,6 +9,10 @@ use mini\Table\Wrappers\AliasTable;
 use mini\Table\Wrappers\DistinctTable;
 use mini\Parsing\GenericParser;
 use mini\Parsing\TextNode;
+use mini\Parsing\SQL\SqlParser;
+use mini\Parsing\SQL\AST\SelectStatement;
+use mini\Parsing\SQL\AST\UnionNode;
+use mini\Parsing\SQL\AST\IdentifierNode;
 use stdClass;
 
 /**
@@ -23,23 +27,25 @@ final class PartialQuery implements ResultSetInterface, TableInterface
 
     private DatabaseInterface $db;
 
-    /**
-     * Logical base table or alias this query targets.
-     * Used for delete/update operations and as the outer alias for subqueries.
-     */
-    private string $table;
+    /** @var \Closure(string, array): \Traversable Raw query executor */
+    private \Closure $executor;
 
     /**
-     * Base SQL for this query:
-     * - null  => simple table query: SELECT ... FROM $table
-     * - non-null => wrapped as: SELECT ... FROM ($baseSql) AS <alias>
-     *
-     * @var string|null
+     * Base SQL for this query (always set, no simple table mode)
      */
-    private ?string $baseSql;
+    private string $baseSql;
 
     /** @var array<int, mixed> Parameters for placeholders in the base SQL (constructor) */
     private array $baseParams = [];
+
+    // Lazy analysis results
+    private bool $analyzed = false;
+
+    /** Underlying source table for UPDATE/DELETE (null if multi-table or complex) */
+    private ?string $sourceTable = null;
+
+    /** Alias for subquery wrapping */
+    private string $alias = '_q';
 
     /**
      * Each WHERE clause is stored with its own parameters
@@ -70,85 +76,124 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     private array|false $entityConstructorArgs = false;
 
     /**
-     * @internal Use PartialQuery::from() factory instead
+     * @internal Use PartialQuery::fromSql() factory instead
      */
     private function __construct(
         DatabaseInterface $db,
-        string $table,
-        ?string $baseSql = null,
+        \Closure $executor,
+        string $sql,
         array $params = []
     ) {
         $this->db         = $db;
-        $this->table      = $table;
-        $this->baseSql    = $baseSql;
+        $this->executor   = $executor;
+        $this->baseSql    = $sql;
         $this->baseParams = $params;
     }
 
     /**
-     * Create a PartialQuery.
+     * Create a PartialQuery from SQL
      *
-     * Usage:
-     *  - Simple table:
-     *      PartialQuery::from($db, 'users')
-     *      // => SELECT ... FROM users
+     * The executor closure handles raw query execution for iteration.
      *
-     *  - From custom SQL (wrapped as subquery):
-     *      PartialQuery::from($db, 'users', 'SELECT * FROM users WHERE active = 1', [$param]);
-     *      // => SELECT ... FROM (SELECT * FROM users WHERE active = 1) AS users
-     *
-     * @param DatabaseInterface $db    Database connection
-     * @param string            $table Logical base table / alias name
-     * @param string|null       $sql   Optional base SELECT query
-     * @param array<int,mixed>  $params Parameters for placeholders in $sql
+     * @param DatabaseInterface $db       Database connection
+     * @param \Closure          $executor Raw query executor: fn(string $sql, array $params): Traversable
+     * @param string            $sql      Base SELECT query
+     * @param array<int,mixed>  $params   Parameters for placeholders in $sql
      */
-    public static function from(
+    public static function fromSql(
         DatabaseInterface $db,
-        string $table,
-        ?string $sql = null,
+        \Closure $executor,
+        string $sql,
         array $params = []
     ): self {
-        return new self($db, $table, $sql, $params);
+        return new self($db, $executor, $sql, $params);
     }
 
     /**
-     * Get alias for this query when used as a subquery.
+     * Analyze the SQL to extract table info (lazy, cached)
      *
-     * Uses the base table name, stripping any schema prefix.
+     * Extracts:
+     * - $sourceTable: The underlying table name (null if multi-table/complex)
+     * - $alias: The alias for subquery wrapping
+     */
+    private function analyze(): void
+    {
+        if ($this->analyzed) {
+            return;
+        }
+        $this->analyzed = true;
+
+        try {
+            $parser = new SqlParser();
+            $ast = $parser->parse($this->baseSql);
+        } catch (\Throwable $e) {
+            // Parse failed - can't determine table info
+            return;
+        }
+
+        // UNION/INTERSECT/EXCEPT = multi-table
+        if ($ast instanceof UnionNode) {
+            return;
+        }
+
+        if (!$ast instanceof SelectStatement) {
+            return;
+        }
+
+        // Has JOINs = multi-table
+        if (!empty($ast->joins)) {
+            return;
+        }
+
+        // FROM must be a simple identifier (not a subquery)
+        if (!$ast->from instanceof IdentifierNode) {
+            return;
+        }
+
+        $this->sourceTable = $ast->from->getFullName();
+        $this->alias = $ast->fromAlias ?? $ast->from->getFullName();
+    }
+
+    /**
+     * Check if this is a single-table query (supports UPDATE/DELETE)
+     */
+    public function isSingleTable(): bool
+    {
+        $this->analyze();
+        return $this->sourceTable !== null;
+    }
+
+    /**
+     * Get the underlying source table for UPDATE/DELETE operations
+     *
+     * @throws \RuntimeException If query has JOINs, UNIONs, or complex FROM clause
+     */
+    public function getSourceTable(): string
+    {
+        $this->analyze();
+        if ($this->sourceTable === null) {
+            throw new \RuntimeException(
+                "Cannot determine source table: query has JOINs, UNIONs, or complex FROM clause"
+            );
+        }
+        return $this->sourceTable;
+    }
+
+    /**
+     * Get alias for this query when used as a subquery
      */
     private function getAlias(): string
     {
-        $parts = explode('.', $this->table);
-        return end($parts);
+        $this->analyze();
+        return $this->alias;
     }
 
     /**
-     * Get the base query string as provided to the constructor
-     *
-     * If no custom SQL was provided, returns the table name.
+     * Get the base query string
      */
     public function getBaseQuery(): string
     {
-        return $this->baseSql ?? $this->table;
-    }
-
-    /**
-     * Get the table name for delete/update operations
-     *
-     * @return string
-     */
-    public function getTable(): string
-    {
-        return $this->table;
-    }
-
-    /**
-     * Set the logical table name / alias (for delete/update and subquery alias)
-     */
-    public function withTable(string $table): self
-    {
-        $new        = clone $this;
-        $new->table = $table;
-        return $new;
+        return $this->baseSql;
     }
 
     /**
@@ -235,17 +280,28 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     /**
      * Add WHERE column IN (...) clause
      *
-     * Accepts SetInterface (including TableInterface for subqueries)
+     * Accepts:
+     * - array: Simple value list
+     * - PartialQuery: SQL subquery (same database)
+     * - TableInterface/SetInterface: Materialized to value list
      */
-    public function in(string $column, SetInterface $values): self
+    public function in(string $column, array|SetInterface $values): self
     {
         $col = $this->db->quoteIdentifier($column);
+
+        // Plain array - most common case
+        if (is_array($values)) {
+            if ($values === []) {
+                return $this->where('1 = 0');
+            }
+            $placeholders = implode(', ', array_fill(0, count($values), '?'));
+            return $this->where("$col IN ($placeholders)", array_values($values));
+        }
 
         // PartialQuery subquery case - can potentially use SQL subquery
         if ($values instanceof self) {
             // Cross-database or dialect without subquery support: materialize to value list
             if ($this->db !== $values->db || !$this->db->getDialect()->supportsSubquery()) {
-                // Use PHP_INT_MAX as default limit to get all values (no artificial limit)
                 $list = $this->db->queryColumn($values->buildSql(PHP_INT_MAX), $values->getAllParams());
                 if ($list === []) {
                     return $this->where('1 = 0');
@@ -263,11 +319,10 @@ final class PartialQuery implements ResultSetInterface, TableInterface
                 );
             }
 
-            // 1) Merge CTEs from the inner query into this query
+            // Merge CTEs from the inner query into this query
             $new = $this->withCTEsFrom($values);
 
-            // 2) Inline the inner query core as a literal subquery in the WHERE clause
-            //    Use PHP_INT_MAX as default limit (no artificial limit for subqueries)
+            // Inline the inner query core as a literal subquery
             $subSql    = $values->buildCoreSql(PHP_INT_MAX);
             $subParams = $values->getMainParams();
 
@@ -277,8 +332,10 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         // Other SetInterface - materialize by iterating
         $list = [];
         foreach ($values as $value) {
-            // If iterating yields arrays (from TableInterface with columns), extract first column
-            if (is_array($value)) {
+            if (is_object($value)) {
+                $vars = get_object_vars($value);
+                $list[] = reset($vars);
+            } elseif (is_array($value)) {
                 $list[] = reset($value);
             } else {
                 $list[] = $value;
@@ -326,7 +383,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         $params = array_merge($this->getAllParams(), $other->getAllParams());
 
         // Create new PartialQuery with union as base
-        $new = new self($this->db, $this->table, $unionSql, $params);
+        $new = new self($this->db, $this->executor, $unionSql, $params);
 
         // Merge CTEs from both sides
         foreach ($this->cteList as $cte) {
@@ -361,7 +418,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             $exceptSql = "($leftSql) EXCEPT ($rightSql)";
 
             $params = array_merge($this->getAllParams(), $other->getAllParams());
-            $new = new self($this->db, $this->table, $exceptSql, $params);
+            $new = new self($this->db, $this->executor, $exceptSql, $params);
 
             foreach ($this->cteList as $cte) {
                 $new->cteList[] = $cte;
@@ -377,7 +434,8 @@ final class PartialQuery implements ResultSetInterface, TableInterface
 
         // Use NOT EXISTS with correlated subquery matching all columns
         // This is the safest fallback but may be slow
-        return $new->where("NOT EXISTS (SELECT 1 FROM ($subSql) AS _exc WHERE _exc.* = {$this->table}.*)", $subParams);
+        $alias = $this->getAlias();
+        return $new->where("NOT EXISTS (SELECT 1 FROM ($subSql) AS _exc WHERE _exc.* = {$alias}.*)", $subParams);
     }
 
     /**
@@ -560,16 +618,16 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         $dialect = $this->db->getDialect();
         $select  = $this->select ?? '*';
 
-        if ($this->baseSql === null) {
-            // Simple table name -> SELECT ... FROM table
-            $sql = "SELECT {$select} FROM {$this->table}";
-        } else {
-            // Wrap user SELECT in a subquery to:
-            // - avoid double LIMIT
-            // - allow us to apply additional WHERE/ORDER/LIMIT safely
-            $alias = $this->getAlias();
-            $sql   = "SELECT {$select} FROM ({$this->baseSql}) AS {$alias}";
+        // If no composition (no WHERE, ORDER, LIMIT, SELECT changes), use base SQL directly
+        if (empty($this->whereParts) && $this->orderBy === null
+            && $this->limit === null && $defaultLimit === null
+            && $this->offset === 0 && $this->select === null) {
+            return $this->baseSql;
         }
+
+        // Wrap base SQL in a subquery to apply composition safely
+        $alias = $this->getAlias();
+        $sql   = "SELECT {$select} FROM ({$this->baseSql}) AS {$alias}";
 
         if (!empty($this->whereParts)) {
             $sql .= ' WHERE ' . $this->buildWhereSql();
@@ -788,11 +846,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
 
         $params = array_merge($cteParams, $baseParams, $whereParams);
 
-        if ($this->baseSql === null) {
-            $sql = "SELECT COUNT(*) FROM {$this->table}";
-        } else {
-            $sql = "SELECT COUNT(*) FROM ({$this->baseSql}) AS _count";
-        }
+        $sql = "SELECT COUNT(*) FROM ({$this->baseSql}) AS _count";
 
         if ($whereSql !== '') {
             $sql .= ' WHERE ' . $whereSql;
@@ -811,7 +865,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function getIterator(): \Traversable
     {
-        $rows = $this->db->query($this->buildSql(1000), $this->getAllParams());
+        $rows = ($this->executor)($this->buildSql(1000), $this->getAllParams());
 
         // No hydration -> yield rows as-is
         if ($this->entityClass === null && $this->hydrator === null) {

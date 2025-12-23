@@ -2,7 +2,7 @@
 /**
  * Test PDODatabase implementation
  *
- * Tests: query, partialQuery, queryOne, queryField, queryColumn, exec, insert, transaction
+ * Tests: query, queryOne, queryField, queryColumn, exec, insert, transaction
  */
 
 require_once __DIR__ . '/../../vendor/autoload.php';
@@ -38,9 +38,9 @@ $test = new class extends Test {
         $this->assertInstanceOf(ResultSetInterface::class, $result);
     }
 
-    public function testPartialQueryReturnsPartialQuery(): void
+    public function testQueryReturnsPartialQuery(): void
     {
-        $result = \mini\db()->partialQuery('test_db');
+        $result = \mini\db()->query('SELECT * FROM test_db');
         $this->assertInstanceOf(PartialQuery::class, $result);
     }
 
@@ -204,7 +204,7 @@ $test = new class extends Test {
         \mini\db()->exec("INSERT INTO test_db (name, status) VALUES ('A', 'active'), ('B', 'inactive')");
 
         $deleted = \mini\db()->delete(
-            \mini\db()->partialQuery('test_db')->eq('status', 'inactive')
+            \mini\db()->query('SELECT * FROM test_db')->eq('status', 'inactive')
         );
 
         $this->assertSame(1, $deleted);
@@ -221,7 +221,7 @@ $test = new class extends Test {
         $id = \mini\db()->lastInsertId();
 
         $updated = \mini\db()->update(
-            \mini\db()->partialQuery('test_db')->eq('id', $id),
+            \mini\db()->query('SELECT * FROM test_db')->eq('id', $id),
             ['status' => 'updated']
         );
 
@@ -238,7 +238,7 @@ $test = new class extends Test {
         $id = \mini\db()->lastInsertId();
 
         $updated = \mini\db()->update(
-            \mini\db()->partialQuery('test_db')->eq('id', $id),
+            \mini\db()->query('SELECT * FROM test_db')->eq('id', $id),
             "name = 'Modified'"
         );
 
@@ -281,8 +281,9 @@ $test = new class extends Test {
         $this->cleanTable();
         \mini\db()->exec("INSERT INTO test_db (name) VALUES ('Entity')");
 
+        // Hydrator receives spread column values (like PDO::FETCH_FUNC)
         $rows = \mini\db()->query('SELECT id, name FROM test_db')
-            ->withHydrator(fn($row) => (object) $row)
+            ->withHydrator(fn($id, $name) => (object) ['id' => $id, 'name' => $name])
             ->toArray();
 
         $this->assertCount(1, $rows);

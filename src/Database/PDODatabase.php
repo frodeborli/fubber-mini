@@ -33,11 +33,19 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Execute a SELECT query and return results as ResultSet
+     * Execute a SELECT query and return a composable PartialQuery
      */
-    public function query(string $sql, array $params = []): ResultSetInterface
+    public function query(string $sql, array $params = []): PartialQuery
     {
-        return new ResultSet((function () use ($sql, $params) {
+        return PartialQuery::fromSql($this, $this->rawExecutor(), $sql, $params);
+    }
+
+    /**
+     * Get a raw query executor closure for PartialQuery
+     */
+    private function rawExecutor(): \Closure
+    {
+        return function (string $sql, array $params): \Traversable {
             try {
                 $stmt = $this->lazyPdo()->prepare($sql);
                 $stmt->execute(array_map(sqlval(...), $params));
@@ -48,15 +56,7 @@ class PDODatabase implements DatabaseInterface
             } catch (PDOException $e) {
                 throw new Exception("Query failed: " . $e->getMessage());
             }
-        })());
-    }
-
-    /**
-     * Create a PartialQuery for composable query building
-     */
-    public function partialQuery(string $table, ?string $sql = null, array $params = []): PartialQuery
-    {
-        return PartialQuery::from($this, $table, $sql, $params);
+        };
     }
 
     /**
@@ -258,7 +258,7 @@ class PDODatabase implements DatabaseInterface
      */
     public function delete(PartialQuery $query): int
     {
-        $table = $query->getTable();
+        $table = $query->getSourceTable();
         $ctes = $query->getCTEs();
         $where = $query->getWhere();
 
@@ -293,7 +293,7 @@ class PDODatabase implements DatabaseInterface
      */
     public function update(PartialQuery $query, string|array $set, array $params = []): int
     {
-        $table = $query->getTable();
+        $table = $query->getSourceTable();
         $ctes = $query->getCTEs();
         $where = $query->getWhere();
 
