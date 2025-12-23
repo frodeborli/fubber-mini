@@ -606,23 +606,91 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     /**
      * Build core SQL (without WITH prefix)
      *
+     * Strategy:
+     * - If base SQL is a simple SELECT without WHERE/ORDER/LIMIT, append directly
+     * - Otherwise, wrap as subquery for safety
+     *
      * @param int|null $defaultLimit Default limit to apply if none set (null = no limit)
      */
     private function buildCoreSql(?int $defaultLimit = null): string
     {
         $dialect = $this->db->getDialect();
-        $select  = $this->select ?? '*';
 
-        // If no composition (no WHERE, ORDER, LIMIT, SELECT changes), use base SQL directly
+        // If no composition at all, use base SQL directly
         if (empty($this->whereParts) && $this->orderBy === null
             && $this->limit === null && $defaultLimit === null
             && $this->offset === 0 && $this->select === null) {
             return $this->baseSql;
         }
 
-        // Wrap base SQL in a subquery to apply composition safely
+        // Try to append directly if base SQL is simple enough
+        if ($this->canAppendToBaseSql()) {
+            return $this->buildByAppending($dialect, $defaultLimit);
+        }
+
+        // Fall back to wrapping as subquery
+        return $this->buildByWrapping($dialect, $defaultLimit);
+    }
+
+    /**
+     * Check if we can safely append WHERE/ORDER/LIMIT to base SQL
+     *
+     * Returns true if base SQL is a simple SELECT without existing WHERE/ORDER/LIMIT
+     */
+    private function canAppendToBaseSql(): bool
+    {
+        // Only try if we're not changing SELECT columns
+        if ($this->select !== null) {
+            return false;
+        }
+
+        try {
+            $parser = new SqlParser();
+            $ast = $parser->parse($this->baseSql);
+        } catch (\Throwable $e) {
+            return false;
+        }
+
+        // Must be a simple SELECT (not UNION etc)
+        if (!$ast instanceof SelectStatement) {
+            return false;
+        }
+
+        // Can append if no existing WHERE, ORDER BY, or LIMIT
+        return $ast->where === null
+            && empty($ast->orderBy)
+            && $ast->limit === null
+            && $ast->offset === null;
+    }
+
+    /**
+     * Build SQL by appending clauses to base SQL
+     */
+    private function buildByAppending(SqlDialect $dialect, ?int $defaultLimit): string
+    {
+        $sql = $this->baseSql;
+
+        if (!empty($this->whereParts)) {
+            $sql .= ' WHERE ' . $this->buildWhereSql();
+        }
+
+        if ($this->orderBy !== null) {
+            $sql .= " ORDER BY {$this->orderBy}";
+        }
+
+        $sql .= $this->buildLimitClause($dialect, $defaultLimit);
+
+        return $sql;
+    }
+
+    /**
+     * Build SQL by wrapping base SQL as subquery
+     */
+    private function buildByWrapping(SqlDialect $dialect, ?int $defaultLimit): string
+    {
+        $select = $this->select ?? '*';
         $alias = $this->getAlias();
-        $sql   = "SELECT {$select} FROM ({$this->baseSql}) AS {$alias}";
+        $sql = "SELECT {$select} FROM ({$this->baseSql}) AS {$alias}";
 
         if (!empty($this->whereParts)) {
             $sql .= ' WHERE ' . $this->buildWhereSql();
@@ -631,8 +699,6 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         if ($this->orderBy !== null) {
             $sql .= " ORDER BY {$this->orderBy}";
         } elseif ($dialect === SqlDialect::SqlServer || $dialect === SqlDialect::Oracle) {
-            // SQL Server and Oracle require ORDER BY when using OFFSET/FETCH
-            // But only if we have a limit or offset
             if ($this->limit !== null || $defaultLimit !== null || $this->offset > 0) {
                 $sql .= " ORDER BY (SELECT 0)";
             }
