@@ -29,7 +29,7 @@ abstract class AbstractTable implements TableInterface
     use TablePropertiesTrait;
 
     /** Maximum rows to buffer optimistically during iteration */
-    protected const OPTIMISTIC_BUFFER_COUNT = 200;
+    protected const OPTIMISTIC_BUFFER_COUNT = 1000;
 
     /** @var array<string, ColumnDef> All columns in the table */
     private readonly array $columnDefs;
@@ -437,7 +437,7 @@ abstract class AbstractTable implements TableInterface
     /**
      * Iterate over rows with visible columns only
      *
-     * Uses optimistic buffering for small result sets (≤OPTIMISTIC_BUFFER_COUNT rows):
+     * Uses optimistic buffering for small result sets (≤1000 rows):
      * - First iteration buffers rows while yielding them
      * - Subsequent iterations yield from cache (no re-execution)
      * - Large result sets disable buffering to avoid memory issues

@@ -1,7 +1,7 @@
 <?php
+
 namespace mini\Table;
 
-use Closure;
 use mini\Table\Contracts\SetInterface;
 use mini\Table\Contracts\TableInterface;
 use mini\Table\Types\ColumnType;
@@ -14,36 +14,76 @@ use mini\Table\Wrappers\SortedTable;
 use Traversable;
 
 /**
- * Simple table backed by a generator/closure
+ * Simple table backed by a PHP array
  *
- * The closure must return a generator that yields key => stdClass pairs.
- * Column definitions must be provided explicitly.
+ * Accepts an array of rows (associative arrays or objects) with optional
+ * explicit column definitions. If columns aren't provided, they're inferred
+ * from the first row with automatic type detection.
  *
  * ```php
- * $table = new GeneratorTable(
- *     function() {
- *         yield 1 => (object)['id' => 1, 'name' => 'Alice'];
- *         yield 2 => (object)['id' => 2, 'name' => 'Bob'];
- *     },
- *     new ColumnDef('id', ColumnType::Int, IndexType::Primary),
- *     new ColumnDef('name', ColumnType::Text),
- * );
- * ```
+ * // With explicit columns
+ * $table = new ArrayTable([
+ *     ['id' => 1, 'name' => 'Alice'],
+ *     ['id' => 2, 'name' => 'Bob'],
+ * ], new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+ *    new ColumnDef('name', ColumnType::Text));
  *
- * Small result sets (≤1000 rows) are cached after first iteration for
- * efficient repeated access. Larger result sets stream without buffering.
+ * // With auto-inference
+ * $table = new ArrayTable([
+ *     ['id' => 1, 'name' => 'Alice', 'score' => 95.5],
+ *     ['id' => 2, 'name' => 'Bob', 'score' => 87.0],
+ * ]);
+ * ```
  */
-class GeneratorTable extends AbstractTable
+class ArrayTable extends AbstractTable
 {
-    private Closure $generator;
+    /** @var array<int|string, object> */
+    private array $rows;
 
-    public function __construct(Closure $generator, ColumnDef ...$columns)
+    /**
+     * @param array<array|object> $rows Array of rows (associative arrays or objects)
+     * @param ColumnDef ...$columns Optional column definitions (inferred if not provided)
+     */
+    public function __construct(array $rows, ColumnDef ...$columns)
     {
-        if (empty($columns)) {
-            throw new \InvalidArgumentException('GeneratorTable requires at least one column');
+        // Convert rows to objects with preserved keys
+        $this->rows = [];
+        $idx = 0;
+        foreach ($rows as $key => $row) {
+            $this->rows[$key] = is_array($row) ? (object) $row : $row;
+            $idx++;
         }
-        $this->generator = $generator;
+
+        // Infer columns from first row if not provided
+        if (empty($columns) && !empty($this->rows)) {
+            $columns = self::inferColumns(reset($this->rows));
+        }
+
+        if (empty($columns)) {
+            throw new \InvalidArgumentException('ArrayTable requires columns (provide explicitly or via non-empty data)');
+        }
+
         parent::__construct(...$columns);
+    }
+
+    /**
+     * Infer column definitions from a row
+     *
+     * @return ColumnDef[]
+     */
+    private static function inferColumns(object $row): array
+    {
+        $columns = [];
+        foreach ($row as $name => $value) {
+            $type = match (true) {
+                is_int($value) => ColumnType::Int,
+                is_float($value) => ColumnType::Float,
+                is_bool($value) => ColumnType::Int,
+                default => ColumnType::Text,
+            };
+            $columns[] = new ColumnDef($name, $type);
+        }
+        return $columns;
     }
 
     protected function materialize(string ...$additionalColumns): Traversable
@@ -56,13 +96,12 @@ class GeneratorTable extends AbstractTable
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
-        foreach (($this->generator)() as $key => $row) {
+        foreach ($this->rows as $key => $row) {
             if ($skipped < $offset) {
                 $skipped++;
                 continue;
             }
 
-            // Project to requested columns
             $projected = new \stdClass();
             foreach ($cols as $col) {
                 $projected->$col = $row->$col ?? null;
@@ -82,16 +121,18 @@ class GeneratorTable extends AbstractTable
         if ($this->cachedCount !== null) {
             return $this->cachedCount;
         }
-        $count = 0;
-        foreach ($this as $_) {
-            $count++;
+
+        $total = count($this->rows);
+        $offset = $this->getOffset();
+        $limit = $this->getLimit();
+
+        $count = max(0, $total - $offset);
+        if ($limit !== null) {
+            $count = min($count, $limit);
         }
+
         return $this->cachedCount = $count;
     }
-
-    // -------------------------------------------------------------------------
-    // Filter methods - return FilteredTable wrappers
-    // -------------------------------------------------------------------------
 
     public function eq(string $column, int|float|string|null $value): TableInterface
     {
@@ -139,18 +180,15 @@ class GeneratorTable extends AbstractTable
 
     public function or(Predicate ...$predicates): TableInterface
     {
-        // Filter out empty predicates (match nothing)
         $predicates = array_values(array_filter(
             $predicates,
             fn($p) => !$p->isEmpty()
         ));
 
-        // No predicates → nothing matches
         if (empty($predicates)) {
             return EmptyTable::from($this);
         }
 
-        // In-memory table - use OrTable for single-pass evaluation
         return new OrTable($this, ...$predicates);
     }
 }
