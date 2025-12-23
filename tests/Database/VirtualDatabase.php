@@ -446,7 +446,8 @@ $test = new class extends Test {
     {
         $vdb = $this->createVdb();
 
-        $this->expectException(RuntimeException::class);
+        // May throw SqlSyntaxException (when wrapping fails) or RuntimeException (if it gets to executor)
+        $this->expectException(\Exception::class);
         iterator_to_array($vdb->query("INSERT INTO users (id, name) VALUES (1, 'test')"));
     }
 

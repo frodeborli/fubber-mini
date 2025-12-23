@@ -74,6 +74,9 @@ class SqlLexer
     public const T_PARTITION = 'PARTITION';
     public const T_WITH = 'WITH';
     public const T_RECURSIVE = 'RECURSIVE';
+    public const T_CURRENT_DATE = 'CURRENT_DATE';
+    public const T_CURRENT_TIME = 'CURRENT_TIME';
+    public const T_CURRENT_TIMESTAMP = 'CURRENT_TIMESTAMP';
     public const T_IDENTIFIER = 'IDENTIFIER';
     public const T_STRING = 'STRING';
     public const T_NUMBER = 'NUMBER';
@@ -340,6 +343,9 @@ class SqlLexer
                         'PARTITION' => self::T_PARTITION,
                         'WITH' => self::T_WITH,
                         'RECURSIVE' => self::T_RECURSIVE,
+                        'CURRENT_DATE' => self::T_CURRENT_DATE,
+                        'CURRENT_TIME' => self::T_CURRENT_TIME,
+                        'CURRENT_TIMESTAMP' => self::T_CURRENT_TIMESTAMP,
                         default => self::T_IDENTIFIER
                     };
                 }

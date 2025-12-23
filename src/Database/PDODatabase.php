@@ -4,6 +4,10 @@ namespace mini\Database;
 
 use mini\Database\DatabaseInterface;
 use mini\Mini;
+use mini\Table\ColumnDef;
+use mini\Table\Contracts\TableInterface;
+use mini\Table\GeneratorTable;
+use mini\Table\Types\ColumnType;
 use PDO;
 use PDOException;
 use Exception;
@@ -494,182 +498,201 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Build a temporary table containing schema metadata
+     * Get database schema as a TableInterface
      */
-    public function buildSchemaTable(string $tableName): void
+    public function getSchema(): TableInterface
     {
         $dialect = $this->getDialect();
 
-        // Create or clear the temp table
-        $this->exec("DROP TABLE IF EXISTS {$tableName}");
-        $this->exec("CREATE TEMP TABLE {$tableName} (
-            table_name TEXT,
-            name TEXT,
-            type TEXT,
-            data_type TEXT,
-            is_nullable INTEGER,
-            default_value TEXT,
-            ordinal INTEGER,
-            extra TEXT
-        )");
-
-        // Populate based on dialect
-        match ($dialect) {
-            SqlDialect::Sqlite => $this->populateSchemaSqlite($tableName),
-            SqlDialect::MySQL => $this->populateSchemaMySQL($tableName),
-            SqlDialect::Postgres => $this->populateSchemaPostgres($tableName),
-            default => $this->populateSchemaGeneric($tableName),
+        $generator = match ($dialect) {
+            SqlDialect::Sqlite => $this->generateSchemaSqlite(...),
+            SqlDialect::MySQL => $this->generateSchemaMySQL(...),
+            SqlDialect::Postgres => $this->generateSchemaPostgres(...),
+            default => $this->generateSchemaGeneric(...),
         };
+
+        return new GeneratorTable(
+            $generator,
+            new ColumnDef('table_name', ColumnType::Text),
+            new ColumnDef('name', ColumnType::Text),
+            new ColumnDef('type', ColumnType::Text),
+            new ColumnDef('data_type', ColumnType::Text),
+            new ColumnDef('is_nullable', ColumnType::Int),
+            new ColumnDef('default_value', ColumnType::Text),
+            new ColumnDef('ordinal', ColumnType::Int),
+            new ColumnDef('extra', ColumnType::Text),
+        );
     }
 
-    private function populateSchemaSqlite(string $schemaTable): void
+    private function generateSchemaSqlite(): \Generator
     {
         // Get all table names
         $tables = $this->queryColumn(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         );
 
-        foreach ($tables as $table) {
-            // Skip the schema table itself
-            if ($table === $schemaTable) {
-                continue;
-            }
+        $rowKey = 0;
+        $pdo = $this->lazyPdo();
 
-            // Get column info via PRAGMA
-            $columns = $this->query("PRAGMA table_info({$table})")->toArray();
+        foreach ($tables as $table) {
+            // Get column info via PRAGMA (use raw PDO - PRAGMA isn't a SELECT statement)
+            $stmt = $pdo->query("PRAGMA table_info({$table})");
+            $columns = $stmt->fetchAll(PDO::FETCH_OBJ);
             $pkColumns = [];
 
             foreach ($columns as $col) {
-                $this->exec(
-                    "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
-                     VALUES (?, ?, 'column', ?, ?, ?, ?, NULL)",
-                    [
-                        $table,
-                        $col->name,
-                        $col->type,
-                        $col->notnull ? 0 : 1,
-                        $col->dflt_value,
-                        $col->cid + 1
-                    ]
-                );
+                yield $rowKey++ => (object)[
+                    'table_name' => $table,
+                    'name' => $col->name,
+                    'type' => 'column',
+                    'data_type' => $col->type,
+                    'is_nullable' => $col->notnull ? 0 : 1,
+                    'default_value' => $col->dflt_value,
+                    'ordinal' => $col->cid + 1,
+                    'extra' => null,
+                ];
 
                 if ($col->pk) {
-                    $pkColumns[$col->pk] = $col->name; // pk is 1-based position in PK
+                    $pkColumns[$col->pk] = $col->name;
                 }
             }
 
             // Add primary key as an index entry
             if (!empty($pkColumns)) {
                 ksort($pkColumns);
-                $this->exec(
-                    "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
-                     VALUES (?, ?, 'primary', NULL, NULL, NULL, NULL, ?)",
-                    [$table, 'PRIMARY', implode(', ', $pkColumns)]
-                );
+                yield $rowKey++ => (object)[
+                    'table_name' => $table,
+                    'name' => 'PRIMARY',
+                    'type' => 'primary',
+                    'data_type' => null,
+                    'is_nullable' => null,
+                    'default_value' => null,
+                    'ordinal' => null,
+                    'extra' => implode(', ', $pkColumns),
+                ];
             }
 
             // Get indexes via PRAGMA
-            $indexes = $this->query("PRAGMA index_list({$table})")->toArray();
+            $stmt = $pdo->query("PRAGMA index_list({$table})");
+            $indexes = $stmt->fetchAll(PDO::FETCH_OBJ);
 
             foreach ($indexes as $idx) {
-                // Skip auto-generated indexes for PRIMARY KEY and UNIQUE constraints
-                // (they start with "sqlite_autoindex_")
+                // Skip auto-generated indexes
                 if (str_starts_with($idx->name, 'sqlite_autoindex_')) {
                     continue;
                 }
 
                 // Get columns in this index
-                $indexCols = $this->query("PRAGMA index_info({$idx->name})")->toArray();
+                $stmt = $pdo->query("PRAGMA index_info({$idx->name})");
+                $indexCols = $stmt->fetchAll(PDO::FETCH_OBJ);
                 $colNames = array_map(fn($c) => $c->name, $indexCols);
 
-                $type = $idx->unique ? 'unique' : 'index';
-
-                $this->exec(
-                    "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
-                     VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?)",
-                    [$table, $idx->name, $type, implode(', ', $colNames)]
-                );
+                yield $rowKey++ => (object)[
+                    'table_name' => $table,
+                    'name' => $idx->name,
+                    'type' => $idx->unique ? 'unique' : 'index',
+                    'data_type' => null,
+                    'is_nullable' => null,
+                    'default_value' => null,
+                    'ordinal' => null,
+                    'extra' => implode(', ', $colNames),
+                ];
             }
         }
     }
 
-    private function populateSchemaMySQL(string $schemaTable): void
+    private function generateSchemaMySQL(): \Generator
     {
-        // Insert columns
-        $this->exec(
-            "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
-             SELECT
-                 TABLE_NAME,
-                 COLUMN_NAME,
-                 'column',
-                 COLUMN_TYPE,
-                 CASE WHEN IS_NULLABLE = 'YES' THEN 1 ELSE 0 END,
-                 COLUMN_DEFAULT,
-                 ORDINAL_POSITION,
-                 NULL
+        $rowKey = 0;
+
+        // Yield columns
+        foreach ($this->query(
+            "SELECT
+                 TABLE_NAME as table_name,
+                 COLUMN_NAME as name,
+                 COLUMN_TYPE as data_type,
+                 IS_NULLABLE,
+                 COLUMN_DEFAULT as default_value,
+                 ORDINAL_POSITION as ordinal
              FROM INFORMATION_SCHEMA.COLUMNS
              WHERE TABLE_SCHEMA = DATABASE()
              ORDER BY TABLE_NAME, ORDINAL_POSITION"
-        );
+        ) as $col) {
+            yield $rowKey++ => (object)[
+                'table_name' => $col->table_name,
+                'name' => $col->name,
+                'type' => 'column',
+                'data_type' => $col->data_type,
+                'is_nullable' => $col->IS_NULLABLE === 'YES' ? 1 : 0,
+                'default_value' => $col->default_value,
+                'ordinal' => (int)$col->ordinal,
+                'extra' => null,
+            ];
+        }
 
-        // Insert indexes (grouped by index name with columns concatenated)
-        $this->exec(
-            "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
-             SELECT
-                 TABLE_NAME,
-                 INDEX_NAME,
-                 CASE
-                     WHEN INDEX_NAME = 'PRIMARY' THEN 'primary'
-                     WHEN NON_UNIQUE = 0 THEN 'unique'
-                     ELSE 'index'
-                 END,
-                 NULL,
-                 NULL,
-                 NULL,
-                 NULL,
-                 GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)
+        // Yield indexes (grouped by index name)
+        foreach ($this->query(
+            "SELECT
+                 TABLE_NAME as table_name,
+                 INDEX_NAME as name,
+                 NON_UNIQUE,
+                 GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) as extra
              FROM INFORMATION_SCHEMA.STATISTICS
              WHERE TABLE_SCHEMA = DATABASE()
              GROUP BY TABLE_NAME, INDEX_NAME, NON_UNIQUE
              ORDER BY TABLE_NAME, INDEX_NAME"
-        );
+        ) as $idx) {
+            $type = $idx->name === 'PRIMARY' ? 'primary' : ($idx->NON_UNIQUE ? 'index' : 'unique');
+            yield $rowKey++ => (object)[
+                'table_name' => $idx->table_name,
+                'name' => $idx->name,
+                'type' => $type,
+                'data_type' => null,
+                'is_nullable' => null,
+                'default_value' => null,
+                'ordinal' => null,
+                'extra' => $idx->extra,
+            ];
+        }
     }
 
-    private function populateSchemaPostgres(string $schemaTable): void
+    private function generateSchemaPostgres(): \Generator
     {
-        // Insert columns
-        $this->exec(
-            "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
-             SELECT
+        $rowKey = 0;
+
+        // Yield columns
+        foreach ($this->query(
+            "SELECT
                  table_name,
-                 column_name,
-                 'column',
+                 column_name as name,
                  data_type,
-                 CASE WHEN is_nullable = 'YES' THEN 1 ELSE 0 END,
-                 column_default,
-                 ordinal_position,
-                 NULL
+                 is_nullable,
+                 column_default as default_value,
+                 ordinal_position as ordinal
              FROM information_schema.columns
              WHERE table_schema = current_schema()
              ORDER BY table_name, ordinal_position"
-        );
+        ) as $col) {
+            yield $rowKey++ => (object)[
+                'table_name' => $col->table_name,
+                'name' => $col->name,
+                'type' => 'column',
+                'data_type' => $col->data_type,
+                'is_nullable' => $col->is_nullable === 'YES' ? 1 : 0,
+                'default_value' => $col->default_value,
+                'ordinal' => (int)$col->ordinal,
+                'extra' => null,
+            ];
+        }
 
-        // Insert indexes
-        $this->exec(
-            "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
-             SELECT
+        // Yield indexes
+        foreach ($this->query(
+            "SELECT
                  t.relname AS table_name,
-                 i.relname AS index_name,
-                 CASE
-                     WHEN ix.indisprimary THEN 'primary'
-                     WHEN ix.indisunique THEN 'unique'
-                     ELSE 'index'
-                 END,
-                 NULL,
-                 NULL,
-                 NULL,
-                 NULL,
-                 string_agg(a.attname, ', ' ORDER BY array_position(ix.indkey, a.attnum))
+                 i.relname AS name,
+                 ix.indisprimary,
+                 ix.indisunique,
+                 string_agg(a.attname, ', ' ORDER BY array_position(ix.indkey, a.attnum)) as extra
              FROM pg_class t
              JOIN pg_index ix ON t.oid = ix.indrelid
              JOIN pg_class i ON i.oid = ix.indexrelid
@@ -679,29 +702,51 @@ class PDODatabase implements DatabaseInterface
                AND t.relkind = 'r'
              GROUP BY t.relname, i.relname, ix.indisprimary, ix.indisunique
              ORDER BY t.relname, i.relname"
-        );
+        ) as $idx) {
+            $type = $idx->indisprimary ? 'primary' : ($idx->indisunique ? 'unique' : 'index');
+            yield $rowKey++ => (object)[
+                'table_name' => $idx->table_name,
+                'name' => $idx->name,
+                'type' => $type,
+                'data_type' => null,
+                'is_nullable' => null,
+                'default_value' => null,
+                'ordinal' => null,
+                'extra' => $idx->extra,
+            ];
+        }
     }
 
-    private function populateSchemaGeneric(string $schemaTable): void
+    private function generateSchemaGeneric(): \Generator
     {
-        // Try INFORMATION_SCHEMA for columns (works for many databases)
+        $rowKey = 0;
+
+        // Try INFORMATION_SCHEMA for columns
         try {
-            $this->exec(
-                "INSERT INTO {$schemaTable} (table_name, name, type, data_type, is_nullable, default_value, ordinal, extra)
-                 SELECT
-                     TABLE_NAME,
-                     COLUMN_NAME,
-                     'column',
-                     DATA_TYPE,
-                     CASE WHEN IS_NULLABLE = 'YES' THEN 1 ELSE 0 END,
-                     COLUMN_DEFAULT,
-                     ORDINAL_POSITION,
-                     NULL
+            foreach ($this->query(
+                "SELECT
+                     TABLE_NAME as table_name,
+                     COLUMN_NAME as name,
+                     DATA_TYPE as data_type,
+                     IS_NULLABLE,
+                     COLUMN_DEFAULT as default_value,
+                     ORDINAL_POSITION as ordinal
                  FROM INFORMATION_SCHEMA.COLUMNS
                  ORDER BY TABLE_NAME, ORDINAL_POSITION"
-            );
+            ) as $col) {
+                yield $rowKey++ => (object)[
+                    'table_name' => $col->table_name,
+                    'name' => $col->name,
+                    'type' => 'column',
+                    'data_type' => $col->data_type,
+                    'is_nullable' => $col->IS_NULLABLE === 'YES' ? 1 : 0,
+                    'default_value' => $col->default_value,
+                    'ordinal' => (int)$col->ordinal,
+                    'extra' => null,
+                ];
+            }
         } catch (\Throwable) {
-            // If INFORMATION_SCHEMA not available, leave table empty
+            // INFORMATION_SCHEMA not available
         }
     }
 }

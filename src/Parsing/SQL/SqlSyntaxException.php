@@ -7,7 +7,7 @@ namespace mini\Parsing\SQL;
  *
  * Provides line numbers and visual pointers to syntax errors
  */
-class SqlSyntaxException extends \Exception
+class SqlSyntaxException extends \LogicException
 {
     public function __construct(string $message, string $sql, int $pos)
     {

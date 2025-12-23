@@ -18,9 +18,9 @@ namespace mini\Parsing\SQL\AST;
 class SubqueryNode extends ASTNode implements ValueNodeInterface
 {
     public string $type = 'SUBQUERY';
-    public SelectStatement $query;
+    public SelectStatement|UnionNode|WithStatement $query;
 
-    public function __construct(SelectStatement $query)
+    public function __construct(SelectStatement|UnionNode|WithStatement $query)
     {
         $this->query = $query;
     }

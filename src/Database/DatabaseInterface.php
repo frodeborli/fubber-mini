@@ -242,39 +242,37 @@ interface DatabaseInterface
     public function upsert(string $table, array $data, string ...$conflictColumns): int;
 
     /**
-     * Build a temporary table containing schema metadata
+     * Get database schema as a TableInterface
      *
-     * Creates (or refreshes) a temporary table with database schema information,
-     * including columns and indexes. The table can then be queried using standard SQL.
+     * Returns schema metadata as a queryable table without creating temp tables.
+     * The table can be filtered, iterated, and composed like any other TableInterface.
      *
-     * Table structure:
-     * - table_name TEXT: Name of the table
-     * - name TEXT: Column name or index name
-     * - type TEXT: 'column', 'primary', 'unique', or 'index'
-     * - data_type TEXT: Data type for columns (NULL for indexes)
-     * - is_nullable INTEGER: 1 if nullable, 0 if NOT NULL (NULL for indexes)
-     * - default_value TEXT: Default value expression (NULL for indexes)
-     * - ordinal INTEGER: Position (1-based for columns, NULL for indexes)
-     * - extra TEXT: For indexes: comma-separated list of indexed columns
+     * Schema columns:
+     * - table_name: Name of the table
+     * - name: Column name or index name
+     * - type: 'column', 'primary', 'unique', or 'index'
+     * - data_type: Data type for columns (null for indexes)
+     * - is_nullable: 1 if nullable, 0 if NOT NULL (null for indexes)
+     * - default_value: Default value expression (null for indexes)
+     * - ordinal: Position (1-based for columns, null for indexes)
+     * - extra: For indexes: comma-separated list of indexed columns
      *
      * Example:
      * ```php
-     * db()->buildSchemaTable('_schema');
-     *
-     * // Query all columns for a table
-     * $columns = db()->query("SELECT * FROM _schema WHERE table_name = ? AND type = 'column'", ['users']);
+     * // Get all columns for a table
+     * $columns = db()->getSchema()->eq('type', 'column')->eq('table_name', 'users');
      *
      * // List all tables
-     * $tables = db()->queryColumn('SELECT DISTINCT table_name FROM _schema');
+     * $tables = db()->getSchema()->eq('type', 'column')->select('table_name')->distinct();
      *
      * // Find all indexes
-     * $indexes = db()->query("SELECT * FROM _schema WHERE type IN ('primary', 'unique', 'index')");
+     * $indexes = db()->getSchema()->in('type', ['primary', 'unique', 'index']);
      *
-     * // Find primary key columns for a table
-     * $pk = db()->queryOne("SELECT extra FROM _schema WHERE table_name = ? AND type = 'primary'", ['users']);
+     * // Find primary key for a table
+     * $pk = db()->getSchema()->eq('table_name', 'users')->eq('type', 'primary')->one();
      * ```
      *
-     * @param string $tableName Name for the temporary schema table
+     * @return \mini\Table\Contracts\TableInterface Schema table
      */
-    public function buildSchemaTable(string $tableName): void;
+    public function getSchema(): \mini\Table\Contracts\TableInterface;
 }

@@ -4,6 +4,7 @@ namespace mini\Database;
 
 use mini\Table\Contracts\SetInterface;
 use mini\Table\Contracts\TableInterface;
+use mini\Table\Predicate;
 use mini\Table\Utility\TablePropertiesTrait;
 use mini\Table\Wrappers\AliasTable;
 use mini\Table\Wrappers\DistinctTable;
@@ -13,6 +14,11 @@ use mini\Parsing\SQL\SqlParser;
 use mini\Parsing\SQL\AST\SelectStatement;
 use mini\Parsing\SQL\AST\UnionNode;
 use mini\Parsing\SQL\AST\IdentifierNode;
+use mini\Parsing\SQL\AST\BinaryOperation;
+use mini\Parsing\SQL\AST\LiteralNode;
+use mini\Parsing\SQL\AST\PlaceholderNode;
+use mini\Parsing\SQL\AST\ASTNode;
+use mini\Parsing\SQL\AstParameterBinder;
 use stdClass;
 
 /**
@@ -48,6 +54,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     private string $alias = '_q';
 
     /**
+     * Parsed WHERE clause from base SQL with bound parameters
+     * Used by matches() to validate rows against base SQL conditions
+     */
+    private ?ASTNode $baseWhereAst = null;
+
+    /**
      * Each WHERE clause is stored with its own parameters
      * @var array<int, array{sql: string, params: array<int, mixed>}>
      */
@@ -71,6 +83,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     private ?int $limit = null;
     private int $offset = 0;
 
+    /**
+     * Structured predicate for row matching (tracks eq/lt/gt/etc calls)
+     * Raw where() calls are NOT included here.
+     */
+    private Predicate $predicate;
+
     private ?\Closure $hydrator = null;
     private ?string $entityClass = null;
     private array|false $entityConstructorArgs = false;
@@ -88,12 +106,21 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         $this->executor   = $executor;
         $this->baseSql    = $sql;
         $this->baseParams = $params;
+        $this->predicate  = new Predicate();
     }
 
     /**
      * Create a PartialQuery from SQL
      *
      * The executor closure handles raw query execution for iteration.
+     *
+     * Note: SQL with WHERE/ORDER BY/LIMIT acts as a "barrier" - subsequent
+     * operations filter/sort WITHIN those results, not before them. This is
+     * intentional: `query('SELECT * FROM t LIMIT 10')->order('id DESC')`
+     * reorders those 10 rows, it doesn't fetch different rows.
+     *
+     * For composable queries where filters/sorts apply before limits, use
+     * method chaining: `query('SELECT * FROM t')->order('id DESC')->limit(10)`
      *
      * @param DatabaseInterface $db       Database connection
      * @param \Closure          $executor Raw query executor: fn(string $sql, array $params): Traversable
@@ -152,6 +179,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
 
         $this->sourceTable = $ast->from->getFullName();
         $this->alias = $ast->fromAlias ?? $ast->from->getFullName();
+
+        // Extract WHERE clause for row matching
+        if ($ast->where !== null) {
+            $binder = new AstParameterBinder($this->baseParams);
+            $this->baseWhereAst = $binder->bind($ast->where);
+        }
     }
 
     /**
@@ -248,33 +281,45 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     {
         $col = $this->db->quoteIdentifier($column);
         if ($value === null) {
-            return $this->where("$col IS NULL");
+            $new = $this->where("$col IS NULL");
+            $new->predicate = $this->predicate->eq($column, null);
+            return $new;
         }
-        return $this->where("$col = ?", [$value]);
+        $new = $this->where("$col = ?", [$value]);
+        $new->predicate = $this->predicate->eq($column, $value);
+        return $new;
     }
 
     public function lt(string $column, mixed $value): self
     {
         $col = $this->db->quoteIdentifier($column);
-        return $this->where("$col < ?", [$value]);
+        $new = $this->where("$col < ?", [$value]);
+        $new->predicate = $this->predicate->lt($column, $value);
+        return $new;
     }
 
     public function lte(string $column, mixed $value): self
     {
         $col = $this->db->quoteIdentifier($column);
-        return $this->where("$col <= ?", [$value]);
+        $new = $this->where("$col <= ?", [$value]);
+        $new->predicate = $this->predicate->lte($column, $value);
+        return $new;
     }
 
     public function gt(string $column, mixed $value): self
     {
         $col = $this->db->quoteIdentifier($column);
-        return $this->where("$col > ?", [$value]);
+        $new = $this->where("$col > ?", [$value]);
+        $new->predicate = $this->predicate->gt($column, $value);
+        return $new;
     }
 
     public function gte(string $column, mixed $value): self
     {
         $col = $this->db->quoteIdentifier($column);
-        return $this->where("$col >= ?", [$value]);
+        $new = $this->where("$col >= ?", [$value]);
+        $new->predicate = $this->predicate->gte($column, $value);
+        return $new;
     }
 
     /**
@@ -351,7 +396,9 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     public function like(string $column, string $pattern): self
     {
         $col = $this->db->quoteIdentifier($column);
-        return $this->where("$col LIKE ?", [$pattern]);
+        $new = $this->where("$col LIKE ?", [$pattern]);
+        $new->predicate = $this->predicate->like($column, $pattern);
+        return $new;
     }
 
     /**
@@ -780,8 +827,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
 
         foreach ($this->whereParts as $part) {
             if (!empty($part['params'])) {
-                foreach ($part['params'] as $p) {
-                    $params[] = $p;
+                foreach ($part['params'] as $key => $p) {
+                    if (is_string($key)) {
+                        $params[$key] = $p;  // Named placeholder
+                    } else {
+                        $params[] = $p;  // Positional placeholder
+                    }
                 }
             }
         }
@@ -792,7 +843,9 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     /**
      * Flattened params for all CTEs (in order), then main query params
      *
-     * @return array<int, mixed>
+     * Preserves named placeholder keys (e.g., 'status' for :status).
+     *
+     * @return array<int|string, mixed>
      */
     private function getAllParams(): array
     {
@@ -800,14 +853,22 @@ final class PartialQuery implements ResultSetInterface, TableInterface
 
         // CTE params first
         foreach ($this->cteList as $cte) {
-            foreach ($cte['params'] as $p) {
-                $params[] = $p;
+            foreach ($cte['params'] as $key => $p) {
+                if (is_string($key)) {
+                    $params[$key] = $p;
+                } else {
+                    $params[] = $p;
+                }
             }
         }
 
         // Then main/base + WHERE params
-        foreach ($this->getMainParams() as $p) {
-            $params[] = $p;
+        foreach ($this->getMainParams() as $key => $p) {
+            if (is_string($key)) {
+                $params[$key] = $p;
+            } else {
+                $params[] = $p;
+            }
         }
 
         return $params;
@@ -1052,6 +1113,46 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             'sql'    => $sql,
             'params' => $params,
         ];
+    }
+
+    /**
+     * Get the structured predicate for row matching
+     *
+     * Returns a Predicate representing the filter conditions added via
+     * eq(), lt(), gt(), like(), etc. Raw where() clauses are NOT included
+     * since they can't be represented structurally.
+     *
+     * Use ->getPredicate()->test($row) to check if a row matches.
+     */
+    public function getPredicate(): Predicate
+    {
+        return $this->predicate;
+    }
+
+    /**
+     * Test if a row matches the structured filter conditions
+     *
+     * Convenience method for getPredicate()->test($row).
+     *
+     * Note: Only tests conditions added via eq(), lt(), gt(), like(), etc.
+     * Raw where() clauses cannot be tested without database access.
+     *
+     * @param object $row The row to test
+     * @return bool True if row matches all structured conditions
+     */
+    public function matches(object $row): bool
+    {
+        // First check base SQL WHERE conditions (if any)
+        $this->analyze(); // Ensure AST is parsed
+        if ($this->baseWhereAst !== null) {
+            $evaluator = new ExpressionEvaluator();
+            if (!$evaluator->evaluateAsBool($this->baseWhereAst, $row)) {
+                return false;
+            }
+        }
+
+        // Then check Predicate conditions (from eq()/lt()/etc. calls)
+        return $this->predicate->test($row);
     }
 
     /**

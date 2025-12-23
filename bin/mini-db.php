@@ -53,10 +53,11 @@ if ($useVirtual) {
     }
     $prompt = 'vdb> ';
 } else {
-    if (!function_exists('mini\\db')) {
-        fwrite(STDERR, "Error: mini\\db() not available. Run from a Mini project directory.\n");
+    if (!function_exists('mini\\bootstrap')) {
+        fwrite(STDERR, "Error: mini\\bootstrap() not available. Run from a Mini project directory.\n");
         exit(1);
     }
+    \mini\bootstrap();
     $db = \mini\db();
     $prompt = 'sql> ';
 }
@@ -371,53 +372,74 @@ function handleDotCommand(DatabaseInterface $db, string $cmd, bool $isVirtual, s
             break;
 
         case '.tables':
-            if ($isVirtual && $db instanceof VirtualDatabase) {
-                $tables = $db->getTableNames();
-                if ($format === 'json') {
-                    echo json_encode($tables, JSON_PRETTY_PRINT) . "\n";
-                } else {
-                    foreach ($tables as $table) {
-                        echo "$table\n";
-                    }
-                }
+            $tables = [];
+            foreach ($db->getSchema()->eq('type', 'column') as $row) {
+                $tables[$row->table_name] = true;
+            }
+            $tables = array_keys($tables);
+            sort($tables);
+
+            if ($format === 'json') {
+                echo json_encode($tables, JSON_PRETTY_PRINT) . "\n";
             } else {
-                echo "Not implemented for this database type\n";
+                foreach ($tables as $table) {
+                    echo "$table\n";
+                }
             }
             break;
 
         case '.schema':
-            if ($isVirtual && $db instanceof VirtualDatabase) {
-                $tables = $arg ? [$arg] : $db->getTableNames();
-                $schema = [];
-                foreach ($tables as $table) {
-                    $t = $db->getTable($table);
-                    if ($t) {
-                        $tableCols = [];
-                        foreach ($t->getColumns() as $name => $col) {
-                            $tableCols[$name] = [
-                                'type' => $col->type->name,
-                                'index' => $col->index !== \mini\Table\Types\IndexType::None ? $col->index->name : null,
-                            ];
-                        }
-                        $schema[$table] = $tableCols;
-                    }
+            $schema = $db->getSchema();
+            if ($arg) {
+                $schema = $schema->eq('table_name', $arg);
+            }
+
+            // Group by table
+            $tableSchemas = [];
+            foreach ($schema as $row) {
+                $tableName = $row->table_name;
+                if (!isset($tableSchemas[$tableName])) {
+                    $tableSchemas[$tableName] = ['columns' => [], 'indexes' => []];
                 }
-                if ($format === 'json') {
-                    echo json_encode($schema, JSON_PRETTY_PRINT) . "\n";
+                if ($row->type === 'column') {
+                    $tableSchemas[$tableName]['columns'][$row->name] = [
+                        'type' => $row->data_type,
+                        'nullable' => $row->is_nullable,
+                        'default' => $row->default_value,
+                        'ordinal' => $row->ordinal,
+                    ];
                 } else {
-                    foreach ($schema as $table => $cols) {
-                        echo "## $table\n\n";
-                        echo "| Column | Type | Index |\n";
-                        echo "|--------|------|-------|\n";
-                        foreach ($cols as $name => $info) {
-                            $index = $info['index'] ?? '-';
-                            echo "| $name | {$info['type']} | $index |\n";
-                        }
-                        echo "\n";
-                    }
+                    $tableSchemas[$tableName]['indexes'][$row->name] = [
+                        'type' => $row->type,
+                        'columns' => $row->extra,
+                    ];
                 }
+            }
+
+            if ($format === 'json') {
+                echo json_encode($tableSchemas, JSON_PRETTY_PRINT) . "\n";
             } else {
-                echo "Not implemented for this database type\n";
+                foreach ($tableSchemas as $table => $info) {
+                    echo "## $table\n\n";
+
+                    // Columns
+                    echo "| Column | Type | Nullable | Default |\n";
+                    echo "|--------|------|----------|--------|\n";
+                    foreach ($info['columns'] as $name => $col) {
+                        $nullable = $col['nullable'] ? 'yes' : 'no';
+                        $default = $col['default'] ?? '-';
+                        echo "| $name | {$col['type']} | $nullable | $default |\n";
+                    }
+
+                    // Indexes
+                    if (!empty($info['indexes'])) {
+                        echo "\n**Indexes:**\n";
+                        foreach ($info['indexes'] as $name => $idx) {
+                            echo "- $name ({$idx['type']}): {$idx['columns']}\n";
+                        }
+                    }
+                    echo "\n";
+                }
             }
             break;
 

@@ -67,7 +67,7 @@ class SqlParser
 
         $token = $this->current();
         $stmt = match($token['type']) {
-            SqlLexer::T_SELECT => $this->parseSelectStatement(),
+            SqlLexer::T_SELECT => $this->parseSelectOrUnion(),
             SqlLexer::T_INSERT => $this->parseInsertStatement(),
             SqlLexer::T_UPDATE => $this->parseUpdateStatement(),
             SqlLexer::T_DELETE => $this->parseDeleteStatement(),
@@ -77,23 +77,6 @@ class SqlParser
                 $token['pos']
             )
         };
-
-        // Handle set operations: UNION [ALL], INTERSECT [ALL], EXCEPT [ALL]
-        while (true) {
-            $operator = null;
-            if ($this->match(SqlLexer::T_UNION)) {
-                $operator = 'UNION';
-            } elseif ($this->match(SqlLexer::T_INTERSECT)) {
-                $operator = 'INTERSECT';
-            } elseif ($this->match(SqlLexer::T_EXCEPT)) {
-                $operator = 'EXCEPT';
-            } else {
-                break;
-            }
-            $all = $this->match(SqlLexer::T_ALL);
-            $right = $this->parseSelectStatement();
-            $stmt = new AST\UnionNode($stmt, $right, $all, $operator);
-        }
 
         if ($this->current()['type'] !== SqlLexer::T_EOF) {
             throw new SqlSyntaxException(
@@ -279,6 +262,68 @@ class SqlParser
         return $stmt;
     }
 
+    /**
+     * Parse a query that may start with WITH or SELECT, and may include UNION/INTERSECT/EXCEPT
+     * Used for subqueries in derived tables, IN clauses, EXISTS, etc.
+     */
+    private function parseSelectOrUnion(): ASTNode
+    {
+        // Handle WITH clause (CTE) in subquery context
+        if ($this->current()['type'] === SqlLexer::T_WITH) {
+            return $this->parseWithBody();
+        }
+
+        $stmt = $this->parseSelectStatement();
+
+        while (true) {
+            $operator = null;
+            if ($this->match(SqlLexer::T_UNION)) {
+                $operator = 'UNION';
+            } elseif ($this->match(SqlLexer::T_INTERSECT)) {
+                $operator = 'INTERSECT';
+            } elseif ($this->match(SqlLexer::T_EXCEPT)) {
+                $operator = 'EXCEPT';
+            } else {
+                break;
+            }
+            $all = $this->match(SqlLexer::T_ALL);
+            $right = $this->parseSelectStatement();
+            $stmt = new AST\UnionNode($stmt, $right, $all, $operator);
+        }
+
+        return $stmt;
+    }
+
+    /**
+     * Parse WITH statement body (CTEs + main query) without EOF validation
+     * Used for WITH inside subqueries where EOF check is inappropriate
+     */
+    private function parseWithBody(): WithStatement
+    {
+        $this->expect(SqlLexer::T_WITH);
+
+        $recursive = $this->match(SqlLexer::T_RECURSIVE);
+
+        $ctes = [];
+        do {
+            $cte = $this->parseCteDefinition();
+            $ctes[] = $cte;
+        } while ($this->match(SqlLexer::T_COMMA));
+
+        // Parse the main query
+        if ($this->current()['type'] !== SqlLexer::T_SELECT) {
+            throw new SqlSyntaxException(
+                "Expected SELECT after WITH clause",
+                $this->sql,
+                $this->current()['pos']
+            );
+        }
+
+        $mainQuery = $this->parseSelectOrUnion();
+
+        return new WithStatement($ctes, $recursive, $mainQuery);
+    }
+
     private function parseInsertStatement(): InsertStatement
     {
         $this->expect(SqlLexer::T_INSERT);
@@ -349,52 +394,11 @@ class SqlParser
     }
 
     /**
-     * Parse WITH statement (Common Table Expressions)
-     *
-     * WITH [RECURSIVE]
-     *   cte_name [(column_list)] AS (select_statement)
-     *   [, cte_name [(column_list)] AS (select_statement)]...
-     * main_statement
+     * Parse WITH statement at top level (with EOF validation)
      */
     private function parseWithStatement(): WithStatement
     {
-        $this->expect(SqlLexer::T_WITH);
-
-        $recursive = $this->match(SqlLexer::T_RECURSIVE);
-
-        $ctes = [];
-        do {
-            $cte = $this->parseCteDefinition();
-            $ctes[] = $cte;
-        } while ($this->match(SqlLexer::T_COMMA));
-
-        // Parse the main query (SELECT only for now, can extend to INSERT/UPDATE/DELETE later)
-        if ($this->current()['type'] !== SqlLexer::T_SELECT) {
-            throw new SqlSyntaxException(
-                "Expected SELECT after WITH clause",
-                $this->sql,
-                $this->current()['pos']
-            );
-        }
-
-        $mainQuery = $this->parseSelectStatement();
-
-        // Handle UNION/INTERSECT/EXCEPT after the main query
-        while (true) {
-            $operator = null;
-            if ($this->match(SqlLexer::T_UNION)) {
-                $operator = 'UNION';
-            } elseif ($this->match(SqlLexer::T_INTERSECT)) {
-                $operator = 'INTERSECT';
-            } elseif ($this->match(SqlLexer::T_EXCEPT)) {
-                $operator = 'EXCEPT';
-            } else {
-                break;
-            }
-            $all = $this->match(SqlLexer::T_ALL);
-            $right = $this->parseSelectStatement();
-            $mainQuery = new AST\UnionNode($mainQuery, $right, $all, $operator);
-        }
+        $stmt = $this->parseWithBody();
 
         if ($this->current()['type'] !== SqlLexer::T_EOF) {
             throw new SqlSyntaxException(
@@ -404,7 +408,7 @@ class SqlParser
             );
         }
 
-        return new WithStatement($ctes, $recursive, $mainQuery);
+        return $stmt;
     }
 
     /**
@@ -429,25 +433,8 @@ class SqlParser
         $this->expect(SqlLexer::T_AS);
         $this->expect(SqlLexer::T_LPAREN);
 
-        // Parse the CTE query (can be SELECT or UNION)
-        $query = $this->parseSelectStatement();
-
-        // Handle UNION inside CTE
-        while (true) {
-            $operator = null;
-            if ($this->match(SqlLexer::T_UNION)) {
-                $operator = 'UNION';
-            } elseif ($this->match(SqlLexer::T_INTERSECT)) {
-                $operator = 'INTERSECT';
-            } elseif ($this->match(SqlLexer::T_EXCEPT)) {
-                $operator = 'EXCEPT';
-            } else {
-                break;
-            }
-            $all = $this->match(SqlLexer::T_ALL);
-            $right = $this->parseSelectStatement();
-            $query = new AST\UnionNode($query, $right, $all, $operator);
-        }
+        // Parse the CTE query (supports UNION/INTERSECT/EXCEPT)
+        $query = $this->parseSelectOrUnion();
 
         $this->expect(SqlLexer::T_RPAREN);
 
@@ -542,9 +529,9 @@ class SqlParser
             }
 
             if ($quantifier !== null) {
-                // Must be followed by subquery
+                // Must be followed by subquery (supports UNION/INTERSECT/EXCEPT)
                 $this->expect(SqlLexer::T_LPAREN);
-                $subquery = $this->parseSelectStatement();
+                $subquery = $this->parseSelectOrUnion();
                 $this->expect(SqlLexer::T_RPAREN);
                 return new AST\QuantifiedComparisonNode($left, $op, $quantifier, new SubqueryNode($subquery));
             }
@@ -610,9 +597,9 @@ class SqlParser
     {
         $this->expect(SqlLexer::T_LPAREN);
 
-        // Check for Subquery
+        // Check for Subquery (supports UNION/INTERSECT/EXCEPT)
         if ($this->current()['type'] === SqlLexer::T_SELECT) {
-            $subquery = $this->parseSelectStatement();
+            $subquery = $this->parseSelectOrUnion();
             $this->expect(SqlLexer::T_RPAREN);
             return new InOperation($left, new SubqueryNode($subquery), $negated);
         } else {
@@ -629,18 +616,19 @@ class SqlParser
     private function parseExistsOperation(bool $negated): AST\ExistsOperation
     {
         $this->expect(SqlLexer::T_LPAREN);
-        $subquery = $this->parseSelectStatement();
+        $subquery = $this->parseSelectOrUnion();
         $this->expect(SqlLexer::T_RPAREN);
         return new AST\ExistsOperation(new SubqueryNode($subquery), $negated);
     }
 
     /**
      * Parse a derived table: (SELECT ...) in FROM position
+     * Supports UNION/INTERSECT/EXCEPT inside the subquery
      */
     private function parseDerivedTable(): SubqueryNode
     {
         $this->expect(SqlLexer::T_LPAREN);
-        $subquery = $this->parseSelectStatement();
+        $subquery = $this->parseSelectOrUnion();
         $this->expect(SqlLexer::T_RPAREN);
         return new SubqueryNode($subquery);
     }
@@ -727,6 +715,17 @@ class SqlParser
         // Handle CASE expressions
         if ($this->match(SqlLexer::T_CASE)) {
             return $this->parseCaseExpression();
+        }
+
+        // Handle niladic functions (SQL standard functions without parentheses)
+        if ($this->match(SqlLexer::T_CURRENT_DATE)) {
+            return new AST\NiladicFunctionNode('CURRENT_DATE');
+        }
+        if ($this->match(SqlLexer::T_CURRENT_TIME)) {
+            return new AST\NiladicFunctionNode('CURRENT_TIME');
+        }
+        if ($this->match(SqlLexer::T_CURRENT_TIMESTAMP)) {
+            return new AST\NiladicFunctionNode('CURRENT_TIMESTAMP');
         }
 
         // Handle Identifiers, Qualified Names (table.column), and Function Calls

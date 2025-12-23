@@ -15,7 +15,8 @@ use mini\Parsing\SQL\AST\{
     LikeOperation,
     BetweenOperation,
     CaseWhenNode,
-    SubqueryNode
+    SubqueryNode,
+    NiladicFunctionNode
 };
 
 /**
@@ -106,6 +107,11 @@ class ExpressionEvaluator
         // Scalar subquery
         if ($node instanceof SubqueryNode) {
             return $this->evaluateSubquery($node, $row, $context);
+        }
+
+        // Niladic functions (CURRENT_DATE, CURRENT_TIME, CURRENT_TIMESTAMP)
+        if ($node instanceof NiladicFunctionNode) {
+            return $this->evaluateNiladicFunction($node);
         }
 
         throw new \RuntimeException("Cannot evaluate expression type: " . get_class($node));
@@ -455,5 +461,18 @@ class ExpressionEvaluator
         }
 
         return reset($props); // Return first column value
+    }
+
+    /**
+     * Evaluate niladic function (CURRENT_DATE, CURRENT_TIME, CURRENT_TIMESTAMP)
+     */
+    private function evaluateNiladicFunction(NiladicFunctionNode $node): string
+    {
+        return match ($node->name) {
+            'CURRENT_DATE' => date('Y-m-d'),
+            'CURRENT_TIME' => date('H:i:s'),
+            'CURRENT_TIMESTAMP' => date('Y-m-d H:i:s'),
+            default => throw new \RuntimeException("Unknown niladic function: {$node->name}")
+        };
     }
 }

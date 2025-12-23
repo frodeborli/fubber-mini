@@ -1624,6 +1624,46 @@ n
 CSV;
         $this->assertSame($expected, $result);
     }
+
+    // =========================================================================
+    // Niladic Functions (SQL standard functions without parentheses)
+    // =========================================================================
+
+    public function testCurrentDate(): void
+    {
+        // CURRENT_DATE returns date in YYYY-MM-DD format
+        $result = $this->query('SELECT CURRENT_DATE AS dt;');
+        $lines = explode("\n", $result);
+        $this->assertSame('dt', $lines[0]);
+        $this->assertTrue(preg_match('/^\d{4}-\d{2}-\d{2}$/', $lines[1]) === 1);
+    }
+
+    public function testCurrentTime(): void
+    {
+        // CURRENT_TIME returns time in HH:MM:SS format
+        $result = $this->query('SELECT CURRENT_TIME AS tm;');
+        $lines = explode("\n", $result);
+        $this->assertSame('tm', $lines[0]);
+        $this->assertTrue(preg_match('/^\d{2}:\d{2}:\d{2}$/', $lines[1]) === 1);
+    }
+
+    public function testCurrentTimestamp(): void
+    {
+        // CURRENT_TIMESTAMP returns datetime in YYYY-MM-DD HH:MM:SS format
+        $result = $this->query('SELECT CURRENT_TIMESTAMP AS ts;');
+        $lines = explode("\n", $result);
+        $this->assertSame('ts', $lines[0]);
+        $this->assertTrue(preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $lines[1]) === 1);
+    }
+
+    public function testNiladicInExpression(): void
+    {
+        // Niladic functions can be used in expressions
+        $result = $this->query("SELECT SUBSTR(CURRENT_DATE, 1, 4) AS year;");
+        $lines = explode("\n", $result);
+        $this->assertSame('year', $lines[0]);
+        $this->assertSame(date('Y'), $lines[1]);
+    }
 };
 
 exit($test->run());

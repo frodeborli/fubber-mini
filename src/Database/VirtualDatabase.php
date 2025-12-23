@@ -526,11 +526,51 @@ class VirtualDatabase implements DatabaseInterface
     /**
      * {@inheritdoc}
      */
-    public function buildSchemaTable(string $tableName): void
+    public function getSchema(): \mini\Table\Contracts\TableInterface
     {
-        // Create an InMemoryTable with schema structure
-        $schemaTable = new \mini\Table\InMemoryTable(
-            new \mini\Table\ColumnDef('table_name', \mini\Table\Types\ColumnType::Text, \mini\Table\Types\IndexType::Index),
+        $tables = $this->tables;
+
+        return new \mini\Table\GeneratorTable(
+            function () use ($tables): \Generator {
+                $rowKey = 0;
+
+                foreach ($tables as $tblName => $table) {
+                    $ordinal = 0;
+                    foreach ($table->getColumns() as $colName => $colDef) {
+                        $ordinal++;
+                        yield $rowKey++ => (object)[
+                            'table_name' => $tblName,
+                            'name' => $colName,
+                            'type' => 'column',
+                            'data_type' => $colDef->type->name,
+                            'is_nullable' => 1,  // VirtualDatabase tables don't track nullability
+                            'default_value' => null,
+                            'ordinal' => $ordinal,
+                            'extra' => null,
+                        ];
+
+                        // Add index info if column has an index
+                        if ($colDef->index !== \mini\Table\Types\IndexType::None) {
+                            $indexType = match ($colDef->index) {
+                                \mini\Table\Types\IndexType::Primary => 'primary',
+                                \mini\Table\Types\IndexType::Unique => 'unique',
+                                default => 'index',
+                            };
+                            yield $rowKey++ => (object)[
+                                'table_name' => $tblName,
+                                'name' => $colName . '_idx',
+                                'type' => $indexType,
+                                'data_type' => null,
+                                'is_nullable' => null,
+                                'default_value' => null,
+                                'ordinal' => null,
+                                'extra' => $colName,
+                            ];
+                        }
+                    }
+                }
+            },
+            new \mini\Table\ColumnDef('table_name', \mini\Table\Types\ColumnType::Text),
             new \mini\Table\ColumnDef('name', \mini\Table\Types\ColumnType::Text),
             new \mini\Table\ColumnDef('type', \mini\Table\Types\ColumnType::Text),
             new \mini\Table\ColumnDef('data_type', \mini\Table\Types\ColumnType::Text),
@@ -539,50 +579,6 @@ class VirtualDatabase implements DatabaseInterface
             new \mini\Table\ColumnDef('ordinal', \mini\Table\Types\ColumnType::Int),
             new \mini\Table\ColumnDef('extra', \mini\Table\Types\ColumnType::Text),
         );
-
-        // Populate with schema info
-        foreach ($this->tables as $tblName => $table) {
-            // Skip the schema table itself
-            if (strtolower($tblName) === strtolower($tableName)) {
-                continue;
-            }
-
-            $ordinal = 0;
-            foreach ($table->getColumns() as $colName => $colDef) {
-                $ordinal++;
-                $schemaTable->insert([
-                    'table_name' => $tblName,
-                    'name' => $colName,
-                    'type' => 'column',
-                    'data_type' => $colDef->type->name,
-                    'is_nullable' => 1,
-                    'default_value' => null,
-                    'ordinal' => $ordinal,
-                    'extra' => null,
-                ]);
-
-                // Add index info if column has an index
-                if ($colDef->index !== \mini\Table\Types\IndexType::None) {
-                    $indexType = match ($colDef->index) {
-                        \mini\Table\Types\IndexType::Primary => 'primary',
-                        \mini\Table\Types\IndexType::Unique => 'unique',
-                        default => 'index',
-                    };
-                    $schemaTable->insert([
-                        'table_name' => $tblName,
-                        'name' => $colName . '_idx',
-                        'type' => $indexType,
-                        'data_type' => null,
-                        'is_nullable' => null,
-                        'default_value' => null,
-                        'ordinal' => null,
-                        'extra' => $colName,
-                    ]);
-                }
-            }
-        }
-
-        $this->registerTable($tableName, $schemaTable);
     }
 
     private function parseAndBind(string $sql, array $params): object
@@ -1879,7 +1875,15 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function executeDerivedTable(SubqueryNode $subquery, ?string $alias): TableInterface
     {
-        // Execute the inner SELECT
+        // Execute the inner query (SELECT, UNION, or WITH)
+        if ($subquery->query instanceof UnionNode) {
+            return $this->executeUnionAsTable($subquery->query);
+        }
+        if ($subquery->query instanceof WithStatement) {
+            // Execute WITH and materialize to table
+            $resultSet = $this->executeWithStatement($subquery->query);
+            return $this->rowsToTable(iterator_to_array($resultSet));
+        }
         $rows = iterator_to_array($this->executeSelect($subquery->query));
 
         if (empty($rows)) {

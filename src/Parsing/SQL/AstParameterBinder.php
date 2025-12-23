@@ -127,12 +127,17 @@ class AstParameterBinder
 
         if ($node instanceof FunctionCallNode) {
             $new = clone $node;
-            $new->args = array_map(fn($arg) => $this->bindNode($arg), $node->args);
+            $new->arguments = array_map(fn($arg) => $this->bindNode($arg), $node->arguments);
             return $new;
         }
 
         if ($node instanceof SelectStatement) {
             $new = clone $node;
+
+            // Bind FROM (may be a subquery/derived table)
+            if ($node->from instanceof ASTNode) {
+                $new->from = $this->bindNode($node->from);
+            }
 
             // Bind columns (may contain placeholders in expressions)
             $new->columns = array_map(fn($col) => $this->bindNode($col), $node->columns);
