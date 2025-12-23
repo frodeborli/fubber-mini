@@ -9,6 +9,7 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 
 use mini\Test;
 use mini\Database\VirtualDatabase;
+use mini\Database\MutablePartialQuery;
 use mini\Table\InMemoryTable;
 use mini\Table\ColumnDef;
 use mini\Table\Types\ColumnType;
@@ -1119,6 +1120,143 @@ $test = new class extends Test {
         ));
         $this->assertCount(1, $rows);
         $this->assertSame('B', $rows[0]->category);
+    }
+
+    // -------------------------------------------------------------------------
+    // Nested VirtualDatabase tests
+    // -------------------------------------------------------------------------
+
+    public function testNestedVdbSelect(): void
+    {
+        // Create base VDB with users table
+        $usersTable = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('name', ColumnType::Text),
+            new ColumnDef('gender', ColumnType::Text),
+            new ColumnDef('age', ColumnType::Int),
+        );
+        $usersTable->insert(['id' => 1, 'name' => 'Alice', 'gender' => 'female', 'age' => 25]);
+        $usersTable->insert(['id' => 2, 'name' => 'Bob', 'gender' => 'male', 'age' => 30]);
+        $usersTable->insert(['id' => 3, 'name' => 'Charlie', 'gender' => 'male', 'age' => 17]);
+        $usersTable->insert(['id' => 4, 'name' => 'Dave', 'gender' => 'male', 'age' => 45]);
+
+        // VDB1: Filter by gender='male'
+        $vdb1 = new VirtualDatabase();
+        $vdb1->registerTable('users', $usersTable);
+
+        // VDB2: Wrap VDB1 query with additional filter
+        $vdb2 = new VirtualDatabase();
+        $vdb2->registerTable('users', $vdb1->query("SELECT * FROM users WHERE gender = 'male'"));
+
+        // Query VDB2 with age filter
+        $rows = iterator_to_array($vdb2->query('SELECT * FROM users WHERE age >= 18 ORDER BY id'));
+
+        $this->assertCount(2, $rows);
+        $this->assertSame('Bob', $rows[0]->name);
+        $this->assertSame('Dave', $rows[1]->name);
+    }
+
+    public function testThreeLevelNestedVdb(): void
+    {
+        $usersTable = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('name', ColumnType::Text),
+            new ColumnDef('status', ColumnType::Text),
+            new ColumnDef('score', ColumnType::Int),
+        );
+        $usersTable->insert(['id' => 1, 'name' => 'Alice', 'status' => 'active', 'score' => 50]);
+        $usersTable->insert(['id' => 2, 'name' => 'Bob', 'status' => 'active', 'score' => 80]);
+        $usersTable->insert(['id' => 3, 'name' => 'Charlie', 'status' => 'inactive', 'score' => 90]);
+        $usersTable->insert(['id' => 4, 'name' => 'Dave', 'status' => 'active', 'score' => 30]);
+
+        // Level 1: All users
+        $vdb1 = new VirtualDatabase();
+        $vdb1->registerTable('users', $usersTable);
+
+        // Level 2: Only active users
+        $vdb2 = new VirtualDatabase();
+        $vdb2->registerTable('users', $vdb1->query("SELECT * FROM users WHERE status = 'active'"));
+
+        // Level 3: Only high scorers (score >= 50)
+        $vdb3 = new VirtualDatabase();
+        $vdb3->registerTable('users', $vdb2->query('SELECT * FROM users WHERE score >= 50'));
+
+        // Query level 3 - should get only active users with score >= 50
+        $rows = iterator_to_array($vdb3->query('SELECT * FROM users ORDER BY id'));
+
+        $this->assertCount(2, $rows);
+        $this->assertSame('Alice', $rows[0]->name);  // active, score 50
+        $this->assertSame('Bob', $rows[1]->name);    // active, score 80
+        // Charlie excluded (inactive), Dave excluded (score 30)
+    }
+
+    public function testNestedVdbWithMutablePartialQuery(): void
+    {
+        $usersTable = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('name', ColumnType::Text),
+            new ColumnDef('role', ColumnType::Text),
+        );
+        $usersTable->insert(['id' => 1, 'name' => 'Alice', 'role' => 'admin']);
+        $usersTable->insert(['id' => 2, 'name' => 'Bob', 'role' => 'user']);
+
+        // VDB1 with MutablePartialQuery (allows mutations with constraints)
+        $vdb1 = new VirtualDatabase();
+        $mutableUsers = new MutablePartialQuery(
+            $vdb1->query("SELECT * FROM users WHERE role = 'user'"),
+            $vdb1
+        );
+        $vdb1->registerTable('users', $usersTable);
+        $vdb1->registerTable('user_users', $mutableUsers);
+
+        // VDB2 wraps VDB1's mutable table
+        $vdb2 = new VirtualDatabase();
+        $vdb2->registerTable('users', new MutablePartialQuery(
+            $vdb1->query("SELECT * FROM user_users"),
+            $vdb1
+        ));
+
+        // Query works
+        $rows = iterator_to_array($vdb2->query('SELECT * FROM users'));
+        $this->assertCount(1, $rows);
+        $this->assertSame('Bob', $rows[0]->name);
+
+        // Insert through VDB2 (must match role='user' constraint)
+        $vdb2->exec("INSERT INTO users (id, name, role) VALUES (3, 'Charlie', 'user')");
+
+        // Verify insert worked
+        $rows = iterator_to_array($vdb2->query('SELECT * FROM users ORDER BY id'));
+        $this->assertCount(2, $rows);
+        $this->assertSame('Charlie', $rows[1]->name);
+
+        // Insert violating constraint should fail
+        $this->expectException(\RuntimeException::class);
+        $vdb2->exec("INSERT INTO users (id, name, role) VALUES (4, 'Dave', 'admin')");
+    }
+
+    public function testVdbQueryReturnsPartialQueryWithQuotedIdentifiers(): void
+    {
+        // Test that VDB queries using quoteIdentifier() work when nested
+        $usersTable = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('user name', ColumnType::Text),  // Column with space
+        );
+        $usersTable->insert(['id' => 1, 'user name' => 'Alice']);
+        $usersTable->insert(['id' => 2, 'user name' => 'Bob']);
+
+        $vdb1 = new VirtualDatabase();
+        $vdb1->registerTable('users', $usersTable);
+
+        // Query with special column name - generates quoted identifier
+        $query = $vdb1->query('SELECT * FROM users')->eq('user name', 'Alice');
+
+        // Nested VDB should parse the quoted identifier correctly
+        $vdb2 = new VirtualDatabase();
+        $vdb2->registerTable('users', $query);
+
+        $rows = iterator_to_array($vdb2->query('SELECT * FROM users'));
+        $this->assertCount(1, $rows);
+        $this->assertSame('Alice', $rows[0]->{'user name'});
     }
 };
 

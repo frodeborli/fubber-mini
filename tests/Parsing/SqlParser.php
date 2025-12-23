@@ -98,12 +98,41 @@ assert_eq('id', $ast->columns[0]->expression->getName());
 assert_eq(['mydb', 'users'], $ast->columns[0]->expression->getQualifier());
 echo "✓ Schema-qualified names work\n";
 
-// Test: Quoted identifiers with dots inside
+// Test: Quoted identifiers with dots inside (backticks)
 $ast = $parser->parse('SELECT `my.table`.`weird-col` FROM `my.table`');
 assert_eq(['my.table', 'weird-col'], $ast->columns[0]->expression->parts);
 assert_eq('weird-col', $ast->columns[0]->expression->getName());
 assert_eq('my.table.weird-col', $ast->columns[0]->expression->getFullName());
-echo "✓ Quoted identifiers with internal dots work\n";
+echo "✓ Backtick-quoted identifiers with internal dots work\n";
+
+// Test: Double-quoted identifiers (standard SQL)
+$lexer = new SqlLexer('SELECT "column name" FROM "table name"');
+$tokens = $lexer->tokenize();
+assert_eq('IDENTIFIER', $tokens[1]['type']);
+assert_eq('column name', $tokens[1]['value']);
+assert_eq('IDENTIFIER', $tokens[3]['type']);
+assert_eq('table name', $tokens[3]['value']);
+echo "✓ Double-quoted identifiers tokenize correctly\n";
+
+// Test: Double-quoted identifiers with escaped quotes
+$lexer = new SqlLexer('SELECT "col""name" FROM t');
+$tokens = $lexer->tokenize();
+assert_eq('IDENTIFIER', $tokens[1]['type']);
+assert_eq('col"name', $tokens[1]['value']);
+echo "✓ Escaped double quotes in identifiers work\n";
+
+// Test: Double-quoted identifiers parse correctly
+$ast = $parser->parse('SELECT "user name", "order-date" FROM "my table"');
+assert_eq(['user name'], $ast->columns[0]->expression->parts);
+assert_eq(['order-date'], $ast->columns[1]->expression->parts);
+assert_eq('my table', $ast->from->getName());
+echo "✓ Double-quoted identifiers parse correctly\n";
+
+// Test: Mixed quote styles (backticks and double quotes)
+$ast = $parser->parse('SELECT `col1`, "col2" FROM `t1`');
+assert_eq(['col1'], $ast->columns[0]->expression->parts);
+assert_eq(['col2'], $ast->columns[1]->expression->parts);
+echo "✓ Mixed backtick and double-quote identifiers work\n";
 
 // Test: Arithmetic with proper precedence (multiplication before addition)
 $ast = $parser->parse('SELECT a + b * c FROM t');

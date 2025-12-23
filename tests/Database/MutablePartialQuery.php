@@ -10,7 +10,12 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 use mini\Test;
 use mini\Database\MutablePartialQuery;
 use mini\Database\PartialQuery;
+use mini\Database\VirtualDatabase;
 use mini\Table\Contracts\MutableTableInterface;
+use mini\Table\InMemoryTable;
+use mini\Table\ColumnDef;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
 
 $test = new class extends Test {
 
@@ -427,6 +432,141 @@ $test = new class extends Test {
 
         $this->assertEquals(['A', 'B'], $rows);
         $this->dropTable();
+    }
+
+    // -------------------------------------------------------------------------
+    // VirtualDatabase integration tests
+    // -------------------------------------------------------------------------
+
+    public function testWithVirtualDatabaseAndInMemoryTable(): void
+    {
+        $usersTable = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('name', ColumnType::Text),
+            new ColumnDef('role', ColumnType::Text),
+        );
+        $usersTable->insert(['id' => 1, 'name' => 'Alice', 'role' => 'admin']);
+        $usersTable->insert(['id' => 2, 'name' => 'Bob', 'role' => 'user']);
+
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('users', $usersTable);
+
+        // Create MutablePartialQuery filtering by role='user'
+        $mutable = new MutablePartialQuery(
+            $vdb->query("SELECT * FROM users WHERE role = 'user'"),
+            $vdb
+        );
+
+        // Query works
+        $rows = iterator_to_array($mutable);
+        $this->assertCount(1, $rows);
+        $this->assertEquals('Bob', $rows[0]->name);
+
+        // Insert valid row (role='user')
+        $mutable->insert(['id' => 3, 'name' => 'Charlie', 'role' => 'user']);
+        $this->assertCount(2, iterator_to_array($mutable));
+
+        // Insert invalid row (role='admin') should fail
+        $threw = false;
+        try {
+            $mutable->insert(['id' => 4, 'name' => 'Dave', 'role' => 'admin']);
+        } catch (\RuntimeException $e) {
+            $threw = true;
+            $this->assertContains('Row violates query constraints', $e->getMessage());
+        }
+        $this->assertTrue($threw);
+    }
+
+    public function testWithVdbConstraintsFromBaseSqlAndPredicate(): void
+    {
+        $usersTable = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('name', ColumnType::Text),
+            new ColumnDef('status', ColumnType::Text),
+            new ColumnDef('score', ColumnType::Int),
+        );
+        $usersTable->insert(['id' => 1, 'name' => 'Alice', 'status' => 'active', 'score' => 80]);
+
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('users', $usersTable);
+
+        // Base SQL has status='active', predicate has score >= 50
+        $mutable = new MutablePartialQuery(
+            $vdb->query("SELECT * FROM users WHERE status = 'active'")->gte('score', 50),
+            $vdb
+        );
+
+        // Valid: active with score 60
+        $mutable->insert(['id' => 2, 'name' => 'Bob', 'status' => 'active', 'score' => 60]);
+        $this->assertCount(2, iterator_to_array($mutable));
+
+        // Invalid: inactive status
+        $threw = false;
+        try {
+            $mutable->insert(['id' => 3, 'name' => 'Charlie', 'status' => 'inactive', 'score' => 70]);
+        } catch (\RuntimeException $e) {
+            $threw = true;
+        }
+        $this->assertTrue($threw, 'Expected exception for inactive status');
+
+        // Invalid: active but score too low
+        $threw = false;
+        try {
+            $mutable->insert(['id' => 4, 'name' => 'Dave', 'status' => 'active', 'score' => 30]);
+        } catch (\RuntimeException $e) {
+            $threw = true;
+        }
+        $this->assertTrue($threw, 'Expected exception for low score');
+    }
+
+    public function testNestedVdbWithMutablePartialQuery(): void
+    {
+        $usersTable = new InMemoryTable(
+            new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+            new ColumnDef('name', ColumnType::Text),
+            new ColumnDef('level', ColumnType::Int),
+        );
+        $usersTable->insert(['id' => 1, 'name' => 'Alice', 'level' => 1]);
+        $usersTable->insert(['id' => 2, 'name' => 'Bob', 'level' => 2]);
+
+        // VDB1 with base table
+        $vdb1 = new VirtualDatabase();
+        $vdb1->registerTable('users', $usersTable);
+
+        // VDB1 also exposes a mutable view with constraint
+        $mutableLevel2 = new MutablePartialQuery(
+            $vdb1->query('SELECT * FROM users WHERE level >= 2'),
+            $vdb1
+        );
+        $vdb1->registerTable('level2_users', $mutableLevel2);
+
+        // VDB2 uses VDB1's mutable view
+        $vdb2 = new VirtualDatabase();
+        $vdb2->registerTable('users', new MutablePartialQuery(
+            $vdb1->query('SELECT * FROM level2_users'),
+            $vdb1
+        ));
+
+        // Query through VDB2
+        $rows = iterator_to_array($vdb2->query('SELECT * FROM users'));
+        $this->assertCount(1, $rows);
+        $this->assertEquals('Bob', $rows[0]->name);
+
+        // Insert through VDB2 (must have level >= 2)
+        $vdb2->exec("INSERT INTO users (id, name, level) VALUES (3, 'Charlie', 3)");
+
+        $rows = iterator_to_array($vdb2->query('SELECT * FROM users ORDER BY id'));
+        $this->assertCount(2, $rows);
+        $this->assertEquals('Charlie', $rows[1]->name);
+
+        // Insert with level < 2 should fail
+        $threw = false;
+        try {
+            $vdb2->exec("INSERT INTO users (id, name, level) VALUES (4, 'Dave', 1)");
+        } catch (\RuntimeException $e) {
+            $threw = true;
+        }
+        $this->assertTrue($threw, 'Expected exception for level < 2');
     }
 };
 
