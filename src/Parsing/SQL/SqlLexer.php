@@ -10,7 +10,7 @@ namespace mini\Parsing\SQL;
  * - String escaping ('' and \')
  * - Positional (?) and named (:name) placeholders
  * - Comments (-- and # and /* *\/)
- * - Quoted identifiers (backticks)
+ * - Quoted identifiers: `backticks` (MySQL) and "double quotes" (standard SQL)
  * - Dot tokens for qualified names (table.column parsed in parser)
  * - Numbers with at most one decimal point
  */
@@ -260,17 +260,25 @@ class SqlLexer
             }
 
             // Identifiers and Keywords
-            if (ctype_alpha($char) || $char === '_' || $char === '`') {
-                $isQuoted = ($char === '`');
-                if ($isQuoted) {
+            // Supports: bare identifiers, `backtick` (MySQL), "double quote" (standard SQL)
+            if (ctype_alpha($char) || $char === '_' || $char === '`' || $char === '"') {
+                $quoteChar = null;
+                if ($char === '`' || $char === '"') {
+                    $quoteChar = $char;
                     $this->cursor++;
                 }
 
                 $word = '';
                 while ($this->cursor < $this->length) {
                     $c = $this->sql[$this->cursor];
-                    if ($isQuoted) {
-                        if ($c === '`') {
+                    if ($quoteChar !== null) {
+                        if ($c === $quoteChar) {
+                            // Handle escaped quotes (doubled quote chars)
+                            if ($this->cursor + 1 < $this->length && $this->sql[$this->cursor + 1] === $quoteChar) {
+                                $word .= $quoteChar;
+                                $this->cursor += 2;
+                                continue;
+                            }
                             $this->cursor++;
                             break;
                         }
@@ -288,7 +296,7 @@ class SqlLexer
                 $upper = strtoupper($word);
                 $type = self::T_IDENTIFIER;
 
-                if (!$isQuoted) {
+                if ($quoteChar === null) {
                     $type = match($upper) {
                         'SELECT' => self::T_SELECT,
                         'INSERT' => self::T_INSERT,
