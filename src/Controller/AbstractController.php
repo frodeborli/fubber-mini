@@ -64,7 +64,7 @@ abstract class AbstractController implements RequestHandlerInterface
      */
     public readonly Router $router;
 
-    final public function __construct()
+    public function __construct()
     {
         $this->router = new Router();
         $this->router->importRoutesFromAttributes($this);

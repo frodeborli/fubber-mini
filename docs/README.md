@@ -10,6 +10,15 @@ The primary documentation lives at the project root:
 - **[WRITING-DOCUMENTATION.md](../WRITING-DOCUMENTATION.md)** - Documentation standards and conventions
 - **[CLAUDE.md](../CLAUDE.md)** - Development guide for Claude Code
 
+## Tutorials
+
+Step-by-step guides for building applications:
+
+- **[cli-tools.md](cli-tools.md)** - Building command-line tools with argument parsing
+- **[sub-apps.md](sub-apps.md)** - Building sub-applications (admin panels, documentation browsers)
+- **[templates.md](templates.md)** - Template system with inheritance and blocks
+- **[web-apps.md](web-apps.md)** - Web application patterns
+
 ## Feature Documentation
 
 Each framework feature has comprehensive documentation in its source directory:
@@ -17,6 +26,7 @@ Each framework feature has comprehensive documentation in its source directory:
 - **[src/Auth/README.md](../src/Auth/README.md)** - Authentication system
 - **[src/Cache/README.md](../src/Cache/README.md)** - PSR-16 caching (APCu, SQLite, filesystem)
 - **[src/CLI/README.md](../src/CLI/README.md)** - Command-line argument parsing
+- **[src/Controller/README.md](../src/Controller/README.md)** - Attribute-based REST controllers
 - **[src/Database/README.md](../src/Database/README.md)** - PDO database abstraction
 - **[src/I18n/README.md](../src/I18n/README.md)** - Internationalization and formatting
 - **[src/Logger/README.md](../src/Logger/README.md)** - PSR-3 logging
