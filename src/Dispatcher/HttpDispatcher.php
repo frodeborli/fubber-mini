@@ -50,11 +50,39 @@ class HttpDispatcher
     /** @var array<MiddlewareInterface> Middleware stack (FIFO order) */
     private array $middlewares = [];
 
+    /**
+     * Event triggered before processing a request
+     *
+     * Listeners receive the ServerRequestInterface being processed.
+     * Use this for request-scoped initialization.
+     *
+     * @var \mini\Hooks\Event<ServerRequestInterface>
+     */
+    public readonly \mini\Hooks\Event $onBeforeRequest;
+
+    /**
+     * Event triggered after processing a request (in finally block)
+     *
+     * Always fires, even if an exception was thrown or response already sent.
+     * Use this for cleanup, session saving, logging, etc.
+     *
+     * Listeners receive: (ServerRequestInterface $request, ?ResponseInterface $response, ?\Throwable $exception)
+     * - $response is null if exception was thrown before response was created
+     * - $exception is the thrown exception (if any), null on success
+     *
+     * @var \mini\Hooks\Event<ServerRequestInterface, ?ResponseInterface, ?\Throwable>
+     */
+    public readonly \mini\Hooks\Event $onAfterRequest;
+
     public function __construct()
     {
         // Create separate converter registry for exceptions
         // This keeps exception handling separate from content conversion
         $this->exceptionConverters = new \mini\Converter\ConverterRegistry();
+
+        // Initialize request lifecycle hooks
+        $this->onBeforeRequest = new \mini\Hooks\Event('http.before-request');
+        $this->onAfterRequest = new \mini\Hooks\Event('http.after-request');
     }
 
     /**
@@ -146,6 +174,9 @@ class HttpDispatcher
      */
     public function dispatch(): void
     {
+        $response = null;
+        $exception = null;
+
         try {
             // 1. Register ServerRequest as Transient service that returns current request
             Mini::$mini->addService(
@@ -177,7 +208,10 @@ class HttpDispatcher
                 }
             );
 
-            // 7. Build middleware chain and dispatch into the framework
+            // 7. Trigger before-request hook
+            $this->onBeforeRequest->trigger($serverRequest);
+
+            // 8. Build middleware chain and dispatch into the framework
             try {
                 // Get the final handler (Router)
                 $handler = Mini::$mini->get(RequestHandlerInterface::class);
@@ -190,7 +224,7 @@ class HttpDispatcher
 
             } catch (ResponseAlreadySentException $e) {
                 // Response already sent using classical PHP (echo/header)
-                // Nothing more to do
+                // Nothing more to do - but still trigger after-request hook
                 return;
 
             } catch (\Throwable $e) {
@@ -199,16 +233,23 @@ class HttpDispatcher
 
                 if ($response === null) {
                     // No exception converter registered - rethrow
+                    $exception = $e;
                     throw $e;
                 }
             }
 
-            // 6. Emit response to browser
+            // 9. Emit response to browser
             $this->emitResponse($response);
 
         } catch (\Throwable $e) {
             // Last resort error handling
+            $exception = $e;
             $this->handleFatalError($e);
+        } finally {
+            // 10. Always trigger after-request hook for cleanup (session save, logging, etc.)
+            if ($this->currentServerRequest !== null) {
+                $this->onAfterRequest->trigger($this->currentServerRequest, $response, $exception);
+            }
         }
     }
 
@@ -271,6 +312,7 @@ class HttpDispatcher
         $_GET = new \mini\Http\RequestGlobalProxy('query');
         $_POST = new \mini\Http\RequestGlobalProxy('post');
         $_COOKIE = new \mini\Http\RequestGlobalProxy('cookie');
+        $_SESSION = new \mini\Session\SessionProxy();
 
         $installed = true;
     }
