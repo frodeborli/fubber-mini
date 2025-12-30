@@ -149,22 +149,7 @@ function flash_get(): array {
 }
 
 
-/**
- * Start session if not already started
- *
- * Safe wrapper around session_start() that prevents notices
- * when session is already active or disabled.
- *
- * @return bool True if session was started or already active, false if disabled or failed to start
- */
-function session(): bool {
-    if (session_status() === PHP_SESSION_NONE) {
-        return session_start();
-    }
-    return session_status() === PHP_SESSION_ACTIVE;
-}
-
-// Note: db() and cache() helpers are now in src/Database/functions.php and src/Cache/functions.php
+// Note: session(), db() and cache() helpers are now in src/ feature directories
 
 
 /**
