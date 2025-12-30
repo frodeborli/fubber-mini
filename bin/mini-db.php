@@ -13,7 +13,30 @@
  * Formats: markdown (default), json, csv
  */
 
-require_once dirname(__DIR__) . '/vendor/autoload.php';
+// Find nearest vendor/autoload.php by traversing up from cwd
+// Accept if: this IS fubber/mini (name match) OR requires fubber/mini (dependency)
+$dir = getcwd();
+$autoloaderFound = false;
+while ($dir !== '/' && $dir !== '') {
+    $autoloader = $dir . '/vendor/autoload.php';
+    $composerJson = $dir . '/composer.json';
+    if (file_exists($autoloader) && file_exists($composerJson)) {
+        $composer = json_decode(file_get_contents($composerJson), true);
+        $isMini = ($composer['name'] ?? '') === 'fubber/mini';
+        $requires = array_merge($composer['require'] ?? [], $composer['require-dev'] ?? []);
+        if ($isMini || isset($requires['fubber/mini'])) {
+            require_once $autoloader;
+            $autoloaderFound = true;
+            break;
+        }
+    }
+    $dir = dirname($dir);
+}
+if (!$autoloaderFound) {
+    fwrite(STDERR, "Error: Could not find Composer autoloader for a fubber/mini project\n");
+    fwrite(STDERR, "Run this from within a project that requires fubber/mini\n");
+    exit(1);
+}
 
 use mini\CLI\ReadlineManager;
 use mini\CLI\ArgManager;
