@@ -186,6 +186,36 @@ vendor/bin/mini serve
 
 Visit `http://localhost` - you're running!
 
+### Building CLI Tools
+
+Mini also provides argument parsing and logging for command-line tools:
+
+```bash
+composer require fubber/mini
+```
+
+```php
+#!/usr/bin/env php
+<?php
+require_once __DIR__ . '/../vendor/autoload.php';
+use function mini\args;
+
+args(args()
+    ->withFlag('v', 'verbose')
+    ->withRequiredValue('o', 'output')
+);
+
+if (args()->getUnparsedArgs()) {
+    fwrite(STDERR, "Unknown: " . implode(', ', args()->getUnparsedArgs()) . "\n");
+    exit(1);
+}
+
+$verbosity = args()->getFlag('verbose');  // 0, 1, 2, 3 for -v, -vv, -vvv
+$output = args()->getOption('output');
+```
+
+**See [docs/cli-tools.md](docs/cli-tools.md)** for subcommand patterns, verbosity-controlled logging, and complete examples.
+
 ## Routing: File System as Routing Table
 
 **Mini uses the file system as its routing table.** No regex parsing, no route compilation, no routing cache - just OS-level file lookups (microseconds, cached by the kernel).
@@ -940,6 +970,7 @@ Detailed documentation for each framework feature:
 - **[src/Hooks/README.md](src/Hooks/README.md)** - Event system, phase lifecycle, state machines
 - **[src/UUID/README.md](src/UUID/README.md)** - UUID v4/v7 generation
 - **[src/Metadata/README.md](src/Metadata/README.md)** - JSON Schema annotations via attributes
+- **[docs/cli-tools.md](docs/cli-tools.md)** - Building CLI tools with argument parsing, subcommands, and logging
 
 ### CLI Documentation Browser
 
