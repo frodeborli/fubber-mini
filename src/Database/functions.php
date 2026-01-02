@@ -149,7 +149,7 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
  * Get the database service instance
  *
  * Returns a lazy-loaded DatabaseInterface for executing queries.
- * Configuration is loaded from _config/database.php on first use.
+ * Configuration is loaded from _config/mini/Database/DatabaseInterface.php on first use.
  *
  * @return DatabaseInterface The database service
  */
