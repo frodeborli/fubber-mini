@@ -38,10 +38,13 @@ $availableCommands = [
         ]
     ],
     'migrations' => [
-        'description' => 'Run database migrations',
+        'description' => 'Run migrations with tracking and rollback',
         'script' => 'mini-migrations.php',
         'examples' => [
-            'migrations' => 'Run all pending migrations'
+            'migrations' => 'Run all pending migrations',
+            'migrations status' => 'Show migration status',
+            'migrations rollback' => 'Rollback last batch',
+            'migrations make create_users' => 'Create new migration file'
         ]
     ],
     'docs' => [

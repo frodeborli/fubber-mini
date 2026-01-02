@@ -3,7 +3,7 @@
  * Test Mini::set() method using class-based test pattern
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Mini;
 use mini\Lifetime;

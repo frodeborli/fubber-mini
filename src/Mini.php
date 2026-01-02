@@ -11,6 +11,9 @@ use mini\Util\PathsRegistry;
 use Psr\Container\ContainerInterface;
 use Psr\Container\NotFoundExceptionInterface;
 use ReflectionClass;
+use ReflectionFunction;
+use ReflectionMethod;
+use ReflectionParameter;
 use RuntimeException;
 use WeakMap;
 
@@ -481,8 +484,180 @@ final class Mini implements ContainerInterface {
         throw new \LogicException("Unknown lifetime: " . $lifetime->name);
     }
 
+    /**
+     * Create a closure that invokes a callable or constructs a class with dependency injection.
+     *
+     * Returns a closure that, when called, resolves dependencies and invokes the target:
+     * - For class-string: constructs the class via its constructor
+     * - For callable: invokes the callable directly
+     *
+     * Parameter resolution priority:
+     * 1. Named arguments from $namedArguments (trusted as correct type)
+     * 2. Service from container if registered for the parameter's type
+     * 3. DependencyInjectionException if neither is available
+     *
+     * @template T of object
+     * @param class-string<T>|callable $target Class name to construct or callable to invoke
+     * @param array<string, mixed> $namedArguments Named arguments to inject (variadic params require array values)
+     * @return ($target is class-string<T> ? Closure(): T : Closure(): mixed)
+     * @throws Exceptions\DependencyInjectionException If a required dependency cannot be resolved
+     *
+     * @example Constructor injection
+     * ```php
+     * $factory = Mini::$mini->inject(MyService::class, ['config' => $myConfig]);
+     * $service = $factory(); // Constructs MyService with injected dependencies
+     * ```
+     *
+     * @example Method injection
+     * ```php
+     * $invoker = Mini::$mini->inject([$migration, 'up']);
+     * $invoker(); // Calls $migration->up() with injected dependencies
+     * ```
+     *
+     * @example Closure injection
+     * ```php
+     * $invoker = Mini::$mini->inject(function(PDO $db, Logger $log) { ... });
+     * $invoker(); // Calls closure with PDO and Logger from container
+     * ```
+     */
+    public function inject(string|callable $target, array $namedArguments = []): Closure {
+        // Determine reflection source
+        if (is_string($target) && class_exists($target)) {
+            $reflectionClass = new ReflectionClass($target);
+            $constructor = $reflectionClass->getConstructor();
+            $parameters = $constructor ? $constructor->getParameters() : [];
+            $isConstructor = true;
+        } elseif (is_array($target) && count($target) === 2) {
+            $reflectionMethod = new ReflectionMethod($target[0], $target[1]);
+            $parameters = $reflectionMethod->getParameters();
+            $isConstructor = false;
+        } elseif ($target instanceof Closure || is_callable($target)) {
+            $reflectionFunction = new ReflectionFunction(Closure::fromCallable($target));
+            $parameters = $reflectionFunction->getParameters();
+            $isConstructor = false;
+        } else {
+            throw new Exceptions\DependencyInjectionException(
+                "Target must be a class-string or callable, got: " . gettype($target)
+            );
+        }
+
+        // Build arguments array
+        $args = $this->resolveParameters($parameters, $namedArguments);
+
+        // Return closure that constructs/invokes with resolved args
+        if ($isConstructor) {
+            return fn() => new $target(...$args);
+        } else {
+            return fn() => $target(...$args);
+        }
+    }
+
+    /**
+     * Resolve parameters for dependency injection.
+     *
+     * @param ReflectionParameter[] $parameters
+     * @param array<string, mixed> $namedArguments
+     * @return array<int, mixed>
+     * @throws Exceptions\DependencyInjectionException
+     */
+    private function resolveParameters(array $parameters, array $namedArguments): array {
+        $args = [];
+
+        foreach ($parameters as $param) {
+            $name = $param->getName();
+            $type = $param->getType();
+
+            // Priority 1: Named argument provided
+            if (array_key_exists($name, $namedArguments)) {
+                $value = $namedArguments[$name];
+
+                // For variadic parameters, the value must be an array
+                if ($param->isVariadic()) {
+                    if (!is_array($value)) {
+                        throw new Exceptions\DependencyInjectionException(
+                            "Variadic parameter '\${$name}' requires array value, got: " . gettype($value)
+                        );
+                    }
+                    // Spread variadic arguments
+                    foreach ($value as $v) {
+                        $args[] = $v;
+                    }
+                } else {
+                    $args[] = $value;
+                }
+                continue;
+            }
+
+            // Variadic without named argument: skip (empty spread)
+            if ($param->isVariadic()) {
+                continue;
+            }
+
+            // Priority 2: Service resolution by type
+            if ($type instanceof \ReflectionNamedType && !$type->isBuiltin()) {
+                $typeName = $type->getName();
+                if ($this->has($typeName)) {
+                    $args[] = $this->get($typeName);
+                    continue;
+                }
+            }
+
+            // Priority 3: Default value if available
+            if ($param->isDefaultValueAvailable()) {
+                $args[] = $param->getDefaultValue();
+                continue;
+            }
+
+            // Priority 4: Nullable type gets null
+            if ($type !== null && $type->allowsNull()) {
+                $args[] = null;
+                continue;
+            }
+
+            // Cannot resolve - throw
+            $typeHint = $type ? (string)$type : 'mixed';
+            throw new Exceptions\DependencyInjectionException(
+                "Cannot resolve parameter '\${$name}' ({$typeHint}): " .
+                "no named argument provided and no service registered for type '{$typeHint}'"
+            );
+        }
+
+        return $args;
+    }
+
+    /**
+     * Detect the project root directory.
+     *
+     * Priority:
+     * 1. MINI_ROOT environment variable (explicit override)
+     * 2. CWD if it contains composer.json with name "fubber/mini" (dev mode)
+     * 3. ClassLoader reflection (standard: 3 levels up from vendor/composer/)
+     */
+    private function detectProjectRoot(): string {
+        // 1. Explicit environment variable takes precedence
+        $envRoot = getenv('MINI_ROOT');
+        if ($envRoot !== false && $envRoot !== '') {
+            return $envRoot;
+        }
+
+        // 2. Check if CWD is fubber/mini itself (development mode)
+        $cwd = getcwd();
+        if ($cwd !== false) {
+            $composerJson = $cwd . '/composer.json';
+            if (is_readable($composerJson)) {
+                $composer = json_decode(file_get_contents($composerJson), true);
+                if (($composer['name'] ?? '') === 'fubber/mini') {
+                    return $cwd;
+                }
+            }
+        }
+
+        // 3. Standard detection via ClassLoader location
+        return \dirname((new ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 3);
+    }
+
     private function bootstrap(): void {
-        $this->root = getenv('MINI_ROOT') ?: \dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 3);
+        $this->root = $this->detectProjectRoot();
         if (is_readable($this->root . '/.env')) {
             (static function(string $path): void {
                 $re = '/^\s*(?!\#)(?<k>[^\s=]+)\s*=\s*+(?<v>("(\\\\.|[^"\\\\]|"")*+"|\'(\\\\.|[^\'\\\\]|\'\')*+\'|[^\r\n#]*))\s*(\#[^\r\n]*)?(\R|$)/mu';

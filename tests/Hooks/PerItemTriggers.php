@@ -3,7 +3,7 @@
  * Test PerItemTriggers - one-time per source (string or object)
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Hooks\PerItemTriggers;

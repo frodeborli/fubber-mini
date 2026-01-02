@@ -6,7 +6,7 @@
  * produces identical results to the SQLite-backed oracle.
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 require_once __DIR__ . '/_OracleComparisonTest.php';
 
 use mini\testing\OracleComparisonTest;

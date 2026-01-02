@@ -3,7 +3,7 @@
  * Test AliasTable - table/column aliasing for JOINs and correlated subqueries
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Table\Wrappers\AliasTable;

@@ -5,7 +5,7 @@
  * When right side is empty, all results come from left side.
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 require_once __DIR__ . '/_TableImplementationTest.php';
 
 use mini\testing\TableImplementationTest;

@@ -3,7 +3,7 @@
  * Test Email class - high-level email composition
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Mail\Email;

@@ -3,7 +3,7 @@
  * Test ConverterRegistry - converter registration and lookup
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Converter\ConverterRegistry;

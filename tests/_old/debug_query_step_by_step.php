@@ -1,6 +1,6 @@
 <?php
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Tables\DatabaseRepository;
 use mini\Util\QueryParser;

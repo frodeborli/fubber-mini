@@ -3,7 +3,7 @@
  * Tests for TemplateContext - the $this object in templates
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Template\TemplateContext;
 use mini\Test;

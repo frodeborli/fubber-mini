@@ -5,7 +5,7 @@
  * This catches any internal caching that might cause stale formatting
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 require_once __DIR__ . '/../assert.php';
 
 use mini\I18n\Fmt;

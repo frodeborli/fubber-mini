@@ -5,7 +5,7 @@
  * NamespacedCache is a decorator - tests focus on namespace isolation behavior.
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Cache\FilesystemCache;

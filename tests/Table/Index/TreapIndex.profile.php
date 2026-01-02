@@ -3,7 +3,7 @@
  * Profile TreapIndex to find bottlenecks
  */
 
-require_once __DIR__ . '/../../../vendor/autoload.php';
+require __DIR__ . '/../../../ensure-autoloader.php';
 
 use mini\Table\Index\TreapIndex;
 use mini\Table\Index\LsmIndex;

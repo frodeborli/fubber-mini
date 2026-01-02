@@ -6,13 +6,13 @@
  * Each test runs in isolation via separate PHP processes.
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\CLI\ArgManager;
 
 // Absolute path to vendor autoload for subprocess tests
-define('VENDOR_AUTOLOAD', realpath(__DIR__ . '/../../vendor/autoload.php'));
+define('VENDOR_AUTOLOAD', $MINI_AUTOLOADER_PATH);
 
 $test = new class extends Test {
 

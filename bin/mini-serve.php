@@ -6,38 +6,7 @@
  * Starts PHP's built-in development server with the correct document root.
  */
 
-// Find composer autoload
-function findAutoload(): ?string {
-    $dir = __DIR__;
-    while ($dir !== dirname($dir)) {
-        $autoload = $dir . '/vendor/autoload.php';
-        if (file_exists($autoload)) {
-            // Check if this is the project root vendor, not a nested vendor
-            // Skip if we're inside vendor/fubber/mini/vendor (nested vendor directory)
-            $vendorDir = dirname($autoload);
-            $parentDir = dirname($vendorDir);
-
-            // If parent of vendor is 'mini' and grandparent is 'fubber', skip this vendor
-            if (basename($parentDir) === 'mini' && basename(dirname($parentDir)) === 'fubber') {
-                $dir = dirname($dir);
-                continue;
-            }
-
-            return $autoload;
-        }
-        $dir = dirname($dir);
-    }
-    return null;
-}
-
-$autoload = findAutoload();
-if (!$autoload) {
-    echo "Error: Could not find vendor/autoload.php\n";
-    echo "Run: composer install\n";
-    exit(1);
-}
-
-require_once $autoload;
+require __DIR__ . '/../ensure-autoloader.php';
 
 // Determine document root
 $root = \mini\Mini::$mini->root;

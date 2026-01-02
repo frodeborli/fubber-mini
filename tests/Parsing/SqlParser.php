@@ -4,7 +4,7 @@
  *
  * Tests for lexer and parser correctness.
  */
-require __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 require __DIR__ . '/../assert.php';
 
 use mini\Parsing\SQL\SqlLexer;

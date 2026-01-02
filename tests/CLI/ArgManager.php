@@ -5,7 +5,7 @@
  * Tests mock $_SERVER['argv'] to simulate command-line input.
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\CLI\ArgManager;

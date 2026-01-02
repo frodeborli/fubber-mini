@@ -3,7 +3,7 @@
  * Test Mailbox class - RFC 5322 mailbox handling
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Mail\Mailbox;

@@ -5,7 +5,7 @@
  * Usage: php LsmIndex.mix-benchmark.php [inserts=100000]
  */
 
-require_once __DIR__ . '/../../../vendor/autoload.php';
+require __DIR__ . '/../../../ensure-autoloader.php';
 
 use mini\Table\Index\LsmIndex;
 

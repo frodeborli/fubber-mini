@@ -5,7 +5,7 @@
  * Tests: query building, WHERE methods, ORDER/LIMIT/OFFSET, hydration, ResultSetInterface
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Database\PartialQuery;

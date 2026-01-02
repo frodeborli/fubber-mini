@@ -3,7 +3,7 @@
  * Test mini\Logger\Logger PSR-3 implementation
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Logger\Logger;
 use Psr\Log\LogLevel;

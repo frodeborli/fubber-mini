@@ -6,7 +6,7 @@
  * and that columns() can only narrow, not expand.
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Table\GeneratorTable;

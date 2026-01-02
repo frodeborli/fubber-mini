@@ -5,7 +5,7 @@
  * ExceptTable yields rows from source that don't exist in the excluded set.
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Table\GeneratorTable;

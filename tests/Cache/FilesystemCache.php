@@ -3,7 +3,7 @@
  * Test FilesystemCache PSR-16 implementation
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 require_once __DIR__ . '/_lib/AbstractPsr16Test.php';
 
 use mini\Cache\FilesystemCache;

@@ -3,7 +3,7 @@
  * Test AttributeValidatorFactory - building validators from PHP attributes
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Validator\Validator;

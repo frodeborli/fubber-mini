@@ -3,7 +3,7 @@
  * Test Filter dispatcher - transform data through pipeline
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Hooks\Filter;

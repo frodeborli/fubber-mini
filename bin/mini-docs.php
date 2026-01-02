@@ -27,31 +27,8 @@
  *   mini docs League\\Container\\ContainerAwareInterface  # Show external interface
  */
 
-// Find and load Composer autoloader
-$autoloadPaths = [
-    __DIR__ . '/../../../autoload.php',  // Installed as vendor package
-    __DIR__ . '/../vendor/autoload.php', // Standalone development
-];
-
-$autoloader = null;
-$composerDir = null;
-foreach ($autoloadPaths as $path) {
-    if (file_exists($path)) {
-        $autoloader = require $path;
-        $composerDir = dirname($path) . '/composer';
-        break;
-    }
-}
-
-if (!$autoloader) {
-    fwrite(STDERR, "Error: Could not find Composer autoloader\n");
-    exit(1);
-}
-
-if (!is_dir($composerDir)) {
-    fwrite(STDERR, "Error: Could not find composer directory\n");
-    exit(1);
-}
+require __DIR__ . '/../ensure-autoloader.php';
+$composerDir = $MINI_COMPOSER_DIR;
 
 // Parse command-line arguments using ArgManager
 $root = \mini\args();

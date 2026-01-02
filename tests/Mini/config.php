@@ -5,7 +5,7 @@
  * Tests: loadConfig(), loadServiceConfig() methods
  */
 
-require_once __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../../ensure-autoloader.php';
 require_once __DIR__ . '/../assert.php';
 
 use mini\Mini;
