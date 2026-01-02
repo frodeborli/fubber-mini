@@ -149,7 +149,11 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
  * Get the database service instance
  *
  * Returns a lazy-loaded DatabaseInterface for executing queries.
- * Configuration is loaded from _config/mini/Database/DatabaseInterface.php on first use.
+ * Works out of the box with SQLite (_database.sqlite3 in project root).
+ *
+ * Configure via environment variables:
+ * - DATABASE_URL: mysql://user:pass@host/dbname, postgresql://..., sqlite:///path
+ * - MINI_DATABASE_URL: Same format, takes precedence over DATABASE_URL
  *
  * @return DatabaseInterface The database service
  */

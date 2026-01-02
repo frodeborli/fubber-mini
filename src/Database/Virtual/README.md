@@ -207,7 +207,7 @@ VirtualDatabase translates SQL WHERE clauses to TableInterface method calls:
 Access VirtualDatabase via the `vdb()` helper:
 
 ```php
-// Configure in _config/virtual-database.php
+// Configure in _config/mini/Database/VirtualDatabase.php
 $result = vdb()->query("SELECT * FROM countries WHERE continent = ?", ['Europe']);
 $row = vdb()->queryOne("SELECT * FROM users WHERE id = ?", [123]);
 $count = vdb()->queryField("SELECT COUNT(*) FROM products");

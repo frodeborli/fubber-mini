@@ -95,10 +95,10 @@ This "soft dependency" pattern means:
 - Full-stack enterprise app uses what it needs
 - No bootstrap penalty for unused features
 
-**Configuration over code.** Override framework services via config files, not subclassing:
+**Configuration over code.** Override framework services via config files or environment variables:
 
+- Set `DATABASE_URL=mysql://user:pass@host/db` for database (works out of the box)
 - Create `_config/Psr/Log/LoggerInterface.php` to return your logger
-- Create `_config/PDO.php` to return your database connection
 - Framework loads these automatically - no service registration needed
 
 ## Two Paradigms: Choose What Fits
@@ -770,19 +770,20 @@ set_error_handler(function($severity, $message, $file, $line) {
 
 ### Database Configuration
 
-Create `_config/PDO.php` to configure your database:
+Mini works out of the box with SQLite (`_database.sqlite3` in project root). Configure via environment variables:
 
-```php
-// _config/PDO.php
-$dsn = $_ENV['DATABASE_DSN'] ?? 'sqlite:' . __DIR__ . '/../_database.sqlite3';
-$user = $_ENV['DATABASE_USER'] ?? null;
-$pass = $_ENV['DATABASE_PASS'] ?? null;
+```bash
+# MySQL
+DATABASE_URL=mysql://user:password@localhost:3306/myapp
 
-return new PDO($dsn, $user, $pass, [
-    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-]);
+# PostgreSQL
+DATABASE_URL=postgresql://user:password@localhost/myapp
+
+# SQLite (explicit path)
+DATABASE_URL=sqlite:///var/data/myapp.db
 ```
+
+Use `MINI_DATABASE_URL` to override `DATABASE_URL` (useful when coexisting with other frameworks).
 
 **Don't forget to run `composer dump-autoload`** after modifying composer.json!
 
