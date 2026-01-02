@@ -38,18 +38,10 @@ mini\bootstrap();
 $command = $argv[1] ?? 'migrate';
 $argument = $argv[2] ?? null;
 
-$migrationsDir = getcwd() . '/_migrations';
 $runnerScript = __DIR__ . '/mini-migration-runner.php';
 
-// Ensure migrations directory exists
-if (!is_dir($migrationsDir) && $command !== 'make') {
-    if ($command === 'status') {
-        echo "No _migrations directory found.\n";
-        exit(0);
-    }
-    echo "Creating _migrations directory...\n";
-    mkdir($migrationsDir, 0755, true);
-}
+// Get migrations PathsRegistry (set up in bootstrap.php)
+$migrationsRegistry = mini\Mini::$mini->paths->migrations;
 
 /**
  * Get database connection
@@ -129,12 +121,41 @@ function getCurrentBatch(): int {
 }
 
 /**
- * Get all migration files sorted alphabetically
+ * Get all migration files from all registered paths
+ *
+ * Collects *.php files from all paths in the registry, de-duplicating by
+ * filename (first match wins - primary path overrides fallbacks).
+ * Returns array of full paths sorted by filename.
+ *
+ * @param mini\Util\PathsRegistry $registry
+ * @return array<string, string> Map of basename => full path, sorted by key
  */
-function getMigrationFiles(string $dir): array {
-    $files = glob($dir . '/*.php');
-    sort($files);
-    return $files;
+function getAllMigrationFiles(mini\Util\PathsRegistry $registry): array {
+    $migrations = [];
+
+    foreach ($registry->getPaths() as $path) {
+        if (!is_dir($path)) {
+            continue;
+        }
+        $files = glob($path . '/*.php');
+        foreach ($files as $file) {
+            $name = basename($file, '.php');
+            // First match wins (primary path overrides fallbacks)
+            if (!isset($migrations[$name])) {
+                $migrations[$name] = $file;
+            }
+        }
+    }
+
+    ksort($migrations);
+    return $migrations;
+}
+
+/**
+ * Find a migration file by name across all paths
+ */
+function findMigrationFile(mini\Util\PathsRegistry $registry, string $name): ?string {
+    return $registry->findFirst($name . '.php');
 }
 
 /**
@@ -212,13 +233,12 @@ switch ($command) {
         ensureMigrationsTable();
 
         $executed = getExecutedMigrations();
-        $files = getMigrationFiles($migrationsDir);
+        $allMigrations = getAllMigrationFiles($migrationsRegistry);
         $pending = [];
 
-        foreach ($files as $file) {
-            $name = basename($file, '.php');
+        foreach ($allMigrations as $name => $file) {
             if (!array_key_exists($name, $executed)) {
-                $pending[] = $file;
+                $pending[$name] = $file;
             }
         }
 
@@ -230,8 +250,7 @@ switch ($command) {
         $batch = getCurrentBatch() + 1;
         echo "Running " . count($pending) . " migration(s) (batch $batch)...\n\n";
 
-        foreach ($pending as $file) {
-            $name = basename($file, '.php');
+        foreach ($pending as $name => $file) {
             echo "Migrating: $name\n";
 
             $result = runMigration($file, 'up', $runnerScript);
@@ -300,9 +319,9 @@ switch ($command) {
         echo "Rolling back " . count($canRollback) . " migration(s)...\n\n";
 
         foreach ($canRollback as $name) {
-            $file = $migrationsDir . '/' . $name . '.php';
+            $file = findMigrationFile($migrationsRegistry, $name);
 
-            if (!file_exists($file)) {
+            if ($file === null) {
                 echo "Warning: Migration file not found: $name.php\n";
                 echo "  Removing from tracking table...\n";
                 removeMigration($name);
@@ -331,9 +350,9 @@ switch ($command) {
         ensureMigrationsTable();
 
         $executed = getExecutedMigrations();
-        $files = getMigrationFiles($migrationsDir);
+        $allMigrations = getAllMigrationFiles($migrationsRegistry);
 
-        if (empty($files)) {
+        if (empty($allMigrations)) {
             echo "No migration files found.\n";
             exit(0);
         }
@@ -341,14 +360,9 @@ switch ($command) {
         echo "Migration Status\n";
         echo "================\n\n";
 
-        $maxLen = 0;
-        foreach ($files as $file) {
-            $len = strlen(basename($file, '.php'));
-            if ($len > $maxLen) $maxLen = $len;
-        }
+        $maxLen = max(array_map('strlen', array_keys($allMigrations)));
 
-        foreach ($files as $file) {
-            $name = basename($file, '.php');
+        foreach ($allMigrations as $name => $file) {
             if (isset($executed[$name])) {
                 $info = $executed[$name];
                 $rev = $info->reversible ? '↕' : '↑';
@@ -360,8 +374,8 @@ switch ($command) {
         }
 
         echo "\n";
-        $executedCount = count(array_filter($files, fn($f) => isset($executed[basename($f, '.php')])));
-        $pendingCount = count($files) - $executedCount;
+        $executedCount = count(array_filter(array_keys($allMigrations), fn($n) => isset($executed[$n])));
+        $pendingCount = count($allMigrations) - $executedCount;
         echo "Total: $executedCount executed, $pendingCount pending\n";
         echo "Legend: ↕ = reversible, ↑ = up-only\n";
         break;
@@ -391,18 +405,17 @@ switch ($command) {
 
         ensureMigrationsTable();
 
-        $files = getMigrationFiles($migrationsDir);
+        $allMigrations = getAllMigrationFiles($migrationsRegistry);
 
-        if (empty($files)) {
+        if (empty($allMigrations)) {
             echo "No migration files found.\n";
             exit(0);
         }
 
         $batch = 1;
-        echo "Running " . count($files) . " migration(s) (batch $batch)...\n\n";
+        echo "Running " . count($allMigrations) . " migration(s) (batch $batch)...\n\n";
 
-        foreach ($files as $file) {
-            $name = basename($file, '.php');
+        foreach ($allMigrations as $name => $file) {
             echo "Migrating: $name\n";
 
             $result = runMigration($file, 'up', $runnerScript);
@@ -431,16 +444,19 @@ switch ($command) {
             exit(1);
         }
 
+        // Get primary migrations path (application's _migrations directory)
+        $primaryPath = $migrationsRegistry->getPaths()[0];
+
         // Ensure migrations directory exists
-        if (!is_dir($migrationsDir)) {
-            mkdir($migrationsDir, 0755, true);
+        if (!is_dir($primaryPath)) {
+            mkdir($primaryPath, 0755, true);
         }
 
         // Generate filename with timestamp
         $timestamp = date('Y_m_d_His');
         $name = preg_replace('/[^a-z0-9_]/', '_', strtolower($argument));
         $filename = "{$timestamp}_{$name}.php";
-        $filepath = $migrationsDir . '/' . $filename;
+        $filepath = $primaryPath . '/' . $filename;
 
         // Create migration stub
         $stub = <<<'PHP'

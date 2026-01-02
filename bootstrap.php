@@ -17,3 +17,9 @@ if (version_compare(phpversion('apcu') ?: '0.0.0', '5.1.0', '<')) {
 }
 
 new \mini\Mini();
+
+// Migrations registry: application migrations first, framework migrations as fallback
+// Registered here so composer packages can add their paths during autoload
+$primaryMigrationsPath = $_ENV['MINI_MIGRATIONS_ROOT'] ?? (\mini\Mini::$mini->root . '/_migrations');
+\mini\Mini::$mini->paths->migrations = new \mini\Util\PathsRegistry($primaryMigrationsPath);
+\mini\Mini::$mini->paths->migrations->addPath(__DIR__ . '/migrations');
