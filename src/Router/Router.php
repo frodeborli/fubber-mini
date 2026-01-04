@@ -76,6 +76,13 @@ class Router implements RequestHandlerInterface
             $requestTarget = $request->getRequestTarget();
             $path = parse_url($requestTarget, PHP_URL_PATH) ?? '/';
 
+            // Strip baseUrl path prefix if configured (for sub-directory mounting)
+            $baseUrl = Mini::$mini?->baseUrl;
+            $baseUrlPath = $baseUrl !== null ? (parse_url($baseUrl, PHP_URL_PATH) ?: '') : '';
+            if ($baseUrlPath !== '' && str_starts_with($path, $baseUrlPath)) {
+                $path = substr($path, strlen($baseUrlPath)) ?: '/';
+            }
+
             // Check if this is an internal redirect (allows underscore-prefixed paths)
             $redirectCount = $request->getAttribute('mini.router.redirectCount', 0);
 
@@ -93,14 +100,14 @@ class Router implements RequestHandlerInterface
                     $altFile = $this->resolveHandlerFile($path . '/', $internalRequest);
                     if ($altFile !== null) {
                         // Return 301 redirect to path with trailing slash
-                        return new \mini\Http\Message\Response('', ['Location' => $path . '/' . $queryString], 301);
+                        return new \mini\Http\Message\Response('', ['Location' => $baseUrlPath . $path . '/' . $queryString], 301);
                     }
                 } elseif ($path !== '/') {
                     // Try without trailing slash
                     $altFile = $this->resolveHandlerFile(rtrim($path, '/'), $internalRequest);
                     if ($altFile !== null) {
                         // Return 301 redirect to path without trailing slash
-                        return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/') . $queryString], 301);
+                        return new \mini\Http\Message\Response('', ['Location' => $baseUrlPath . rtrim($path, '/') . $queryString], 301);
                     }
                 }
 
@@ -117,10 +124,10 @@ class Router implements RequestHandlerInterface
 
             if ($isIndexFile && !$pathHasSlash) {
                 // index.php matched a path without trailing slash - redirect to add slash
-                return new \mini\Http\Message\Response('', ['Location' => $path . '/' . $queryString], 301);
+                return new \mini\Http\Message\Response('', ['Location' => $baseUrlPath . $path . '/' . $queryString], 301);
             } elseif (!$isIndexFile && !$isDefaultFile && $pathHasSlash && $path !== '/') {
                 // Regular .php file matched a path with trailing slash - redirect to remove slash
-                return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/') . $queryString], 301);
+                return new \mini\Http\Message\Response('', ['Location' => $baseUrlPath . rtrim($path, '/') . $queryString], 301);
             }
 
             // Additional check: if we found a handler via wildcard, check if alternate path has exact match
@@ -136,14 +143,14 @@ class Router implements RequestHandlerInterface
                     $altFile = $this->resolveHandlerFile(rtrim($path, '/'), $internalRequest);
                     if ($altFile !== null && str_contains($altFile, '/' . $lastSegment . '.php')) {
                         // Alternate has exact match - redirect to it
-                        return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/') . $queryString], 301);
+                        return new \mini\Http\Message\Response('', ['Location' => $baseUrlPath . rtrim($path, '/') . $queryString], 301);
                     }
                 } elseif (!$pathHasSlash) {
                     // Current is wildcard without slash - check if slash version has exact match
                     $altFile = $this->resolveHandlerFile($path . '/', $internalRequest);
                     if ($altFile !== null && str_contains($altFile, '/' . $lastSegment . '/')) {
                         // Alternate has exact match - redirect to it
-                        return new \mini\Http\Message\Response('', ['Location' => $path . '/' . $queryString], 301);
+                        return new \mini\Http\Message\Response('', ['Location' => $baseUrlPath . $path . '/' . $queryString], 301);
                     }
                 }
             }

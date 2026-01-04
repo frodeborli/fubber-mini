@@ -98,8 +98,9 @@ function url(string|\Psr\Http\Message\UriInterface $path = '', array $query = []
         // Empty path - use base path
         $resolvedPath = $basePath;
     } elseif ($inputPath[0] === '/') {
-        // Absolute path - use as-is
-        $resolvedPath = $inputPath;
+        // Absolute path - prepend base path for subdirectory mounting
+        // e.g., url('/todos/') with baseUrl '/assistant' becomes '/assistant/todos/'
+        $resolvedPath = rtrim($basePath, '/') . $inputPath;
     } else {
         // Relative path - resolve against base path
         // Append to base path directory
