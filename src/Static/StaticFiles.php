@@ -40,8 +40,15 @@ class StaticFiles implements MiddlewareInterface
      */
     public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
     {
-        // Extract path from request URI
+        // Extract path from request URI (strips query string)
         $path = parse_url($request->getRequestTarget(), PHP_URL_PATH);
+
+        // Strip base URL path prefix if configured (e.g., /assistant/ -> /)
+        $baseUrlPath = parse_url(Mini::$mini->baseUrl, PHP_URL_PATH);
+        if ($baseUrlPath && str_starts_with($path, $baseUrlPath)) {
+            $path = substr($path, strlen($baseUrlPath));
+        }
+
         $path = ltrim($path, '/');
 
         // Try to find static file
