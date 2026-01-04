@@ -82,6 +82,10 @@ class Router implements RequestHandlerInterface
             $internalRequest = $redirectCount > 0;
             $handlerFile = $this->resolveHandlerFile($path, $internalRequest, $resolvedPath);
 
+            // Preserve query string for redirects
+            $query = $request->getUri()->getQuery();
+            $queryString = $query ? '?' . $query : '';
+
             if ($handlerFile === null) {
                 // Before throwing 404, check if alternate path (with/without trailing slash) would match
                 if (!str_ends_with($path, '/')) {
@@ -89,14 +93,14 @@ class Router implements RequestHandlerInterface
                     $altFile = $this->resolveHandlerFile($path . '/', $internalRequest);
                     if ($altFile !== null) {
                         // Return 301 redirect to path with trailing slash
-                        return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
+                        return new \mini\Http\Message\Response('', ['Location' => $path . '/' . $queryString], 301);
                     }
                 } elseif ($path !== '/') {
                     // Try without trailing slash
                     $altFile = $this->resolveHandlerFile(rtrim($path, '/'), $internalRequest);
                     if ($altFile !== null) {
                         // Return 301 redirect to path without trailing slash
-                        return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/')], 301);
+                        return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/') . $queryString], 301);
                     }
                 }
 
@@ -113,10 +117,10 @@ class Router implements RequestHandlerInterface
 
             if ($isIndexFile && !$pathHasSlash) {
                 // index.php matched a path without trailing slash - redirect to add slash
-                return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
+                return new \mini\Http\Message\Response('', ['Location' => $path . '/' . $queryString], 301);
             } elseif (!$isIndexFile && !$isDefaultFile && $pathHasSlash && $path !== '/') {
                 // Regular .php file matched a path with trailing slash - redirect to remove slash
-                return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/')], 301);
+                return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/') . $queryString], 301);
             }
 
             // Additional check: if we found a handler via wildcard, check if alternate path has exact match
@@ -132,14 +136,14 @@ class Router implements RequestHandlerInterface
                     $altFile = $this->resolveHandlerFile(rtrim($path, '/'), $internalRequest);
                     if ($altFile !== null && str_contains($altFile, '/' . $lastSegment . '.php')) {
                         // Alternate has exact match - redirect to it
-                        return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/')], 301);
+                        return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/') . $queryString], 301);
                     }
                 } elseif (!$pathHasSlash) {
                     // Current is wildcard without slash - check if slash version has exact match
                     $altFile = $this->resolveHandlerFile($path . '/', $internalRequest);
                     if ($altFile !== null && str_contains($altFile, '/' . $lastSegment . '/')) {
                         // Alternate has exact match - redirect to it
-                        return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
+                        return new \mini\Http\Message\Response('', ['Location' => $path . '/' . $queryString], 301);
                     }
                 }
             }

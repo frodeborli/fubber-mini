@@ -238,6 +238,10 @@ class Router
         $method = $request->getMethod();
         $path = parse_url($request->getRequestTarget(), PHP_URL_PATH) ?? '/';
 
+        // Preserve query string for redirects
+        $query = $request->getUri()->getQuery();
+        $queryString = $query ? '?' . $query : '';
+
         // Try to find matching route
         foreach ($this->routes as $route) {
             // Check HTTP method
@@ -256,10 +260,10 @@ class Router
 
                 if ($routeEndsWithSlash && !$pathEndsWithSlash) {
                     // Route expects trailing slash but path doesn't have it - redirect
-                    return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
+                    return new \mini\Http\Message\Response('', ['Location' => $path . '/' . $queryString], 301);
                 } elseif (!$routeEndsWithSlash && $pathEndsWithSlash && $path !== '/') {
                     // Route doesn't expect trailing slash but path has it - redirect
-                    return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/')], 301);
+                    return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/') . $queryString], 301);
                 }
 
                 // Type-cast parameters
@@ -282,7 +286,7 @@ class Router
                 }
                 if (preg_match($route['pattern'], $path . '/', $matches)) {
                     // Alternate path matches - redirect to it
-                    return new \mini\Http\Message\Response('', ['Location' => $path . '/'], 301);
+                    return new \mini\Http\Message\Response('', ['Location' => $path . '/' . $queryString], 301);
                 }
             }
         } elseif ($path !== '/') {
@@ -294,7 +298,7 @@ class Router
                 }
                 if (preg_match($route['pattern'], $pathWithoutSlash, $matches)) {
                     // Alternate path matches - redirect to it
-                    return new \mini\Http\Message\Response('', ['Location' => $pathWithoutSlash], 301);
+                    return new \mini\Http\Message\Response('', ['Location' => $pathWithoutSlash . $queryString], 301);
                 }
             }
         }
