@@ -87,7 +87,8 @@ class Router implements RequestHandlerInterface
             $redirectCount = $request->getAttribute('mini.router.redirectCount', 0);
 
             $internalRequest = $redirectCount > 0;
-            $handlerFile = $this->resolveHandlerFile($path, $internalRequest, $resolvedPath);
+            $pathComponents = [];
+            $handlerFile = $this->resolveHandlerFile($path, $internalRequest, $resolvedPath, $pathComponents);
 
             // Preserve query string for redirects
             $query = $request->getUri()->getQuery();
@@ -157,6 +158,7 @@ class Router implements RequestHandlerInterface
 
             // 2. Annotate request with route info
             $request = $request->withAttribute('mini.router.handlerFile', $handlerFile);
+            $request = $request->withAttribute('mini.pathcomponents', $pathComponents);
 
             // Parse query string from request target and update query params explicitly
             // Query params are separate from request target per PSR-7, so we sync them here
@@ -275,7 +277,7 @@ class Router implements RequestHandlerInterface
      * Filesystem Wildcards:
      * - Use "_" as directory or file name to match any single path segment
      * - Exact matches take precedence over wildcard matches
-     * - Captured values stored in $_GET[0], $_GET[1], etc. (right to left - nearest wildcard is [0])
+     * - Captured values accessible via $_GET[0], $_GET[1], etc. (right to left - nearest wildcard is [0])
      * - Examples:
      *   - /users/123 → tries users/123.php, then users/_.php (captures "123" in $_GET[0])
      *   - /users/100/friendship/200 → tries exact path, then users/_/friendship/_.php ($_GET[0]="200", $_GET[1]="100")
@@ -288,9 +290,10 @@ class Router implements RequestHandlerInterface
      * @param string $path Request path (without query string)
      * @param bool $internalRequest Whether to allow underscore-prefixed paths
      * @param ?string $resolvedPath The path that was found the route registry
+     * @param ?array $pathComponents Captured wildcard values (reversed: nearest wildcard is [0])
      * @return string|null Absolute path to controller file, or null if not found
      */
-    private function resolveHandlerFile(string $path, bool $internalRequest = false, ?string &$resolvedPath=null): ?string
+    private function resolveHandlerFile(string $path, bool $internalRequest = false, ?string &$resolvedPath=null, ?array &$pathComponents=null): ?string
     {
         if ($path === '' || $path[0] !== '/') {
             throw new \LogicException("Router::resolveHandlerFile expects absolute paths from the root of the router");
@@ -369,7 +372,7 @@ class Router implements RequestHandlerInterface
                     if ($resolvedPath === './') {
                         $resolvedPath = '';
                     }
-                    $this->populateWildcardParams($wildcardValues);
+                    $pathComponents = array_reverse($wildcardValues);
                     return $match;
                 }
 
@@ -381,7 +384,7 @@ class Router implements RequestHandlerInterface
                         $resolvedPath = '';
                     }
                     $wildcardValues[] = $finalSegment;
-                    $this->populateWildcardParams($wildcardValues);
+                    $pathComponents = array_reverse($wildcardValues);
                     return $match;
                 }
             } else {
@@ -392,7 +395,7 @@ class Router implements RequestHandlerInterface
                     if ($resolvedPath === './') {
                         $resolvedPath = '';
                     }
-                    $this->populateWildcardParams($wildcardValues);
+                    $pathComponents = array_reverse($wildcardValues);
                     return $match;
                 }
 
@@ -404,7 +407,7 @@ class Router implements RequestHandlerInterface
                         $resolvedPath = '';
                     }
                     $wildcardValues[] = $finalSegment;
-                    $this->populateWildcardParams($wildcardValues);
+                    $pathComponents = array_reverse($wildcardValues);
                     return $match;
                 }
             }
@@ -415,30 +418,15 @@ class Router implements RequestHandlerInterface
             $candidatePath = implode("/", array_slice($parts, 0, $i)) . '/__DEFAULT__.php';
             if (null !== ($match = $routes->findFirst($candidatePath))) {
                 $resolvedPath = dirname($candidatePath) . '/';
+                $pathComponents = [];
                 return $match;
             }
         }
 
         $resolvedPath = null;
+        $pathComponents = [];
 
         return null;
-    }
-
-    /**
-     * Populate $_GET with wildcard parameter values
-     *
-     * Assigns numeric indices (0, 1, 2, ...) to wildcard values captured from filesystem-based
-     * wildcard routing using "_" directories and files. Values are stored in reverse order
-     * (rightmost/nearest wildcard is $_GET[0]) so code remains stable when files are moved.
-     *
-     * @param array<int, string> $values Wildcard values in left-to-right URL order
-     */
-    private function populateWildcardParams(array $values): void
-    {
-        $reversed = array_reverse($values);
-        foreach ($reversed as $index => $value) {
-            $_GET[$index] = $value;
-        }
     }
 
     /**

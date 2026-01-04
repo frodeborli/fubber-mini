@@ -52,18 +52,46 @@ class RequestGlobalProxy implements \ArrayAccess, \Countable, \IteratorAggregate
 
     /**
      * Get value from current request context
+     *
+     * For $_GET proxy: integer keys (0, 1, 2, ...) fetch from 'mini.pathcomponents'
+     * request attribute, which contains captured wildcard URL segments from routing.
      */
     public function offsetGet(mixed $offset): mixed
     {
+        // Integer keys on $_GET come from path component wildcards
+        if ($this->source === 'query' && is_int($offset)) {
+            try {
+                $request = Mini::$mini->get(ServerRequestInterface::class);
+                $pathComponents = $request->getAttribute('mini.pathcomponents', []);
+                return $pathComponents[$offset] ?? null;
+            } catch (\Throwable $e) {
+                return null;
+            }
+        }
+
         $data = $this->getData();
         return $data[$offset] ?? null;
     }
 
     /**
      * Check if key exists in current request context
+     *
+     * For $_GET proxy: integer keys (0, 1, 2, ...) check 'mini.pathcomponents'
+     * request attribute, which contains captured wildcard URL segments from routing.
      */
     public function offsetExists(mixed $offset): bool
     {
+        // Integer keys on $_GET come from path component wildcards
+        if ($this->source === 'query' && is_int($offset)) {
+            try {
+                $request = Mini::$mini->get(ServerRequestInterface::class);
+                $pathComponents = $request->getAttribute('mini.pathcomponents', []);
+                return isset($pathComponents[$offset]);
+            } catch (\Throwable $e) {
+                return false;
+            }
+        }
+
         $data = $this->getData();
         return isset($data[$offset]);
     }
