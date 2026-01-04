@@ -68,24 +68,40 @@ echo json_encode(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
 ```
 
 ```php
-// 2. PSR-7 Response
-return response()->json(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
+// 2. PSR-7 Response (recommended for HTML pages)
+use mini\Http\Message\HtmlResponse;
+return new HtmlResponse(render('users.php', ['users' => $users]));
 ```
 
 ```php
-// 3. String or array (auto-converted via converters)
-return ['users' => db()->query("SELECT * FROM users")->fetchAll()];  // → JSON response
-return "Hello, world!";  // → Text/plain response
+// 3. Response class extending HtmlResponse (best for complex pages)
+use mini\Http\Message\HtmlResponse;
+
+class UsersPage extends HtmlResponse {
+    public function __construct() {
+        $users = db()->query("SELECT * FROM users")->fetchAll();
+        parent::__construct(render('users.php', ['users' => $users]));
+    }
+}
+
+return new UsersPage();
 ```
 
 ```php
-// 4. PSR-15 RequestHandlerInterface
+// 4. Array (auto-converted to JSON response)
+return ['users' => db()->query("SELECT * FROM users")->fetchAll()];
+```
+
+```php
+// 5. PSR-15 RequestHandlerInterface
 return new class implements RequestHandlerInterface {
     public function handle(ServerRequestInterface $request): ResponseInterface {
         return new Response('Hello');
     }
 };
 ```
+
+**Important:** Returning a plain string creates a `text/plain` response, not HTML. For HTML responses, always use `HtmlResponse` or a class that extends it.
 
 ## Controller-Based Routing
 

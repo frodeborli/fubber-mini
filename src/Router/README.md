@@ -140,10 +140,12 @@ return [
 <?php
 // _routes/blog/posts/view.php
 
+use mini\Http\Message\HtmlResponse;
+
 $slug = $_GET['slug'];
 $post = db()->queryOne("SELECT * FROM posts WHERE slug = ?", [$slug]);
 
-echo render('blog/post', ['post' => $post]);
+return new HtmlResponse(render('blog/post', ['post' => $post]));
 ```
 
 ### API Routes with RESTful Patterns
@@ -187,9 +189,11 @@ return [
 <?php
 // _routes/admin/dashboard.php
 
+use mini\Http\Message\HtmlResponse;
+
 // Already authenticated via __DEFAULT__.php
 $stats = getDashboardStats();
-echo render('admin/dashboard', ['stats' => $stats]);
+return new HtmlResponse(render('admin/dashboard', ['stats' => $stats]));
 ```
 
 ## Advanced Examples
