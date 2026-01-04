@@ -108,8 +108,12 @@ function url(string|\Psr\Http\Message\UriInterface $path = '', array $query = []
         $resolvedPath = $baseDir . '/' . $inputPath;
     }
 
-    // Normalize path (handle .. and .)
+    // Normalize path (handle .. and .), preserving trailing slash
+    $hadTrailingSlash = str_ends_with($resolvedPath, '/');
     $resolvedPath = (string) (new \mini\Util\Path($resolvedPath))->canonical();
+    if ($hadTrailingSlash && !str_ends_with($resolvedPath, '/')) {
+        $resolvedPath .= '/';
+    }
 
     // Merge query parameters: input query + $query array
     parse_str($inputQuery, $inputQueryParams);
