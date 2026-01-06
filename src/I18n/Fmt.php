@@ -9,9 +9,26 @@ use IntlDateFormatter;
  *
  * All methods query the current locale via \Locale::getDefault() and delegate to PHP's intl classes.
  * This class holds no state - it's purely a convenience wrapper that reads request state on each call.
+ *
+ * Date/time methods accept DateTimeInterface or SQL datetime strings (assumed UTC).
+ * All output is converted to the application timezone (date_default_timezone_get()).
  */
 class Fmt
 {
+    /**
+     * Normalize date input to DateTimeImmutable in local timezone.
+     * Strings are assumed to be UTC (e.g., from database).
+     */
+    private static function ensureDateTime(\DateTimeInterface|string $datetime): \DateTimeImmutable
+    {
+        if (is_string($datetime)) {
+            $datetime = new \DateTimeImmutable($datetime, new \DateTimeZone('UTC'));
+        } elseif ($datetime instanceof \DateTime) {
+            $datetime = \DateTimeImmutable::createFromMutable($datetime);
+        }
+
+        return $datetime->setTimezone(new \DateTimeZone(date_default_timezone_get()));
+    }
     /**
      * Format a number with specified decimal places
      */
@@ -61,8 +78,9 @@ class Fmt
     /**
      * Format date in short format (e.g., "12/31/2023", "31.12.2023")
      */
-    public static function dateShort(\DateTimeInterface $date): string
+    public static function dateShort(\DateTimeInterface|string $date): string
     {
+        $date = self::ensureDateTime($date);
         $result = \IntlDateFormatter::formatObject($date, [\IntlDateFormatter::SHORT, \IntlDateFormatter::NONE], \Locale::getDefault());
         return $result ?: $date->format('Y-m-d');
     }
@@ -70,8 +88,9 @@ class Fmt
     /**
      * Format date in long format (e.g., "December 31, 2023", "31. desember 2023")
      */
-    public static function dateLong(\DateTimeInterface $date): string
+    public static function dateLong(\DateTimeInterface|string $date): string
     {
+        $date = self::ensureDateTime($date);
         $result = \IntlDateFormatter::formatObject($date, [\IntlDateFormatter::LONG, \IntlDateFormatter::NONE], \Locale::getDefault());
         return $result ?: $date->format('F j, Y');
     }
@@ -79,8 +98,9 @@ class Fmt
     /**
      * Format time in short format (e.g., "2:30 PM", "14:30")
      */
-    public static function timeShort(\DateTimeInterface $time): string
+    public static function timeShort(\DateTimeInterface|string $time): string
     {
+        $time = self::ensureDateTime($time);
         $result = \IntlDateFormatter::formatObject($time, [\IntlDateFormatter::NONE, \IntlDateFormatter::SHORT], \Locale::getDefault());
         return $result ?: $time->format('H:i');
     }
@@ -88,8 +108,9 @@ class Fmt
     /**
      * Format datetime in short format
      */
-    public static function dateTimeShort(\DateTimeInterface $dateTime): string
+    public static function dateTimeShort(\DateTimeInterface|string $dateTime): string
     {
+        $dateTime = self::ensureDateTime($dateTime);
         $result = \IntlDateFormatter::formatObject($dateTime, [\IntlDateFormatter::SHORT, \IntlDateFormatter::SHORT], \Locale::getDefault());
         return $result ?: $dateTime->format('Y-m-d H:i');
     }
@@ -97,8 +118,9 @@ class Fmt
     /**
      * Format datetime in long format
      */
-    public static function dateTimeLong(\DateTimeInterface $dateTime): string
+    public static function dateTimeLong(\DateTimeInterface|string $dateTime): string
     {
+        $dateTime = self::ensureDateTime($dateTime);
         $result = \IntlDateFormatter::formatObject($dateTime, [\IntlDateFormatter::LONG, \IntlDateFormatter::SHORT], \Locale::getDefault());
         return $result ?: $dateTime->format('F j, Y H:i');
     }
