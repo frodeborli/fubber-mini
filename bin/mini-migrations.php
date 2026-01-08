@@ -31,12 +31,30 @@
 
 require __DIR__ . '/../ensure-autoloader.php';
 
+use mini\CLI\ArgManager;
+
 // Bootstrap Mini framework
 mini\bootstrap();
 
-// Parse command
-$command = $argv[1] ?? 'migrate';
-$argument = $argv[2] ?? null;
+// Parse arguments - register globally via mini\args()
+mini\args(ArgManager::parse($argv)
+    ->withSubcommand('migrate', 'up', 'rollback', 'down', 'status', 'fresh', 'make', 'help')
+);
+
+$sub = mini\args()->nextCommand();
+if ($sub) {
+    mini\args($sub);
+    $command = $sub->getCommand();
+} else {
+    $command = 'migrate';
+}
+
+// Register command-specific flags
+mini\args(mini\args()
+    ->withFlag(null, 'allow-invalid-prefix')
+    ->withFlag(null, 'force')
+);
+$argument = mini\args()->getUnparsedArgs()[0] ?? null;
 
 $runnerScript = __DIR__ . '/mini-migration-runner.php';
 
@@ -48,6 +66,13 @@ $migrationsRegistry = mini\Mini::$mini->paths->migrations;
  */
 function getDb(): mini\Database\DatabaseInterface {
     return mini\db();
+}
+
+/**
+ * Check if migration name has valid datetime prefix (YYYY_MM_DD_HHMMSS_)
+ */
+function hasValidDatetimePrefix(string $name): bool {
+    return (bool) preg_match('/^\d{4}_\d{2}_\d{2}_\d{6}_/', $name);
 }
 
 /**
@@ -245,6 +270,25 @@ switch ($command) {
         if (empty($pending)) {
             echo "Nothing to migrate.\n";
             exit(0);
+        }
+
+        // Check for invalid prefixes (unless --allow-invalid-prefix is set)
+        if (!mini\args()->getFlag('allow-invalid-prefix')) {
+            $invalidPrefixes = [];
+            foreach ($pending as $name => $file) {
+                if (!hasValidDatetimePrefix($name)) {
+                    $invalidPrefixes[] = $name;
+                }
+            }
+            if (!empty($invalidPrefixes)) {
+                fwrite(STDERR, "Error: Found migration(s) with invalid prefix format.\n");
+                fwrite(STDERR, "Expected format: YYYY_MM_DD_HHMMSS_description.php\n\n");
+                foreach ($invalidPrefixes as $name) {
+                    fwrite(STDERR, "  - $name\n");
+                }
+                fwrite(STDERR, "\nRename the file(s) or run with --allow-invalid-prefix to proceed anyway.\n");
+                exit(1);
+            }
         }
 
         $batch = getCurrentBatch() + 1;
@@ -510,6 +554,9 @@ Commands:
   status               Show migration status
   fresh --force        Reset tracking and run all migrations
   make <name>          Create new migration file
+
+Options:
+  --allow-invalid-prefix   Allow migrations without datetime prefix (YYYY_MM_DD_HHMMSS_)
 
 Migration Types:
 

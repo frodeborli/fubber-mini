@@ -95,6 +95,9 @@ class ArgManager
     /** @var array|null Custom argv array (null = use $_SERVER['argv']) */
     private ?array $customArgv = null;
 
+    /** @var ArgManager|null Parent command (if this is a subcommand) */
+    private ?ArgManager $parent = null;
+
     /**
      * Create a new ArgManager instance
      *
@@ -343,7 +346,25 @@ class ArgManager
 
         $child = new self($this->next_index);
         $child->customArgv = $this->customArgv; // Inherit custom argv
+        $child->parent = $this; // Link back to parent
         return $child;
+    }
+
+    /**
+     * Get the parent command's ArgManager
+     *
+     * When processing subcommands, use this to access flags declared on the parent.
+     *
+     * ```php
+     * mini\args($sub);  // Step into subcommand
+     * $verbose = mini\args()->parentCommand()?->getFlag('verbose');
+     * ```
+     *
+     * @return ArgManager|null Parent command, or null if this is the root command
+     */
+    public function parentCommand(): ?ArgManager
+    {
+        return $this->parent;
     }
 
     /**
