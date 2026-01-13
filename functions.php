@@ -5,7 +5,6 @@ namespace mini;
 use Exception;
 use Throwable;
 use Composer\Autoload\ClassLoader;
-use mini\Contracts\CollectionInterface;
 use mini\Http;
 use mini\Mini;
 use ReflectionClass;

@@ -6,14 +6,14 @@ These contracts define common patterns used internally by the framework and are 
 
 ## Purpose
 
-Contracts provide type safety and clear expectations for components that need to interact with the framework. For example, `CollectionInterface` defines what a collection must support, allowing framework code and your code to work with collections in a consistent way.
+Contracts provide type safety and clear expectations for components that need to interact with the framework. For example, `MapInterface` defines what a key-value store must support, and `CollectionInterface` defines traversable collections with functional operations like `map()` and `filter()`.
 
 ## When to Use
 
 You typically implement these interfaces when:
 
-- Creating custom collections that need to work with framework internals
-- Building services that match framework patterns
+- Creating custom key-value stores that need to work with framework internals
+- Building collections with functional transformation support
 - Extending framework functionality with custom implementations
 
 Most application code won't need to directly implement these contracts—they're primarily for framework integration points.

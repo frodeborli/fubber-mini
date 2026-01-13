@@ -2,62 +2,107 @@
 
 namespace mini\Contracts;
 
-use ArrayAccess;
+use Closure;
 use Countable;
 use IteratorAggregate;
+use JsonSerializable;
 
 /**
- * Generic collection interface that extends standard PHP collection interfaces
+ * Traversable collection with functional transformation methods
  *
- * Provides a more expressive API than raw array access while maintaining
- * compatibility with standard PHP collection patterns.
+ * Represents a sequence of items that can be iterated, counted, and transformed
+ * using functional operations like map() and filter(). All transformation methods
+ * return new CollectionInterface instances (immutable).
  *
- * @template K of array-key
- * @template V
- * @extends ArrayAccess<K, V>
- * @extends IteratorAggregate<K, V>
+ * @template T
+ * @extends IteratorAggregate<int, T>
  */
-interface CollectionInterface extends ArrayAccess, Countable, IteratorAggregate
+interface CollectionInterface extends IteratorAggregate, Countable, JsonSerializable
 {
     /**
-     * Check if a key exists in the collection
+     * Transform each item using a closure
+     *
+     * Returns a new collection with each item transformed by the closure.
+     *
+     * @template U
+     * @param Closure(T): U $fn
+     * @return CollectionInterface<U>
      */
-    public function has(mixed $key): bool;
+    public function map(Closure $fn): CollectionInterface;
 
     /**
-     * Get a value by key
-     * @return V|null
+     * Filter items using a closure
+     *
+     * Returns a new collection containing only items for which the closure
+     * returns true. Keys are re-indexed (0, 1, 2, ...).
+     *
+     * @param Closure(T): bool $fn
+     * @return CollectionInterface<T>
      */
-    public function get(mixed $key): mixed;
+    public function filter(Closure $fn): CollectionInterface;
 
     /**
-     * Set a value for a key
-     * @param V|null $value
+     * Get the first item, or null if empty
+     *
+     * @return T|null
      */
-    public function set(mixed $key, mixed $value): void;
+    public function first(): mixed;
 
     /**
-     * Add a value for a key (throws if key already exists)
-     * @param V|null $value
-     * @throws \RuntimeException If the key already exists
+     * Get the last item, or null if empty
+     *
+     * @return T|null
      */
-    public function add(mixed $key, mixed $value): void;
+    public function last(): mixed;
 
     /**
-     * Delete a key from the collection
-     * @return bool True if the key was deleted, false if it didn't exist
+     * Check if collection is empty
      */
-    public function delete(mixed $key): bool;
+    public function isEmpty(): bool;
 
     /**
-     * Get all keys in the collection
-     * @return array<K>
+     * Reduce collection to a single value
+     *
+     * @template U
+     * @param Closure(U, T): U $fn
+     * @param U $initial
+     * @return U
      */
-    public function keys(): array;
+    public function reduce(Closure $fn, mixed $initial): mixed;
 
     /**
-     * Get all values in the collection
-     * @return array<V>
+     * Get all items as an array
+     *
+     * @return array<int, T>
      */
-    public function values(): array;
+    public function toArray(): array;
+
+    /**
+     * Check if any item matches the predicate
+     *
+     * @param Closure(T): bool $fn
+     */
+    public function any(Closure $fn): bool;
+
+    /**
+     * Check if no items match the predicate
+     *
+     * @param Closure(T): bool $fn
+     */
+    public function none(Closure $fn): bool;
+
+    /**
+     * Check if all items match the predicate
+     *
+     * @param Closure(T): bool $fn
+     */
+    public function all(Closure $fn): bool;
+
+    /**
+     * Find the first item matching the predicate
+     *
+     * @param Closure(T): bool $fn
+     * @return T|null
+     */
+    public function find(Closure $fn): mixed;
 }

@@ -2,7 +2,7 @@
 
 namespace mini;
 
-use mini\Contracts\CollectionInterface;
+use mini\Contracts\MapInterface;
 use mini\Mini;
 use mini\Tables\RepositoryInterface;
 use mini\Tables\RepositoryException;
@@ -20,9 +20,9 @@ use mini\Util\InstanceStore;
  * Repositories must be registered as factory Closures that return RepositoryInterface instances.
  * This ensures fresh database connections per request in long-running applications.
  *
- * @return CollectionInterface<string, \Closure> Collection of repository factories
+ * @return MapInterface<string, \Closure> Map of repository factories
  */
-function repositories(): CollectionInterface {
+function repositories(): MapInterface {
     static $repositories = null;
 
     if ($repositories === null) {

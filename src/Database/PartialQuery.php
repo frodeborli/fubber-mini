@@ -2,6 +2,9 @@
 
 namespace mini\Database;
 
+use Closure;
+use mini\Collection;
+use mini\Contracts\CollectionInterface;
 use mini\Table\Contracts\SetInterface;
 use mini\Table\Contracts\TableInterface;
 use mini\Table\Predicate;
@@ -932,7 +935,34 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function jsonSerialize(): array
     {
-        return $this->toArray();
+        return iterator_to_array($this, false);
+    }
+
+    /**
+     * Transform each row using a closure
+     *
+     * Materializes the query and returns a Collection with transformed items.
+     *
+     * @template U
+     * @param Closure(T): U $fn
+     * @return CollectionInterface<U>
+     */
+    public function map(Closure $fn): CollectionInterface
+    {
+        return Collection::from($this)->map($fn);
+    }
+
+    /**
+     * Filter rows using a closure
+     *
+     * Materializes the query and returns a Collection with matching items.
+     *
+     * @param Closure(T): bool $fn
+     * @return CollectionInterface<T>
+     */
+    public function filter(Closure $fn): CollectionInterface
+    {
+        return Collection::from($this)->filter($fn);
     }
 
     /**

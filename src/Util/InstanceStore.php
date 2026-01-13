@@ -7,7 +7,7 @@ use Countable;
 use IteratorAggregate;
 use ArrayIterator;
 use InvalidArgumentException;
-use mini\Contracts\CollectionInterface;
+use mini\Contracts\MapInterface;
 
 /**
  * Generic instance store that mirrors WeakMap API but with type validation
@@ -16,9 +16,9 @@ use mini\Contracts\CollectionInterface;
  * Mirrors PHP's WeakMap API for familiar usage patterns.
  *
  * @template T of object
- * @implements CollectionInterface<string, T>
+ * @implements MapInterface<string, T>
  */
-class InstanceStore implements CollectionInterface
+class InstanceStore implements MapInterface
 {
     /** @var array<string, T> */
     private array $instances = [];

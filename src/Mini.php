@@ -5,7 +5,6 @@ namespace mini;
 
 use Closure;
 use Fiber;
-use mini\Contracts\CollectionInterface;
 use mini\Util\InstanceStore;
 use mini\Util\PathsRegistry;
 use Psr\Container\ContainerInterface;
