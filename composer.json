@@ -52,6 +52,7 @@
             "src/Async/functions.php",
             "src/Validator/functions.php",
             "src/Metadata/functions.php",
+            "src/Inference/functions.php",
             "src/Dispatcher/defaults.php"
         ]
     },
