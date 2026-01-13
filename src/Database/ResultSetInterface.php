@@ -17,15 +17,6 @@ use stdClass;
 interface ResultSetInterface extends \IteratorAggregate, \JsonSerializable, \Countable
 {
     /**
-     * Get all rows as an array
-     *
-     * Warning: Materializes all results into memory.
-     *
-     * @return array<int, T>
-     */
-    public function toArray(): array;
-
-    /**
      * Get the first row only
      *
      * @return T|null

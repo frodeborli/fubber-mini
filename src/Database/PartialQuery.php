@@ -922,7 +922,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function toArray(): array
     {
-        return iterator_to_array($this);
+        throw new \RuntimeException("PartialQuery::toArray() is not supported; PartialQuery is immutable and can be passed to views - use iterator_to_array() if materialization is needed.");
     }
 
     /**

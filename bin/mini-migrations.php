@@ -125,7 +125,7 @@ function ensureMigrationsTable(): void {
  */
 function getExecutedMigrations(): array {
     $db = getDb();
-    $rows = $db->query("SELECT migration, batch, reversible FROM _mini_migrations ORDER BY migration")->toArray();
+    $rows = iterator_to_array($db->query("SELECT migration, batch, reversible FROM _mini_migrations ORDER BY migration"));
     $result = [];
     foreach ($rows as $row) {
         $result[$row->migration] = (object)[
@@ -184,10 +184,12 @@ function findMigrationFile(mini\Util\PathsRegistry $registry, string $name): ?st
 }
 
 /**
- * Run a single migration in isolated subprocess
+ * Run a single migration in isolated subprocess.
+ * The subprocess handles both execution and recording in a single transaction.
  */
-function runMigration(string $file, string $direction, string $runnerScript): array {
-    $cmd = [PHP_BINARY, $runnerScript, $file, $direction];
+function runMigration(string $file, string $direction, string $runnerScript,
+                      string $name, int $batch): array {
+    $cmd = [PHP_BINARY, $runnerScript, $file, $direction, $name, (string) $batch];
 
     $descriptors = [
         0 => ['pipe', 'r'],  // stdin
@@ -297,13 +299,12 @@ switch ($command) {
         foreach ($pending as $name => $file) {
             echo "Migrating: $name\n";
 
-            $result = runMigration($file, 'up', $runnerScript);
+            $result = runMigration($file, 'up', $runnerScript, $name, $batch);
 
             if (!empty($result['success'])) {
-                $reversible = !empty($result['reversible']);
-                recordMigration($name, $batch, $reversible);
+                // Recording is now done by the subprocess in the same transaction
                 $type = $result['type'] ?? 'unknown';
-                $reversibleLabel = $reversible ? ' (reversible)' : '';
+                $reversibleLabel = !empty($result['reversible']) ? ' (reversible)' : '';
                 echo "  ✓ Migrated [$type]$reversibleLabel\n\n";
             } else {
                 $error = $result['error'] ?? 'Unknown error';
@@ -335,10 +336,10 @@ switch ($command) {
         $targetBatch = max(0, $currentBatch - $steps + 1);
 
         $db = getDb();
-        $toRollback = $db->query(
+        $toRollback = iterator_to_array($db->query(
             "SELECT migration, reversible FROM _mini_migrations WHERE batch >= ? ORDER BY migration DESC",
             [$targetBatch]
-        )->toArray();
+        ));
 
         if (empty($toRollback)) {
             echo "Nothing to rollback.\n";
@@ -374,10 +375,10 @@ switch ($command) {
 
             echo "Rolling back: $name\n";
 
-            $result = runMigration($file, 'down', $runnerScript);
+            $result = runMigration($file, 'down', $runnerScript, $name, 0);
 
             if (!empty($result['success'])) {
-                removeMigration($name);
+                // Removal is now done by the subprocess in the same transaction
                 echo "  ✓ Rolled back\n\n";
             } else {
                 $error = $result['error'] ?? 'Unknown error';
