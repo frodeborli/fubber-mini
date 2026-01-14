@@ -3,6 +3,7 @@
 namespace mini\Validator\Attributes;
 
 use Attribute;
+use mini\Validator\Purpose;
 
 /**
  * Define a field validator on a class/interface without a property
@@ -38,6 +39,7 @@ class Field
         public ?bool $required = null,
         public mixed $const = null,
         public ?array $enum = null,
-        public ?string $message = null
+        public ?string $message = null,
+        public Purpose|string|null $purpose = null
     ) {}
 }

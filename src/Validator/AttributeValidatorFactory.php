@@ -11,6 +11,10 @@ use mini\Validator\Attributes;
  *
  * Scans class properties for validation attributes and constructs
  * a Validator instance that validates the entire object structure.
+ *
+ * Supports purpose-scoped validation (like Jakarta/Symfony groups):
+ * - forClass(User::class) returns core validator (attributes without purpose)
+ * - forClass(User::class, Purpose::Create) returns purpose-specific validator
  */
 class AttributeValidatorFactory
 {
@@ -18,9 +22,10 @@ class AttributeValidatorFactory
      * Build a validator from a class using reflection
      *
      * @param class-string $className Class to build validator for
+     * @param Purpose|string|null $purpose Filter attributes by purpose (null = core validation)
      * @return Validator Object validator with property validators
      */
-    public function forClass(string $className): Validator
+    public function forClass(string $className, Purpose|string|null $purpose = null): Validator
     {
         $reflection = new ReflectionClass($className);
         $validator = (new Validator())->type('object');
@@ -30,6 +35,12 @@ class AttributeValidatorFactory
         // First, process Field attributes on the class itself
         foreach ($reflection->getAttributes(Attributes\Field::class) as $attribute) {
             $field = $attribute->newInstance();
+
+            // Filter by purpose
+            if (!$this->purposeMatches($field->purpose, $purpose)) {
+                continue;
+            }
+
             $fieldValidator = $this->buildFieldValidator($field);
 
             if ($fieldValidator !== null) {
@@ -39,7 +50,7 @@ class AttributeValidatorFactory
 
         // Then, process actual properties
         foreach ($reflection->getProperties(ReflectionProperty::IS_PUBLIC) as $property) {
-            $propertyValidator = $this->buildPropertyValidator($property);
+            $propertyValidator = $this->buildPropertyValidator($property, $purpose);
 
             if ($propertyValidator !== null) {
                 $properties[$property->getName()] = $propertyValidator;
@@ -56,6 +67,24 @@ class AttributeValidatorFactory
         // derives the JSON Schema 'required' array from $validator->isRequired.
 
         return $validator;
+    }
+
+    /**
+     * Check if an attribute's purpose matches the requested purpose
+     *
+     * @param Purpose|string|null $attrPurpose The attribute's purpose
+     * @param Purpose|string|null $requestedPurpose The requested purpose filter
+     * @return bool True if the attribute should be included
+     */
+    private function purposeMatches(Purpose|string|null $attrPurpose, Purpose|string|null $requestedPurpose): bool
+    {
+        // Normalize to string values
+        $attrValue = $attrPurpose instanceof Purpose ? $attrPurpose->value : $attrPurpose;
+        $requestedValue = $requestedPurpose instanceof Purpose ? $requestedPurpose->value : $requestedPurpose;
+
+        // Core validator ($requestedPurpose === null) only includes attributes without purpose
+        // Purpose validator includes only attributes with matching purpose
+        return $attrValue === $requestedValue;
     }
 
     /**
@@ -148,9 +177,10 @@ class AttributeValidatorFactory
      * Build a validator for a single property from its attributes
      *
      * @param ReflectionProperty $property Property to build validator for
+     * @param Purpose|string|null $purpose Filter attributes by purpose
      * @return Validator|null Property validator, or null if no validation attributes
      */
-    private function buildPropertyValidator(ReflectionProperty $property): ?Validator
+    private function buildPropertyValidator(ReflectionProperty $property, Purpose|string|null $purpose): ?Validator
     {
         $attributes = $property->getAttributes();
 
@@ -162,10 +192,16 @@ class AttributeValidatorFactory
         $hasValidation = false;
 
         foreach ($attributes as $attribute) {
-            $instance = $attribute->newInstance();
-
             // Skip non-validator attributes (e.g., Tables attributes)
             if (!str_starts_with($attribute->getName(), 'mini\\Validator\\Attributes\\')) {
+                continue;
+            }
+
+            $instance = $attribute->newInstance();
+
+            // Filter by purpose
+            $attrPurpose = $instance->purpose ?? null;
+            if (!$this->purposeMatches($attrPurpose, $purpose)) {
                 continue;
             }
 
