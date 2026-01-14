@@ -63,30 +63,48 @@ Handlers return:
 - `false` - Deny (stops processing)
 - `null` - Pass to next handler
 
-## Handler Resolution
+## Guards (Cross-Cutting Security)
 
-Mini checks the most specific handler first: entity class → marker interfaces → parent class → fallback. You usually only care about "class beats parent class"; interface handlers are for cross-cutting rules.
+Guards run **before** handlers and can only deny or pass. Use them for security concerns that must be enforced regardless of entity-specific rules.
 
 ```php
-// Cross-cutting: block access to other tenants' data
-$auth->for(TenantScoped::class)->listen(function(AuthorizationQuery $q): ?bool {
+// Tenant isolation: runs before any Product/Model handlers
+$auth->guard(TenantScoped::class)->listen(function(AuthorizationQuery $q): ?bool {
     $entity = $q->instance();
     if ($entity && $entity->tenant_id !== auth()->getClaim('tenant_id')) {
-        return false;  // Wrong tenant, deny
+        return false;  // Deny - wrong tenant
     }
-    return null;  // Correct tenant, pass to next handler
+    return null;  // Pass - correct tenant, continue to handlers
 });
+```
 
+Guards returning `true` throws `LogicException`. Guards can only deny (`false`) or pass (`null`).
+
+## Execution Order
+
+For `can(Ability::Delete, $product)` where `class Product extends Model implements TenantScoped`:
+
+```
+Phase 1: Guards (deny-only)
+  Product guards → TenantScoped guards → Model guards
+  If any returns false → deny immediately
+
+Phase 2: Handlers (allow/deny)
+  Product → TenantScoped → Model → fallback → default (allow)
+```
+
+This ensures tenant isolation (or other guards) cannot be bypassed by a Product handler returning `true`.
+
+## Handler Resolution
+
+Within each phase, Mini checks the most specific first: entity class → marker interfaces → parent class → fallback.
+
+```php
 // Generic: default rules for all Models
 $auth->for(Model::class)->listen(fn($q) => auth()->isAuthenticated());
 
 // Specific: custom rules for Product (checked before Model)
 $auth->for(Product::class)->listen(fn($q) => ...);
-```
-
-For `class Product extends Model implements TenantScoped`:
-```
-Product → TenantScoped → Model → fallback
 ```
 
 ## AuthorizationQuery

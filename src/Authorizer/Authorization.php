@@ -8,29 +8,39 @@ use mini\Hooks\Handler;
  * Authorization service
  *
  * Manages ability registration and authorization queries via Handler dispatch.
- * Handlers are registered per-class and resolved by type specificity - more specific
- * classes are checked before parent classes and interfaces.
+ * Handlers are registered per-class and resolved by type specificity.
  *
- * Resolution order for `can(Ability::Delete, $post)`:
- * 1. Handlers for Post::class
- * 2. Handlers for parent classes (e.g., Model::class)
- * 3. Handlers for interfaces
- * 4. Fallback handler
+ * ## Execution Order
  *
- * If no handler responds, the default is true (allow). Authorization is opt-in.
+ * For `can(Ability::Delete, $post)` where Post extends Model implements TenantScoped:
  *
- * ## Registering Handlers
+ * 1. **Guards** (deny-only, type-specific):
+ *    Post guards → TenantScoped guards → Model guards
+ *    If any guard returns false → deny immediately
+ *
+ * 2. **Handlers** (allow/deny, type-specific):
+ *    Post → TenantScoped → Model → fallback
+ *
+ * 3. **Default**: allow (if no handler responds)
+ *
+ * ## Guards (Cross-Cutting Security)
  *
  * ```php
- * $auth = Mini::$mini->get(Authorization::class);
- *
- * // Specific handler for User class
- * $auth->for(User::class)->listen(function(AuthorizationQuery $q): ?bool {
- *     // Field-level check
- *     if ($q->field === 'role' && $q->ability === Ability::Update) {
- *         return auth()->hasRole('admin');
+ * // Guards run FIRST and can only deny or pass
+ * $auth->guard(TenantScoped::class)->listen(function(AuthorizationQuery $q): ?bool {
+ *     $entity = $q->instance();
+ *     if ($entity && $entity->tenant_id !== auth()->getClaim('tenant_id')) {
+ *         return false;  // Deny - wrong tenant
  *     }
+ *     return null;  // Pass - continue checking
+ * });
+ * ```
  *
+ * ## Handlers
+ *
+ * ```php
+ * // Handlers run after guards pass
+ * $auth->for(User::class)->listen(function(AuthorizationQuery $q): ?bool {
  *     return match ($q->ability) {
  *         Ability::List => auth()->isAuthenticated(),
  *         Ability::Create => auth()->hasRole('admin'),
@@ -40,46 +50,13 @@ use mini\Hooks\Handler;
  *         default => null,
  *     };
  * });
- *
- * // Generic handler for all Model subclasses (checked after specific handlers)
- * $auth->for(Model::class)->listen(function(AuthorizationQuery $q): ?bool {
- *     return auth()->hasRole('admin');
- * });
- *
- * // Fallback for anything not matched
- * $auth->fallback->listen(function(AuthorizationQuery $q): ?bool {
- *     return false;
- * });
- * ```
- *
- * ## Custom Abilities
- *
- * ```php
- * $auth->registerAbility('publish');
- * $auth->registerAbility('archive');
- *
- * $auth->for(Post::class)->listen(function(AuthorizationQuery $q): ?bool {
- *     if ($q->ability === 'publish') {
- *         return auth()->hasRole('editor');
- *     }
- *     return null;
- * });
- * ```
- *
- * ## Checking Authorization
- *
- * ```php
- * // Via service
- * $auth->can(Ability::Delete, $user);
- *
- * // Via helper function
- * can(Ability::Delete, $user);
- * can(Ability::Update, $user, 'role');
- * can(Ability::List, User::class);
  * ```
  */
 class Authorization
 {
+    /** @var array<string, Handler<AuthorizationQuery, bool>> */
+    private array $guards = [];
+
     /** @var array<string, Handler<AuthorizationQuery, bool>> */
     private array $handlers = [];
 
@@ -92,6 +69,24 @@ class Authorization
     public function __construct()
     {
         $this->fallback = new Handler('authorization:fallback');
+    }
+
+    /**
+     * Get or create guard for a specific resource
+     *
+     * Guards run BEFORE normal handlers and can only deny (return false) or pass (return null).
+     * Use guards for cross-cutting security concerns like tenant isolation.
+     *
+     * Guards follow the same type specificity as handlers but run in a separate phase:
+     * 1. All guards are checked first (can deny)
+     * 2. Then normal handlers are checked (can allow or deny)
+     *
+     * @param string $resource Class name or resource identifier
+     * @return Handler<AuthorizationQuery, bool>
+     */
+    public function guard(string $resource): Handler
+    {
+        return $this->guards[$resource] ??= new Handler("authorization-guard:$resource");
     }
 
     /**
@@ -112,6 +107,12 @@ class Authorization
     /**
      * Check if the current user can perform an ability on an entity
      *
+     * Execution order:
+     * 1. Guards (deny-only, type-specific) - if any returns false, deny immediately
+     * 2. Handlers (allow/deny, type-specific)
+     * 3. Fallback handler
+     * 4. Default: allow
+     *
      * @param Ability|string $ability The ability to check
      * @param object|string $entity Entity instance or class name
      * @param string|null $field Optional field name for field-level checks
@@ -129,7 +130,22 @@ class Authorization
         $query = new AuthorizationQuery($ability, $entity, $field);
         $class = is_string($entity) ? $entity : $entity::class;
 
-        // Walk class hierarchy (most specific first)
+        // Phase 1: Guards (deny-only)
+        foreach ($this->walkClassHierarchy($class) as $type) {
+            if (isset($this->guards[$type])) {
+                $result = $this->guards[$type]->trigger($query);
+                if ($result === true) {
+                    throw new \LogicException(
+                        "Guard for '$type' returned true. Guards can only deny (false) or pass (null), not allow."
+                    );
+                }
+                if ($result === false) {
+                    return false; // Guard denied
+                }
+            }
+        }
+
+        // Phase 2: Normal handlers
         foreach ($this->walkClassHierarchy($class) as $type) {
             if (isset($this->handlers[$type])) {
                 $result = $this->handlers[$type]->trigger($query);

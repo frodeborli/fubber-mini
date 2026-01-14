@@ -15,6 +15,95 @@ Visit `http://localhost/time` - you're running.
 
 ---
 
+## Framework Aspects
+
+Mini provides composable, well-implemented functionality for many concerns in modern application development. All features lazy-load—nothing is loaded until touched.
+
+### Core Infrastructure
+
+* **[Service Container](./src/Mini.php)**: `Mini::$mini` is a PSR-11 container managing service lifetimes (Singleton, Scoped, Transient), application phases, and dependency resolution. Access services via helper functions like `db()`, `cache()`, `auth()`.
+
+* **[Dispatcher](./src/Dispatcher/README.md)**: Bootstraps PSR-7 requests from HTTP globals, routes requests, converts exceptions to responses, and emits PSR-7 responses. Entry point: `mini\dispatch()`.
+
+* **[Router](./src/Router/README.md)**: File-based routing where paths map directly to `_routes/` files. Supports wildcards (`_.php`), dynamic segments, controller mounting via `__DEFAULT__.php`, and PSR-15 handler integration. For pattern based routing, combine file based routing with [Controllers](./src/Controller/README.md).
+
+* **[Http](./src/Http/README.md)**: PSR-7 compliant request/response objects, HTTP exceptions, and customizable error pages. Mini also supports native PHP output (`echo`, `header()`) alongside PSR-7.
+
+* **[Session](./src/Session/README.md)**: Transparent session management that replaces `$_SESSION` with a fiber-safe proxy. Auto-starts on access, integrates with async runtimes.
+
+### Security
+
+* **[Auth](./src/Auth/README.md)**: Authentication facade where applications implement `AuthInterface` to define their auth scheme (sessions, JWT, API keys). Mini provides `auth()` for checking authentication, roles, and permissions.
+
+* **[Authorizer](./src/Authorizer/README.md)**: Resource-based authorization answering "can this user do X to Y?" Check with `can(Ability::Delete, $post)` at collection, instance, or field level. Handlers resolve by type specificity.
+
+### Data Access
+
+* **[Database](./src/Database/README.md)**: PDO-backed database abstraction with `db()` for queries, transactions, and an immutable query builder (`PartialQuery`). Zero-config SQLite by default, environment-based MySQL/PostgreSQL configuration. Mini also provides a composable SQL 2003 query evaluator (INSERT, UPDATE, CREATE, DELETE with subqueries and joins and CTEs) in VirtualDatabase with predicate pushdown which can facilitate safe SQL access via APIs or be used internally as backends for entities. You can mount any PartialQuery as a table in a virtual table, and this works from real database backends and other virtual databases.
+
+* **[Tables](./src/Tables/README.md)**: Backend-agnostic ORM with attribute-based entities, automatic type conversion, and identity mapping. Switch between SQLite, MySQL, PostgreSQL, or CSV without changing application code.
+
+* **[Table](./src/Table/)**: Composable query builder for tabular data sources (arrays, CSV, JSON, database results) with a unified fluent API for filtering, sorting, and joining.
+
+* **[Cache](./src/Cache/README.md)**: Zero-configuration PSR-16 caching that auto-selects the best driver (APCu → SQLite → Filesystem). Supports namespaced isolation and custom backends.
+
+### Web & API
+
+* **[Controller](./src/Controller/README.md)**: Attribute-based routing with `#[GET]`, `#[POST]`, etc. Type-safe URL parameters, automatic return value conversion (arrays → JSON), and PSR-15 compatibility.
+
+* **[Template](./src/Template/README.md)**: Pure PHP templates with multi-level inheritance via `$this->extend()` and `$this->block()`. No template language to learn—just PHP.
+
+* **[Static](./src/Static/README.md)**: PSR-15 middleware serving static files from `_static/` with HTTP caching, conditional requests (304), and multi-level path resolution.
+
+* **[Converter](./src/Converter/README.md)**: Type conversion registry transforming return values, exceptions, and domain objects to HTTP responses. Resolves by type specificity with union type support.
+
+### Communication
+
+* **[Mail](./src/Mail/README.md)**: RFC 5322-compliant email composition with MIME structure, HTML with inline images, attachments, and pluggable transports (mail, sendmail).
+
+* **[Logger](./src/Logger/README.md)**: PSR-3 compatible logging with ICU MessageFormatter interpolation. Built-in handler writes to `error_log`; swap in Monolog or any PSR-3 logger.
+
+### Validation & Schema
+
+* **[Validator](./src/Validator/README.md)**: JSON Schema-compatible validation with fluent API and attribute-based schemas. Composable, purpose-scoped (Create/Update), exportable to JSON Schema for client-side use.
+
+* **[Metadata](./src/Metadata/README.md)**: JSON Schema annotations for documenting classes via attributes—titles, descriptions, examples, UI hints—separate from validation rules.
+
+### Internationalization
+
+* **[I18n](./src/I18n/README.md)**: Translation via `t()` using ICU MessageFormat (pluralization, gender, selects). File-per-source structure mirrors your code. Locale-aware formatting via `fmt()` for currency, dates, numbers.
+
+### Events & Extensibility
+
+* **[Hooks](./src/Hooks/README.md)**: Event dispatcher system with specialized patterns—Event (multi-fire), Trigger (one-time with memory), Handler (chain of responsibility), Filter (data pipeline), StateMachine.
+
+### Utilities
+
+* **[CLI](./src/CLI/README.md)**: Argument parsing for command-line tools via `ArgManager`. Flags, options, subcommands, and delegation to external tools.
+
+* **[UUID](./src/UUID/README.md)**: UUID generation with time-ordered v7 (database-friendly) as default, v4 for maximum randomness. ~200k UUIDs/second.
+
+* **[Async](./src/Async/README.md)**: Interface for async runtimes (phasync, Swoole, ReactPHP) to integrate with Mini's fiber-aware architecture.
+
+* **[Inference](./src/Inference/README.md)**: Service interface for LLM-based structured evaluation—send prompts, receive schema-compliant JSON responses.
+
+* **[Util](./src/Util/README.md)**: Foundation utilities—`IdentityMap` (weak-ref object tracking), `InstanceStore` (typed singletons), `Path` (cross-platform paths), `PathsRegistry` (priority-based file resolution), `QueryParser` (SQL-like filtering), `MachineSalt` (zero-config cryptographic salt), and arbitrary-precision math (`Decimal`, `BigInt`).
+
+### CLI Tools
+
+Mini includes command-line tools via `vendor/bin/mini`:
+
+* **`mini serve`**: Development server with auto-reload
+* **`mini migrations`**: Migration runner with tracking, rollback, and `make` scaffolding
+* **`mini translations`**: Manage translation files—validate, add missing strings, add languages, remove orphans
+* **`mini docs`**: Browse PHP documentation for classes, functions, and namespaces
+* **`mini test`**: Run tests with pattern matching
+* **`mini db`**: Interactive SQL REPL for your database
+* **`mini vdb`**: VirtualDatabase shell for CSV/JSON data sources
+* **`mini benchmark`**: HTTP performance benchmarking
+
+---
+
 ## Philosophy
 
 Mini is built on a **Lindy perspective**: if a pattern has worked for 40 years, it will likely work for 40 more. We reject patterns that trigger frequent redesign.
