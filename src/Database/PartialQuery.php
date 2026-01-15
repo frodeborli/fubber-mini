@@ -95,6 +95,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     private ?\Closure $hydrator = null;
     private ?string $entityClass = null;
     private array|false $entityConstructorArgs = false;
+    private ?\Closure $loadCallback = null;
 
     /**
      * @internal Use PartialQuery::fromSql() factory instead
@@ -246,6 +247,21 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         $new->entityClass            = $class;
         $new->entityConstructorArgs  = $constructorArgs;
         $new->hydrator               = null;
+        return $new;
+    }
+
+    /**
+     * Set a callback to be called after each entity is hydrated
+     *
+     * Used by ModelTrait to mark entities as loaded from the database.
+     *
+     * @param \Closure(object):void $callback Called with each hydrated entity
+     * @return self
+     */
+    public function withLoadCallback(\Closure $callback): self
+    {
+        $new = clone $this;
+        $new->loadCallback = $callback;
         return $new;
     }
 
@@ -535,6 +551,140 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             // New CTE -> append
             $new->cteList[] = $foreignCte;
         }
+
+        return $new;
+    }
+
+    /**
+     * Add a PartialQuery as a named CTE (Common Table Expression)
+     *
+     * Allows composing queries from other PartialQueries. The CTE can then
+     * be referenced by name in the main query's SQL.
+     *
+     * When adding a CTE with the same name as an existing CTE, the existing
+     * CTE is renamed and the new CTE wraps it, creating a filter chain:
+     *
+     * ```php
+     * $q = db()->query('SELECT * FROM users WHERE age >= 18');
+     * $q = $q->withCTE('users', db()->query('SELECT * FROM users WHERE age <= 67'));
+     * $q = $q->withCTE('users', db()->query('SELECT * FROM users WHERE gender = "male"'));
+     * ```
+     *
+     * Produces:
+     * ```sql
+     * WITH _cte_1 AS (SELECT * FROM users WHERE age <= 67),
+     *      users AS (SELECT * FROM _cte_1 WHERE gender = "male")
+     * SELECT * FROM users WHERE age >= 18
+     * ```
+     *
+     * Each new CTE wraps the previous one, chaining filters together.
+     * The baseSql always references the outermost CTE.
+     *
+     * @param string $name CTE name to use in the query
+     * @param self $query PartialQuery to use as the CTE definition
+     * @return self New instance with the CTE added
+     * @throws \InvalidArgumentException If queries use different database connections
+     */
+    public function withCTE(string $name, self $query): self
+    {
+        if ($this->db !== $query->db) {
+            throw new \InvalidArgumentException(
+                "Cannot add CTE '{$name}': query uses a different database connection. " .
+                'Use ->column() to materialize the subquery first.'
+            );
+        }
+
+        // Hide same-named CTE in the query being added (its internal implementation detail)
+        $query = $query->hideCTE($name);
+
+        // Merge any nested CTEs from the source query
+        $new = $this->withCTEsFrom($query);
+
+        // Build the new CTE's SQL
+        $newCteSql = $query->buildSql(null);
+        $newCteParams = $query->getAllParams();
+
+        // Check if we already have a CTE with this name
+        $existingIndex = null;
+        foreach ($new->cteList as $i => $cte) {
+            if ($cte['name'] === $name) {
+                $existingIndex = $i;
+                break;
+            }
+        }
+
+        if ($existingIndex !== null) {
+            // Rename OLD CTE to unique name
+            $renamedName = '_cte_' . str_replace('.', '_', (string) hrtime(true));
+            $new->cteList[$existingIndex]['name'] = $renamedName;
+
+            // Update NEW CTE's SQL to reference the renamed OLD CTE
+            // This makes the new CTE wrap the old one
+            $pattern = '/\b' . preg_quote($name, '/') . '\b/';
+            $newCteSql = preg_replace($pattern, $renamedName, $newCteSql);
+        }
+
+        // Add NEW CTE with the requested name
+        $new->cteList[] = [
+            'name' => $name,
+            'sql' => $newCteSql,
+            'params' => $newCteParams,
+        ];
+
+        return $new;
+    }
+
+    /**
+     * Hide a CTE by renaming it to a unique internal name
+     *
+     * This is a safety mechanism for composable queries. When a method
+     * internally uses a CTE (e.g., for soft-delete filtering), it can
+     * hide that CTE before returning, preventing conflicts when the
+     * query is used as a CTE in an outer query.
+     *
+     * If no CTE with the given name exists, this is a no-op.
+     *
+     * @param string $name CTE name to hide
+     * @return self New instance with the CTE renamed (or same instance if not found)
+     * @internal
+     */
+    protected function hideCTE(string $name): self
+    {
+        // Find the CTE
+        $cteIndex = null;
+        foreach ($this->cteList as $i => $cte) {
+            if ($cte['name'] === $name) {
+                $cteIndex = $i;
+                break;
+            }
+        }
+
+        if ($cteIndex === null) {
+            return $this; // No-op - safe to call even if CTE doesn't exist
+        }
+
+        // Generate unique name using monotonic nanosecond timestamp
+        $newName = '_cte_' . str_replace('.', '_', (string) hrtime(true));
+
+        $new = clone $this;
+
+        // Rename in cteList
+        $new->cteList[$cteIndex]['name'] = $newName;
+
+        // Rename references in baseSql using word boundaries
+        // This is safe because $newName is unique and won't collide
+        $pattern = '/\b' . preg_quote($name, '/') . '\b/';
+        $new->baseSql = preg_replace($pattern, $newName, $new->baseSql);
+
+        // Rename references in whereParts
+        foreach ($new->whereParts as $i => $part) {
+            $new->whereParts[$i]['sql'] = preg_replace($pattern, $newName, $part['sql']);
+        }
+
+        // Invalidate cached analysis (SQL changed)
+        $new->analyzed = false;
+        $new->sourceTable = null;
+        $new->baseWhereAst = null;
 
         return $new;
     }
@@ -1032,10 +1182,14 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             $class = $this->entityClass;
             $args  = $this->entityConstructorArgs;
 
-            // Check if class implements SqlRowHydrator for custom hydration
-            if (is_subclass_of($class, SqlRowHydrator::class)) {
+            // Check if class implements Hydration for custom hydration
+            if (is_subclass_of($class, Hydration::class)) {
                 foreach ($rows as $row) {
-                    yield $class::fromSqlRow($row);
+                    $obj = $class::fromSqlRow($row);
+                    if ($this->loadCallback !== null) {
+                        ($this->loadCallback)($obj);
+                    }
+                    yield $obj;
                 }
                 return;
             }
@@ -1095,6 +1249,9 @@ final class PartialQuery implements ResultSetInterface, TableInterface
                         $cached['prop']->setValue($obj, $value);
                     }
 
+                    if ($this->loadCallback !== null) {
+                        ($this->loadCallback)($obj);
+                    }
                     yield $obj;
                 }
             } catch (\ReflectionException $e) {
