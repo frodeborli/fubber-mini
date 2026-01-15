@@ -64,7 +64,6 @@ final class Dehydrator
             }
 
             $prop = $refClass->getProperty($propertyName);
-            $prop->setAccessible(true);
 
             // Get target type for conversion
             $refType = $prop->getType();

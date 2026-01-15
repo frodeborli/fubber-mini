@@ -204,8 +204,10 @@ abstract class AbstractTable implements TableInterface
      * );
      * ```
      */
-    public function or(Predicate ...$predicates): TableInterface
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): TableInterface
     {
+        $predicates = [$a, $b, ...$more];
+
         // Filter out empty predicates (they match nothing)
         $predicates = array_values(array_filter(
             $predicates,

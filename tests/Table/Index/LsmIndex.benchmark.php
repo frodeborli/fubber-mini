@@ -241,7 +241,6 @@ foreach ([1_000, 5_000, 10_000, 50_000, 100_000] as $size) {
     $depth = 1;
     $ref = new ReflectionClass($index);
     $innerProp = $ref->getProperty('inner');
-    $innerProp->setAccessible(true);
 
     $current = $index;
     while (($inner = $innerProp->getValue($current)) !== null) {

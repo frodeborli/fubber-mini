@@ -161,10 +161,10 @@ abstract class AbstractTableWrapper extends AbstractTable
         return $c;
     }
 
-    public function or(Predicate ...$predicates): TableInterface
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): TableInterface
     {
         $c = clone $this;
-        $c->source = $this->source->or(...$predicates);
+        $c->source = $this->source->or($a, $b, ...$more);
         return $c;
     }
 

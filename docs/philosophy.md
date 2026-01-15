@@ -243,19 +243,9 @@ Implicit behavior is only allowed if it is **100% safe in every environment**.
 
 ---
 
-### 7. Repository Pattern First (but Active Record if you want it)
+### 7. Active Record via ModelTrait
 
-#### Preferred style: repositories + POPOs
-
-```php
-$user = Users::find($id);
-$user->email = 'new@example.com';
-Users::save($user);
-```
-
-Repositories are simple PHP classes using `RepositoryTrait` — no magic, no hidden queries.
-
-#### Optional: Active Record
+Mini uses the Active Record pattern with `ModelTrait`:
 
 ```php
 $user = User::find($id);
@@ -263,7 +253,21 @@ $user->email = 'new@example.com';
 $user->save();
 ```
 
-Available via `ModelTrait` for entities that prefer instance methods.
+The traditional argument against Active Record is persistence coupling. Mini solves this with `VirtualDatabase` — the same entity can persist to SQL, CSV, JSON, or remote APIs. Validation is externalized via attributes, not baked into the trait.
+
+```php
+class User {
+    use ModelTrait;
+
+    #[Required, Email]
+    public string $email;
+
+    protected static function tableName(): string { return 'users'; }
+    protected static function primaryKey(): string { return 'id'; }
+}
+```
+
+`ModelTrait` tracks identity correctly — changing `$user->id` after load still triggers an UPDATE, not an INSERT.
 
 ---
 

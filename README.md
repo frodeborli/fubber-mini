@@ -41,8 +41,6 @@ Mini provides composable, well-implemented functionality for many concerns in mo
 
 * **[Database](./src/Database/README.md)**: PDO-backed database abstraction with `db()` for queries, transactions, and an immutable query builder (`PartialQuery`). Zero-config SQLite by default, environment-based MySQL/PostgreSQL configuration. Mini also provides a composable SQL 2003 query evaluator (INSERT, UPDATE, CREATE, DELETE with subqueries and joins and CTEs) in VirtualDatabase with predicate pushdown which can facilitate safe SQL access via APIs or be used internally as backends for entities. You can mount any PartialQuery as a table in a virtual table, and this works from real database backends and other virtual databases.
 
-* **[Tables](./src/Tables/README.md)**: Backend-agnostic ORM with attribute-based entities, automatic type conversion, and identity mapping. Switch between SQLite, MySQL, PostgreSQL, or CSV without changing application code.
-
 * **[Table](./src/Table/)**: Composable query builder for tabular data sources (arrays, CSV, JSON, database results) with a unified fluent API for filtering, sorting, and joining.
 
 * **[Cache](./src/Cache/README.md)**: Zero-configuration PSR-16 caching that auto-selects the best driver (APCu → SQLite → Filesystem). Supports namespaced isolation and custom backends.
@@ -607,39 +605,6 @@ db()->update(User::mine()->eq('id', 123), ['bio' => 'New']);  // Authorization e
 
 **See [src/Database/README.md](src/Database/README.md) for complete documentation.**
 
-## Tables - ORM with Repository Pattern (Optional)
-
-Define POPOs (Plain Old PHP Objects) with attributes, managed by repositories.
-
-Like Entity Framework's POCO (Plain Old CLR Object) approach, entities are plain classes without database logic:
-
-```php
-use mini\Tables\Attributes\{Entity, Key, Generated, VarcharColumn};
-
-#[Entity(table: 'users')]
-class User {
-    #[Key] #[Generated]
-    public ?int $id = null;
-
-    #[VarcharColumn(100)]
-    public string $username;
-
-    public string $email;
-}
-
-// Find by primary key
-$user = table(User::class)->find($id);
-
-// Query with conditions
-$admins = table(User::class)->where('role = ?', ['admin'])->all();
-
-// Save
-$user = new User();
-$user->username = 'john';
-$user->email = 'john@example.com';
-table(User::class)->save($user);
-```
-
 ## Internationalization
 
 **Best Practice:** Use `t()` and `fmt()` everywhere to make your app translatable from day one.
@@ -1046,7 +1011,6 @@ Detailed documentation for each framework feature:
 - **[src/Database/README.md](src/Database/README.md)** - PDO abstraction, queries, transactions, configuration
 - **[src/Template/README.md](src/Template/README.md)** - Template rendering, inheritance, blocks, partials
 - **[src/I18n/README.md](src/I18n/README.md)** - Translations, ICU MessageFormat, locale formatting
-- **[src/Tables/README.md](src/Tables/README.md)** - ORM, repositories, entities, query building
 - **[src/Auth/README.md](src/Auth/README.md)** - Authentication, user providers, sessions, JWT
 - **[src/Cache/README.md](src/Cache/README.md)** - PSR-16 caching, APCu, SQLite, filesystem
 - **[src/Mail/README.md](src/Mail/README.md)** - Email composition and sending

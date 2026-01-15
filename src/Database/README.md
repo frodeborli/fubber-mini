@@ -156,31 +156,45 @@ enum Status: string {
 
 For SQL Server (which cannot set session timezone), Mini verifies the server's timezone matches `sqlTimezone` and throws if it doesn't.
 
-### Custom Row Hydration with SqlRowHydrator
+### Custom Row Hydration with Hydration Interface
 
-For complex hydration (computed properties, column renaming, nested objects), implement `SqlRowHydrator`:
+For complex hydration/dehydration (computed properties, column renaming, nested objects), implement `Hydration`:
 
 ```php
-use mini\Database\SqlRowHydrator;
+use mini\Database\Hydration;
 
-class User implements SqlRowHydrator
+class User implements Hydration
 {
     public int $id;
     public string $fullName;
-    public Address $address;
+    public \DateTimeImmutable $createdAt;
 
     public static function fromSqlRow(array $row): static
     {
         $user = new static();
         $user->id = $row['id'];
         $user->fullName = $row['first_name'] . ' ' . $row['last_name'];
-        $user->address = new Address($row['street'], $row['city'], $row['zip']);
+        $user->createdAt = new \DateTimeImmutable($row['created_at']);
         return $user;
+    }
+
+    public function toSqlRow(): array
+    {
+        $parts = explode(' ', $this->fullName, 2);
+        return [
+            'id' => $this->id,
+            'first_name' => $parts[0],
+            'last_name' => $parts[1] ?? '',
+            'created_at' => $this->createdAt->format('Y-m-d H:i:s'),
+        ];
     }
 }
 
-// Hydration uses fromSqlRow() automatically
+// Hydration uses fromSqlRow() automatically when reading
 $users = User::query()->limit(10);
+
+// Dehydration uses toSqlRow() automatically when writing
+$user->save();
 ```
 
 ### Custom Value Objects with SqlValueHydrator

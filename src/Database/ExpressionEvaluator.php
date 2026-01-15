@@ -59,6 +59,16 @@ class ExpressionEvaluator
             return $this->evaluateLiteral($node);
         }
 
+        // Bound placeholders - return the bound value directly
+        if ($node instanceof PlaceholderNode) {
+            if (!$node->isBound) {
+                throw new \RuntimeException(
+                    'Cannot evaluate unbound placeholder. Params should be bound to AST before evaluation.'
+                );
+            }
+            return $node->boundValue;
+        }
+
         // Column references
         if ($node instanceof IdentifierNode) {
             return $this->evaluateIdentifier($node, $row, $context);

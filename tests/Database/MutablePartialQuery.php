@@ -370,22 +370,8 @@ $test = new class extends Test {
     }
 
     // -------------------------------------------------------------------------
-    // Predicate access
+    // matches()
     // -------------------------------------------------------------------------
-
-    public function testGetPredicate(): void
-    {
-        $this->createTable();
-        $query = \mini\db()->query('SELECT * FROM mutable_test')->eq('org_id', 100);
-        $mutable = new MutablePartialQuery($query, \mini\db());
-
-        $predicate = $mutable->getPredicate();
-
-        $this->assertInstanceOf(\mini\Table\Predicate::class, $predicate);
-        $this->assertTrue($predicate->test((object)['org_id' => 100]));
-        $this->assertFalse($predicate->test((object)['org_id' => 200]));
-        $this->dropTable();
-    }
 
     public function testMatches(): void
     {

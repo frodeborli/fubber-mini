@@ -2,7 +2,8 @@
 /**
  * Test PartialQuery::withCTE() implementation
  *
- * Tests: CTE addition, CTE chaining/stacking, internal CTE hiding
+ * Tests: CTE addition, CTE conflict detection
+ * Note: CTE shadowing (redefining same name) is NOT supported
  */
 
 require __DIR__ . '/../../ensure-autoloader.php';
@@ -32,46 +33,27 @@ $test = new class extends Test {
         $this->assertStringContainsString('SELECT * FROM users WHERE age >= 18', $sql);
     }
 
-    public function testWithCTEChainsTwoSameNameCTEs(): void
+    public function testWithCTEThrowsOnSameNameCTE(): void
     {
         $q = $this->db->query('SELECT * FROM users WHERE age >= 18');
         $q = $q->withCTE('users', $this->db->query('SELECT * FROM users WHERE age <= 67'));
-        $q = $q->withCTE('users', $this->db->query('SELECT * FROM users WHERE gender = "male"'));
 
-        $sql = (string) $q;
-
-        // Should have renamed first CTE to _cte_*
-        $this->assertTrue(preg_match('/_cte_\d+/', $sql) === 1, 'Should have renamed CTE');
-
-        // New CTE should reference the renamed one
-        $this->assertTrue(
-            preg_match('/users AS \(SELECT \* FROM _cte_\d+ WHERE gender/', $sql) === 1,
-            'New CTE should reference renamed CTE'
-        );
-
-        // Original baseSql should still reference 'users'
-        $this->assertStringContainsString('SELECT * FROM users WHERE age >= 18', $sql);
+        $this->assertThrows(function() use ($q) {
+            $q->withCTE('users', $this->db->query('SELECT * FROM users WHERE gender = "male"'));
+        }, \LogicException::class, 'CTE shadowing is not supported');
     }
 
-    public function testWithCTEChainsThreeSameNameCTEs(): void
+    public function testWithCTEThrowsWhenSourceQueryHasSameNameCTE(): void
     {
         $q = $this->db->query('SELECT * FROM users WHERE age >= 18');
-        $q = $q->withCTE('users', $this->db->query('SELECT * FROM users WHERE age <= 67'));
-        $q = $q->withCTE('users', $this->db->query('SELECT * FROM users WHERE gender = "male"'));
-        $q = $q->withCTE('users', $this->db->query('SELECT * FROM users WHERE is_logged_in = 1'));
 
-        $sql = (string) $q;
+        // Source query has a CTE named 'users'
+        $sourceWithCte = $this->db->query('SELECT * FROM users WHERE active = 1')
+            ->withCTE('users', $this->db->query('SELECT * FROM raw_users'));
 
-        // Should have two renamed CTEs
-        preg_match_all('/_cte_\d+/', $sql, $matches);
-        $uniqueCtes = array_unique($matches[0]);
-        $this->assertSame(2, count($uniqueCtes), 'Should have exactly 2 renamed CTEs');
-
-        // Final 'users' CTE should reference the second renamed CTE
-        $this->assertTrue(
-            preg_match('/users AS \(SELECT \* FROM _cte_\d+ WHERE is_logged_in/', $sql) === 1,
-            'Final CTE should reference renamed CTE'
-        );
+        $this->assertThrows(function() use ($q, $sourceWithCte) {
+            $q->withCTE('users', $sourceWithCte);
+        }, \LogicException::class, 'CTE shadowing is not supported');
     }
 
     public function testWithCTEDifferentNamesDoNotConflict(): void
@@ -130,36 +112,6 @@ $test = new class extends Test {
         }, \InvalidArgumentException::class);
     }
 
-    public function testWithCTEFilterChainProducesCorrectResult(): void
-    {
-        // This test verifies the logical structure of the CTE chain
-        $q = $this->db->query('SELECT * FROM users WHERE age >= 18');
-        $q = $q->withCTE('users', $this->db->query('SELECT * FROM users WHERE age <= 67'));
-        $q = $q->withCTE('users', $this->db->query('SELECT * FROM users WHERE gender = "male"'));
-
-        $sql = (string) $q;
-
-        // The structure should be:
-        // WITH _cte_N AS (SELECT * FROM users WHERE age <= 67),    -- innermost: real table
-        //      users AS (SELECT * FROM _cte_N WHERE gender = "male")  -- wraps _cte_N
-        // SELECT * FROM users WHERE age >= 18                       -- uses outer 'users'
-
-        // First CTE should reference real 'users' table (age filter)
-        $this->assertTrue(
-            preg_match('/_cte_\d+ AS \(SELECT \* FROM users WHERE age <= 67\)/', $sql) === 1,
-            'First CTE should filter by age from real table'
-        );
-
-        // Second CTE 'users' should reference the renamed CTE (gender filter)
-        $this->assertTrue(
-            preg_match('/users AS \(SELECT \* FROM _cte_\d+ WHERE gender/', $sql) === 1,
-            'Second CTE should filter by gender from renamed CTE'
-        );
-
-        // Main query references 'users' (the outer CTE)
-        $this->assertStringEndsWith('SELECT * FROM users WHERE age >= 18', $sql);
-    }
-
     public function testWithCTEAndInSubquery(): void
     {
         // CTE shadows 'users' table - subquery in in() should use the CTE
@@ -174,39 +126,10 @@ $test = new class extends Test {
 
         // Main query should select from groups with IN subquery
         $this->assertStringContainsString('SELECT * FROM groups', $sql);
-        $this->assertStringContainsString('"admin_id" IN (SELECT id FROM users WHERE age >= 18)', $sql);
+        $this->assertStringContainsString('admin_id IN (SELECT id FROM users WHERE age >= 18)', $sql);
 
         // The subquery references 'users' which now resolves to the CTE
         // (SQL semantics - CTE shadows the table name)
-    }
-
-    public function testWithCTEChainAndInSubquery(): void
-    {
-        // Chain two CTEs, then use in() - subquery should see outermost CTE
-        $q = $this->db->query('SELECT * FROM groups')
-            ->in('admin_id', $this->db->query('SELECT id FROM users WHERE role = "admin"'))
-            ->withCTE('users', $this->db->query('SELECT * FROM users WHERE age <= 67'))
-            ->withCTE('users', $this->db->query('SELECT * FROM users WHERE active = 1'));
-
-        $sql = (string) $q;
-
-        // Should have renamed CTE and final 'users' CTE
-        $this->assertTrue(preg_match('/_cte_\d+/', $sql) === 1, 'Should have renamed CTE');
-
-        // Inner CTE filters by age from real table
-        $this->assertTrue(
-            preg_match('/_cte_\d+ AS \(SELECT \* FROM users WHERE age <= 67\)/', $sql) === 1,
-            'Inner CTE should filter by age'
-        );
-
-        // Outer 'users' CTE filters by active from inner CTE
-        $this->assertTrue(
-            preg_match('/users AS \(SELECT \* FROM _cte_\d+ WHERE active = 1\)/', $sql) === 1,
-            'Outer CTE should filter by active from inner CTE'
-        );
-
-        // IN subquery references 'users' (the outermost CTE)
-        $this->assertStringContainsString('"admin_id" IN (SELECT id FROM users WHERE role =', $sql);
     }
 
     public function testWithCTEMultipleTablesAndSubqueries(): void
@@ -225,8 +148,8 @@ $test = new class extends Test {
         $this->assertStringContainsString('products AS (SELECT * FROM products WHERE published = 1)', $sql);
 
         // Both IN subqueries should be present
-        $this->assertStringContainsString('"user_id" IN (SELECT id FROM users WHERE active = 1)', $sql);
-        $this->assertStringContainsString('"product_id" IN (SELECT id FROM products WHERE in_stock = 1)', $sql);
+        $this->assertStringContainsString('user_id IN (SELECT id FROM users WHERE active = 1)', $sql);
+        $this->assertStringContainsString('product_id IN (SELECT id FROM products WHERE in_stock = 1)', $sql);
 
         // No renamed CTEs (different names don't conflict)
         $this->assertFalse(preg_match('/_cte_\d+/', $sql) === 1, 'Should not have renamed CTEs');
@@ -280,8 +203,24 @@ $test = new class extends Test {
         $this->assertStringContainsString('WITH users AS', $sqlWithCte);
 
         // Both have the IN subquery
-        $this->assertStringContainsString('"admin_id" IN (SELECT id FROM users)', $sqlWithIn);
-        $this->assertStringContainsString('"admin_id" IN (SELECT id FROM users)', $sqlWithCte);
+        $this->assertStringContainsString('admin_id IN (SELECT id FROM users)', $sqlWithIn);
+        $this->assertStringContainsString('admin_id IN (SELECT id FROM users)', $sqlWithCte);
+    }
+
+    public function testWithCTEMergesCTEsFromSourceQuery(): void
+    {
+        // Source query has its own CTE with a different name
+        $source = $this->db->query('SELECT * FROM filtered_users')
+            ->withCTE('filtered_users', $this->db->query('SELECT * FROM users WHERE active = 1'));
+
+        $q = $this->db->query('SELECT * FROM results')
+            ->withCTE('results', $source);
+
+        $sql = (string) $q;
+
+        // Both CTEs should be present
+        $this->assertStringContainsString('filtered_users AS', $sql);
+        $this->assertStringContainsString('results AS', $sql);
     }
 };
 

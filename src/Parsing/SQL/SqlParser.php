@@ -89,6 +89,80 @@ class SqlParser
         return $stmt;
     }
 
+    /**
+     * Parse a SQL expression fragment into AST
+     *
+     * Use this for parsing WHERE clause fragments like:
+     * - "userId = ?"
+     * - "age > 18 AND status = 'active'"
+     * - "name LIKE '%john%'"
+     *
+     * @param string $expression SQL expression to parse
+     * @return ASTNode The parsed expression AST
+     * @throws SqlSyntaxException
+     */
+    public function parseExpressionFragment(string $expression): ASTNode
+    {
+        $this->sql = $expression;
+        $lexer = new SqlLexer($expression);
+        $this->tokens = $lexer->tokenize();
+        $this->pos = 0;
+
+        $ast = $this->parseExpression();
+
+        if ($this->current()['type'] !== SqlLexer::T_EOF) {
+            throw new SqlSyntaxException(
+                "Unexpected trailing input in expression",
+                $this->sql,
+                $this->current()['pos']
+            );
+        }
+
+        return $ast;
+    }
+
+    /**
+     * Parse an ORDER BY clause fragment into AST
+     *
+     * Use this for parsing ORDER BY specifications like:
+     * - "name"
+     * - "name DESC"
+     * - "created_at DESC, name ASC"
+     *
+     * @param string $orderBy ORDER BY specification to parse
+     * @return array<int, array{column: ASTNode, direction: string}> Parsed order items
+     * @throws SqlSyntaxException
+     */
+    public function parseOrderByFragment(string $orderBy): array
+    {
+        $this->sql = $orderBy;
+        $lexer = new SqlLexer($orderBy);
+        $this->tokens = $lexer->tokenize();
+        $this->pos = 0;
+
+        $result = [];
+        do {
+            $expr = $this->parseExpression();
+            $direction = 'ASC';
+            if ($this->match(SqlLexer::T_DESC)) {
+                $direction = 'DESC';
+            } elseif ($this->match(SqlLexer::T_ASC)) {
+                $direction = 'ASC';
+            }
+            $result[] = ['column' => $expr, 'direction' => $direction];
+        } while ($this->match(SqlLexer::T_COMMA));
+
+        if ($this->current()['type'] !== SqlLexer::T_EOF) {
+            throw new SqlSyntaxException(
+                "Unexpected trailing input in ORDER BY",
+                $this->sql,
+                $this->current()['pos']
+            );
+        }
+
+        return $result;
+    }
+
     private function current(): array
     {
         return $this->tokens[$this->pos];
@@ -225,38 +299,67 @@ class SqlParser
             } while ($this->match(SqlLexer::T_COMMA));
         }
 
+        // Parse LIMIT/OFFSET - supports two syntaxes:
+        // 1. MySQL/PostgreSQL: LIMIT n [OFFSET m]
+        // 2. SQL:2008: OFFSET n {ROW|ROWS} [FETCH {FIRST|NEXT} m {ROW|ROWS} ONLY]
         if ($this->match(SqlLexer::T_LIMIT)) {
-            $token = $this->current();
-            if ($token['type'] === SqlLexer::T_NUMBER) {
-                $this->pos++;
-                $stmt->limit = new LiteralNode($token['value'], 'number');
-            } elseif ($token['type'] === SqlLexer::T_PLACEHOLDER) {
-                $this->pos++;
-                $stmt->limit = new PlaceholderNode($token['value']);
-            } else {
-                throw new SqlSyntaxException(
-                    "LIMIT requires a number or placeholder",
-                    $this->sql,
-                    $token['pos']
-                );
-            }
-        }
+            $stmt->limit = $this->parseNumberOrPlaceholder('LIMIT');
 
-        if ($this->match(SqlLexer::T_OFFSET)) {
-            $token = $this->current();
-            if ($token['type'] === SqlLexer::T_NUMBER) {
-                $this->pos++;
-                $stmt->offset = new LiteralNode($token['value'], 'number');
-            } elseif ($token['type'] === SqlLexer::T_PLACEHOLDER) {
-                $this->pos++;
-                $stmt->offset = new PlaceholderNode($token['value']);
-            } else {
+            if ($this->match(SqlLexer::T_OFFSET)) {
+                $stmt->offset = $this->parseNumberOrPlaceholder('OFFSET');
+            }
+        } elseif ($this->match(SqlLexer::T_OFFSET)) {
+            // Two syntaxes:
+            // - Simple: OFFSET n (PostgreSQL/SQLite style)
+            // - SQL:2008: OFFSET n {ROW|ROWS} [FETCH {FIRST|NEXT} m {ROW|ROWS} ONLY]
+            $stmt->offset = $this->parseNumberOrPlaceholder('OFFSET');
+
+            // ROW/ROWS is optional - if present, we may have FETCH clause
+            if ($this->match(SqlLexer::T_ROW) || $this->match(SqlLexer::T_ROWS)) {
+                // SQL:2008 style - check for optional FETCH
+                if ($this->match(SqlLexer::T_FETCH)) {
+                    if (!$this->match(SqlLexer::T_FIRST) && !$this->match(SqlLexer::T_NEXT)) {
+                        throw new SqlSyntaxException(
+                            "FETCH requires FIRST or NEXT",
+                            $this->sql,
+                            $this->current()['pos'] ?? strlen($this->sql)
+                        );
+                    }
+
+                    $stmt->limit = $this->parseNumberOrPlaceholder('FETCH');
+
+                    if (!$this->match(SqlLexer::T_ROW) && !$this->match(SqlLexer::T_ROWS)) {
+                        throw new SqlSyntaxException(
+                            "FETCH requires ROW or ROWS",
+                            $this->sql,
+                            $this->current()['pos'] ?? strlen($this->sql)
+                        );
+                    }
+
+                    $this->expect(SqlLexer::T_ONLY);
+                }
+            }
+        } elseif ($this->match(SqlLexer::T_FETCH)) {
+            // SQL:2008 without OFFSET: FETCH {FIRST|NEXT} n {ROW|ROWS} ONLY
+            if (!$this->match(SqlLexer::T_FIRST) && !$this->match(SqlLexer::T_NEXT)) {
                 throw new SqlSyntaxException(
-                    "OFFSET requires a number or placeholder",
+                    "FETCH requires FIRST or NEXT",
                     $this->sql,
-                    $token['pos']
+                    $this->current()['pos'] ?? strlen($this->sql)
                 );
             }
+
+            $stmt->limit = $this->parseNumberOrPlaceholder('FETCH');
+
+            if (!$this->match(SqlLexer::T_ROW) && !$this->match(SqlLexer::T_ROWS)) {
+                throw new SqlSyntaxException(
+                    "FETCH requires ROW or ROWS",
+                    $this->sql,
+                    $this->current()['pos'] ?? strlen($this->sql)
+                );
+            }
+
+            $this->expect(SqlLexer::T_ONLY);
         }
 
         return $stmt;
@@ -770,6 +873,27 @@ class SqlParser
             "Unexpected token in expression: " . $token['type'],
             $this->sql,
             $token['pos']
+        );
+    }
+
+    /**
+     * Parse a number or placeholder (for LIMIT/OFFSET/FETCH)
+     */
+    private function parseNumberOrPlaceholder(string $context): ASTNode
+    {
+        $token = $this->current();
+        if ($token['type'] === SqlLexer::T_NUMBER) {
+            $this->pos++;
+            return new LiteralNode($token['value'], 'number');
+        }
+        if ($token['type'] === SqlLexer::T_PLACEHOLDER) {
+            $this->pos++;
+            return new PlaceholderNode($token['value']);
+        }
+        throw new SqlSyntaxException(
+            "$context requires a number or placeholder",
+            $this->sql,
+            $token['pos'] ?? strlen($this->sql)
         );
     }
 

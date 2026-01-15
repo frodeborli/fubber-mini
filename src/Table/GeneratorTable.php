@@ -137,11 +137,11 @@ class GeneratorTable extends AbstractTable
         return new SortedTable($this, ...$orders);
     }
 
-    public function or(Predicate ...$predicates): TableInterface
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): TableInterface
     {
         // Filter out empty predicates (match nothing)
         $predicates = array_values(array_filter(
-            $predicates,
+            [$a, $b, ...$more],
             fn($p) => !$p->isEmpty()
         ));
 

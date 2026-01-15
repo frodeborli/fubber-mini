@@ -490,4 +490,66 @@ assert_true($ast->where instanceof BinaryOperation);
 assert_true($ast->where->right instanceof SubqueryNode);
 echo "✓ Scalar subquery in WHERE clause works\n";
 
+// --- SQL:2008 FETCH/OFFSET Syntax Tests ---
+
+// Test: FETCH FIRST n ROWS ONLY (no offset)
+$ast = $parser->parse('SELECT * FROM users FETCH FIRST 10 ROWS ONLY');
+assert_eq('10', $ast->limit->value);
+assert_eq(null, $ast->offset);
+echo "✓ FETCH FIRST n ROWS ONLY works\n";
+
+// Test: FETCH NEXT n ROWS ONLY (same as FIRST)
+$ast = $parser->parse('SELECT * FROM users FETCH NEXT 5 ROWS ONLY');
+assert_eq('5', $ast->limit->value);
+assert_eq(null, $ast->offset);
+echo "✓ FETCH NEXT n ROWS ONLY works\n";
+
+// Test: OFFSET n ROWS FETCH FIRST m ROWS ONLY
+$ast = $parser->parse('SELECT * FROM users OFFSET 10 ROWS FETCH FIRST 5 ROWS ONLY');
+assert_eq('10', $ast->offset->value);
+assert_eq('5', $ast->limit->value);
+echo "✓ OFFSET n ROWS FETCH FIRST m ROWS ONLY works\n";
+
+// Test: OFFSET n ROWS FETCH NEXT m ROWS ONLY
+$ast = $parser->parse('SELECT * FROM users OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY');
+assert_eq('20', $ast->offset->value);
+assert_eq('10', $ast->limit->value);
+echo "✓ OFFSET n ROWS FETCH NEXT m ROWS ONLY works\n";
+
+// Test: OFFSET n ROWS without FETCH (offset only)
+$ast = $parser->parse('SELECT * FROM users OFFSET 5 ROWS');
+assert_eq('5', $ast->offset->value);
+assert_eq(null, $ast->limit);
+echo "✓ OFFSET n ROWS without FETCH works\n";
+
+// Test: Simple OFFSET n (PostgreSQL style, no ROWS keyword)
+$ast = $parser->parse('SELECT * FROM users OFFSET 5');
+assert_eq('5', $ast->offset->value);
+assert_eq(null, $ast->limit);
+echo "✓ Simple OFFSET n (PostgreSQL style) works\n";
+
+// Test: FETCH with ROW (singular) instead of ROWS
+$ast = $parser->parse('SELECT * FROM users FETCH FIRST 1 ROW ONLY');
+assert_eq('1', $ast->limit->value);
+echo "✓ FETCH with ROW (singular) works\n";
+
+// Test: SQL:2008 with ORDER BY
+$ast = $parser->parse('SELECT * FROM users ORDER BY id OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY');
+assert_eq('id', $ast->orderBy[0]['column']->getName());
+assert_eq('10', $ast->offset->value);
+assert_eq('5', $ast->limit->value);
+echo "✓ SQL:2008 syntax with ORDER BY works\n";
+
+// Test: SQL:2008 with placeholders
+$ast = $parser->parse('SELECT * FROM users OFFSET ? ROWS FETCH NEXT ? ROWS ONLY');
+assert_true($ast->offset instanceof PlaceholderNode);
+assert_true($ast->limit instanceof PlaceholderNode);
+echo "✓ SQL:2008 syntax with placeholders works\n";
+
+// Test: Traditional LIMIT/OFFSET still works
+$ast = $parser->parse('SELECT * FROM users LIMIT 10 OFFSET 5');
+assert_eq('10', $ast->limit->value);
+assert_eq('5', $ast->offset->value);
+echo "✓ Traditional LIMIT/OFFSET still works\n";
+
 echo "\n✓ All SQL parser tests passed!\n";

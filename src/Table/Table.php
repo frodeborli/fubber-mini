@@ -315,8 +315,9 @@ final class Table implements IteratorAggregate, Countable
         return $c;
     }
 
-    public function or(Predicate ...$predicates): self
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): self
     {
+        $predicates = [$a, $b, ...$more];
         $c = clone $this;
 
         // Check for unbound params in predicates
@@ -333,7 +334,7 @@ final class Table implements IteratorAggregate, Countable
             $c->deferredPredicates = $predicates;
         } else {
             // All bound, apply immediately
-            $c->source = $c->source->or(...$predicates);
+            $c->source = $c->source->or($a, $b, ...$more);
         }
 
         return $c;

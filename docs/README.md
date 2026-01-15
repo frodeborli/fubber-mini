@@ -32,7 +32,6 @@ Each framework feature has comprehensive documentation in its source directory:
 - **[src/Logger/README.md](../src/Logger/README.md)** - PSR-3 logging
 - **[src/Mailer/README.md](../src/Mailer/README.md)** - Email sending (Symfony Mailer)
 - **[src/Router/README.md](../src/Router/README.md)** - File-based and pattern routing
-- **[src/Tables/README.md](../src/Tables/README.md)** - Structured data tables
 - **[src/UUID/README.md](../src/UUID/README.md)** - UUID v4 and v7 generation
 
 ## Internal Notes

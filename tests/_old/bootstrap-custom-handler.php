@@ -21,7 +21,6 @@ echo "Test 2: Custom handler set before bootstrap()\n";
 // Reset singleton state (hack for testing - wouldn't do this in production)
 $reflection = new ReflectionClass(\mini\Mini::class);
 $property = $reflection->getProperty('mini');
-$property->setAccessible(true);
 $mini = $property->getValue();
 
 // Create fresh Mini instance

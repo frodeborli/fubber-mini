@@ -35,21 +35,6 @@ $test = new class extends Test {
     // Basic OR tests
     // =========================================================================
 
-    public function testOrWithSinglePredicate(): void
-    {
-        $table = $this->createTable();
-        $p = Predicate::from($table);
-
-        $result = $table->or($p->eq('status', 'active'));
-
-        $ids = [];
-        foreach ($result as $row) {
-            $ids[] = $row->id;
-        }
-
-        $this->assertSame([1, 3, 5], $ids);
-    }
-
     public function testOrWithTwoPredicates(): void
     {
         $table = $this->createTable();
@@ -133,17 +118,6 @@ $test = new class extends Test {
         $this->assertSame([1, 2, 3, 4, 5], $ids);
     }
 
-    public function testOrWithEmptyPredicatesReturnsEmptyTable(): void
-    {
-        $table = $this->createTable();
-
-        $result = $table->or();
-
-        // No predicates → EmptyTable
-        $this->assertInstanceOf(\mini\Table\Utility\EmptyTable::class, $result);
-        $this->assertSame(0, $result->count());
-    }
-
     public function testOrFiltersOutNeverPredicates(): void
     {
         $table = $this->createTable();
@@ -151,19 +125,21 @@ $test = new class extends Test {
         $never = Predicate::never();
 
         // Mix of real predicates and never() predicates
+        // or() now requires at least 2 predicates
         $result = $table->or(
             $never,
             $p->eq('status', 'active'),
-            $never
+            $p->eq('status', 'pending')
         );
 
         $ids = [];
         foreach ($result as $row) {
             $ids[] = $row->id;
         }
+        sort($ids);
 
-        // Only active rows (never predicates filtered out)
-        $this->assertSame([1, 3, 5], $ids);
+        // Active (1, 3, 5) and pending (4) rows
+        $this->assertSame([1, 3, 4, 5], $ids);
     }
 
     public function testOrWithOnlyNeverPredicatesReturnsEmpty(): void
@@ -174,24 +150,6 @@ $test = new class extends Test {
         $result = $table->or($never, $never);
 
         $this->assertInstanceOf(\mini\Table\Utility\EmptyTable::class, $result);
-    }
-
-    public function testOrWithSinglePredicateNoUnionOverhead(): void
-    {
-        $table = $this->createTable();
-        $p = Predicate::from($table);
-
-        // Single predicate should not create UnionTable
-        $result = $table->or($p->eq('status', 'active'));
-
-        // Should not be UnionTable
-        $this->assertFalse($result instanceof \mini\Table\Wrappers\UnionTable);
-
-        $ids = [];
-        foreach ($result as $row) {
-            $ids[] = $row->id;
-        }
-        $this->assertSame([1, 3, 5], $ids);
     }
 
     public function testOrDeduplicatesRows(): void

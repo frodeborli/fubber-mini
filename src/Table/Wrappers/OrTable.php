@@ -163,10 +163,10 @@ class OrTable extends AbstractTableWrapper
         return $table;
     }
 
-    public function or(Predicate ...$predicates): TableInterface
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): TableInterface
     {
         // Merge predicates into a new OrTable, restoring absorbed pagination
-        $allPredicates = [...$this->predicates, ...$predicates];
+        $allPredicates = [...$this->predicates, $a, $b, ...$more];
         return $this->withPagination(new self($this->source, ...$allPredicates));
     }
 }

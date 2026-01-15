@@ -40,12 +40,10 @@
 - Teaching juniors to become seniors, not hiding complexity forever
 
 ## ORM Patterns
-- Follow Entity Framework's POCO (Plain Old CLR Objects) model
-- Not Laravel's Active Record as core design
-- Microsoft invested billions in these architectural decisions
-- Active Record offered as opt-in `ActiveRecordTrait`, not core
-- Similarly `RepositoryTrait` for repository pattern
-- Both built on shared foundation
+- Active Record via `ModelTrait` for entity persistence
+- VirtualDatabase decouples entities from storage backend
+- Validation integrated into save() via JSON Schema attributes
+- Identity tracking for correct insert vs update detection
 
 ## Validation
 - Use JSON Schema (standardized, cross-platform)

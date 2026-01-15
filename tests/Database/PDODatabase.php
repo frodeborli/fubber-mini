@@ -59,17 +59,6 @@ $test = new class extends Test {
         $this->assertSame('Bob', $rows[1]->name);
     }
 
-    public function testQueryToArray(): void
-    {
-        $this->cleanTable();
-        \mini\db()->exec("INSERT INTO test_db (name) VALUES ('Test')");
-
-        $rows = \mini\db()->query('SELECT * FROM test_db')->toArray();
-
-        $this->assertCount(1, $rows);
-        $this->assertSame('Test', $rows[0]->name);
-    }
-
     public function testQueryOne(): void
     {
         $this->cleanTable();
@@ -282,12 +271,13 @@ $test = new class extends Test {
         \mini\db()->exec("INSERT INTO test_db (name) VALUES ('Entity')");
 
         // Hydrator receives spread column values (like PDO::FETCH_FUNC)
-        $rows = \mini\db()->query('SELECT id, name FROM test_db')
-            ->withHydrator(fn($id, $name) => (object) ['id' => $id, 'name' => $name])
-            ->toArray();
+        $query = \mini\db()->query('SELECT id, name FROM test_db')
+            ->withHydrator(fn($id, $name) => (object) ['id' => $id, 'name' => $name]);
 
-        $this->assertCount(1, $rows);
-        $this->assertSame('Entity', $rows[0]->name);
+        $this->assertSame(1, $query->count());
+        foreach ($query as $row) {
+            $this->assertSame('Entity', $row->name);
+        }
     }
 
     public function testLastInsertId(): void

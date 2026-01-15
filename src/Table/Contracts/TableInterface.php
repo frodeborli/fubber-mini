@@ -174,8 +174,10 @@ interface TableInterface extends SetInterface, IteratorAggregate, Countable
      *     Predicate::eqBind('id', ':id2')
      * );
      * ```
+     *
+     * Note: Requires at least 2 predicates - OR semantically needs multiple alternatives.
      */
-    public function or(Predicate ...$predicates): TableInterface;
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): TableInterface;
 
     /**
      * Return rows that are in this table but NOT in the other set (set difference)

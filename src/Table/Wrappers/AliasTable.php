@@ -226,16 +226,16 @@ class AliasTable implements TableInterface
         return new UnionTable($this, $other);
     }
 
-    public function or(Predicate ...$predicates): TableInterface
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): TableInterface
     {
         // Translate aliased column names in predicates to original names
         $translated = array_map(
             fn(Predicate $p) => $p->mapColumns(fn($col) => $this->resolveToOriginal($col)),
-            $predicates
+            [$a, $b, ...$more]
         );
 
         $c = clone $this;
-        $c->source = $this->source->or(...$translated);
+        $c->source = $this->source->or($translated[0], $translated[1], ...array_slice($translated, 2));
         return $c;
     }
 

@@ -436,11 +436,13 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         return new ExceptTable($this, $other);
     }
 
-    public function or(Predicate ...$predicates): TableInterface
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): TableInterface
     {
+        $allPredicates = [$a, $b, ...$more];
+
         // Filter out empty predicates (they match nothing)
         $predicates = array_values(array_filter(
-            $predicates,
+            $allPredicates,
             fn($p) => !$p->isEmpty()
         ));
 

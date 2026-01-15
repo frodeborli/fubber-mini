@@ -4,6 +4,8 @@ namespace mini\Database;
 
 use mini\Database\DatabaseInterface;
 use mini\Mini;
+use mini\Parsing\SQL\AST\ASTNode;
+use mini\Parsing\SQL\SqlRenderer;
 use mini\Table\ColumnDef;
 use mini\Table\Contracts\TableInterface;
 use mini\Table\GeneratorTable;
@@ -46,11 +48,27 @@ class PDODatabase implements DatabaseInterface
 
     /**
      * Get a raw query executor closure for PartialQuery
+     *
+     * Fast path: If AST is null, uses PartialQuery::getSql() which returns
+     * the original SQL string directly (no parsing/rendering).
+     *
+     * Slow path: If AST is provided (modified query or count), renders it.
      */
     private function rawExecutor(): \Closure
     {
-        return function (string $sql, array $params): \Traversable {
+        $dialect = $this->getDialect();
+        $renderer = SqlRenderer::get($dialect);
+
+        return function (PartialQuery $query, ?ASTNode $ast) use ($dialect, $renderer): \Traversable {
             try {
+                // If AST provided (e.g., count query), render it
+                // Otherwise use getSql() which handles fast path internally
+                if ($ast !== null) {
+                    [$sql, $params] = $renderer->renderWithParams($ast);
+                } else {
+                    [$sql, $params] = $query->getSql($dialect);
+                }
+
                 $stmt = $this->lazyPdo()->prepare($sql);
                 $stmt->execute(array_map(sqlval(...), $params));
 

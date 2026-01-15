@@ -3,8 +3,8 @@
 namespace mini\Database;
 
 use mini\Parsing\SQL\SqlParser;
-use mini\Parsing\SQL\AstParameterBinder;
 use mini\Parsing\SQL\AST\{
+    ASTNode,
     SelectStatement,
     InsertStatement,
     UpdateStatement,
@@ -13,6 +13,7 @@ use mini\Parsing\SQL\AST\{
     ColumnNode,
     IdentifierNode,
     LiteralNode,
+    PlaceholderNode,
     BinaryOperation,
     UnaryOperation,
     LikeOperation,
@@ -335,11 +336,18 @@ class VirtualDatabase implements DatabaseInterface
 
     /**
      * Get a raw query executor closure for PartialQuery
+     *
+     * VirtualDatabase always needs AST to evaluate in-memory.
+     * If AST is not provided, calls getAST() to force parsing.
      */
     private function rawExecutor(): \Closure
     {
-        return function (string $sql, array $params): \Traversable {
-            $ast = $this->parseAndBind($sql, $params);
+        return function (PartialQuery $query, ?ASTNode $ast): \Traversable {
+            // If AST not provided (unmodified query), get it from query
+            // This forces parsing but VirtualDatabase always needs AST
+            if ($ast === null) {
+                $ast = $query->getAST();
+            }
 
             if ($ast instanceof WithStatement) {
                 return $this->executeWithStatement($ast);
@@ -367,7 +375,7 @@ class VirtualDatabase implements DatabaseInterface
      */
     public function exec(string $sql, array $params = []): int
     {
-        $ast = $this->parseAndBind($sql, $params);
+        $ast = PartialQuery::parseWithParams($sql, $params);
 
         if ($ast instanceof InsertStatement) {
             return $this->executeInsert($ast);
@@ -579,19 +587,6 @@ class VirtualDatabase implements DatabaseInterface
             new \mini\Table\ColumnDef('ordinal', \mini\Table\Types\ColumnType::Int),
             new \mini\Table\ColumnDef('extra', \mini\Table\Types\ColumnType::Text),
         );
-    }
-
-    private function parseAndBind(string $sql, array $params): object
-    {
-        $parser = new SqlParser();
-        $ast = $parser->parse($sql);
-
-        if (!empty($params)) {
-            $binder = new AstParameterBinder($params);
-            $ast = $binder->bind($ast);
-        }
-
-        return $ast;
     }
 
     /**
@@ -2728,9 +2723,13 @@ class VirtualDatabase implements DatabaseInterface
                 };
             }
 
-            // Check if we can push to table (column = literal pattern)
-            $canPushToTable = $node->left instanceof IdentifierNode
-                && ($node->right instanceof LiteralNode || $node->right instanceof SubqueryNode);
+            // Check if we can push to table (column = value pattern)
+            // Value can be literal, bound placeholder, or subquery
+            $isValueNode = fn($n) => $n instanceof LiteralNode
+                || ($n instanceof PlaceholderNode && $n->isBound)
+                || $n instanceof SubqueryNode;
+
+            $canPushToTable = $node->left instanceof IdentifierNode && $isValueNode($node->right);
 
             if ($canPushToTable) {
                 $column = $this->buildQualifiedColumnName($node->left);

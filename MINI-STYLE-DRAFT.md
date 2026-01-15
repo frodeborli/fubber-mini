@@ -88,7 +88,7 @@ echo json_encode(db()->table('users')->all());
 ```php
 // Define reusable scopes in your model
 class User {
-    use ActiveRecordTrait;
+    use ModelTrait;
 
     public static function active(): PartialQuery {
         return self::query()->eq('active', 1);
@@ -108,7 +108,7 @@ $asArray = iterator_to_array($recentAdmins);  // materialize if needed
 **JOINs** - create composable queries from any base SQL:
 ```php
 class User {
-    use ActiveRecordTrait;
+    use ModelTrait;
 
     /** @return PartialQuery<User> */
     public function friends(): PartialQuery {

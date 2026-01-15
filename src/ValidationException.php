@@ -2,27 +2,38 @@
 
 namespace mini;
 
+use mini\Validator\ValidationError;
+
 /**
- * Exception thrown when model validation fails
+ * Exception thrown when validation fails
+ *
+ * Wraps a ValidationError and provides access to the error details.
  */
 class ValidationException extends \Exception
 {
     /**
-     * @param array<string, Translatable> $errors Validation errors
+     * @param ValidationError $error The validation error
      */
-    public function __construct(public readonly array $errors)
+    public function __construct(public readonly ValidationError $error)
     {
-        $errorCount = count($errors);
-        parent::__construct("Validation failed with {$errorCount} error(s)");
+        parent::__construct((string) $error);
     }
 
     /**
-     * Get validation errors
-     *
-     * @return array<string, Translatable>
+     * Get the validation error
      */
-    public function getErrors(): array
+    public function getError(): ValidationError
     {
-        return $this->errors;
+        return $this->error;
+    }
+
+    /**
+     * Get property errors as array (for backwards compatibility)
+     *
+     * @return array<string, ValidationError>
+     */
+    public function getPropertyErrors(): array
+    {
+        return $this->error->getPropertyErrors();
     }
 }

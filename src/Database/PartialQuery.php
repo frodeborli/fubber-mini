@@ -18,12 +18,18 @@ use mini\Parsing\SQL\SqlRenderer;
 use mini\Parsing\SQL\AST\SelectStatement;
 use mini\Parsing\SQL\AST\WithStatement;
 use mini\Parsing\SQL\AST\UnionNode;
+use mini\Parsing\SQL\AST\SubqueryNode;
+use mini\Parsing\SQL\AST\ColumnNode;
 use mini\Parsing\SQL\AST\IdentifierNode;
 use mini\Parsing\SQL\AST\BinaryOperation;
 use mini\Parsing\SQL\AST\LiteralNode;
 use mini\Parsing\SQL\AST\PlaceholderNode;
+use mini\Parsing\SQL\AST\InOperation;
+use mini\Parsing\SQL\AST\LikeOperation;
+use mini\Parsing\SQL\AST\FunctionCallNode;
+use mini\Parsing\SQL\AST\UnaryOperation;
 use mini\Parsing\SQL\AST\ASTNode;
-use mini\Parsing\SQL\AstParameterBinder;
+use mini\Table\Types\Operator;
 use stdClass;
 
 /**
@@ -38,61 +44,53 @@ final class PartialQuery implements ResultSetInterface, TableInterface
 
     private DatabaseInterface $db;
 
-    /** @var \Closure(string, array): \Traversable Raw query executor */
+    /** @var \Closure(PartialQuery, ?ASTNode): \Traversable Query executor */
     private \Closure $executor;
 
     /**
-     * Base SQL for this query (always set, no simple table mode)
+     * Original SQL string - used directly for fast path when AST is null
      */
     private string $baseSql;
 
-    /** @var array<int, mixed> Parameters for placeholders in the base SQL (constructor) */
-    private array $baseParams = [];
-
-    // Lazy analysis results
-    private bool $analyzed = false;
-
-    /** Underlying source table for UPDATE/DELETE (null if multi-table or complex) */
-    private ?string $sourceTable = null;
-
-    /** Alias for subquery wrapping */
-    private string $alias = '_q';
-
     /**
-     * Parsed WHERE clause from base SQL with bound parameters
-     * Used by matches() to validate rows against base SQL conditions
+     * Original params - used directly for fast path when AST is null
+     * @var array<int|string, mixed>
      */
-    private ?ASTNode $baseWhereAst = null;
+    private array $originalParams = [];
 
     /**
-     * Each WHERE clause is stored with its own parameters
-     * @var array<int, array{sql: string, params: array<int, mixed>}>
-     */
-    private array $whereParts = [];
-
-    /**
-     * CTE definitions stored as AST
+     * Single AST root - the source of truth for query structure
      *
-     * Each entry: ['name' => string, 'ast' => ASTNode, 'params' => array]
-     *
-     * AST is stored instead of SQL strings to enable identifier renaming
-     * without re-parsing. Params are kept separate to maintain placeholder
-     * order for prepared statements.
-     *
-     * @var array<int, array{name: string, ast: ASTNode, params: array<int, mixed>}>
+     * Lazily parsed from baseSql on first modification.
+     * Can be SelectStatement, WithStatement (for CTEs), or UnionNode.
+     * Null means query hasn't been modified - use baseSql directly.
      */
-    private array $cteList = [];
-
-    private ?string $select = null;
-    private ?string $orderBy = null;
-    private ?int $limit = null;
-    private int $offset = 0;
+    private ?ASTNode $ast = null;
 
     /**
-     * Structured predicate for row matching (tracks eq/lt/gt/etc calls)
-     * Raw where() calls are NOT included here.
+     * Whether this instance owns its AST (for copy-on-write)
+     *
+     * When cloned, this is set to false. On first modification,
+     * ensureMutableAST() deep-clones the AST and sets this to true.
      */
-    private Predicate $predicate;
+    private bool $astIsPrivate = false;
+
+
+    /**
+     * Track if select/columns was called (for has() validation)
+     */
+    private bool $selectCalled = false;
+
+    /**
+     * Available columns after explicit projection (null = unrestricted)
+     *
+     * Only set when user explicitly calls columns() or select().
+     * We never fetch schema to populate this - avoids database calls.
+     * Once set, enforces narrowing-only semantics.
+     *
+     * @var array<string, true>|null Column names as keys, null = all available
+     */
+    private ?array $availableColumns = null;
 
     private ?\Closure $hydrator = null;
     private ?string $entityClass = null;
@@ -108,11 +106,221 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         string $sql,
         array $params = []
     ) {
-        $this->db         = $db;
-        $this->executor   = $executor;
-        $this->baseSql    = $sql;
-        $this->baseParams = $params;
-        $this->predicate  = new Predicate();
+        $this->db             = $db;
+        $this->executor       = $executor;
+        $this->baseSql        = $sql;
+        $this->originalParams = $params;
+        // AST stays null - parsed lazily on first modification
+    }
+
+    /**
+     * Ensure AST exists (lazy parsing)
+     *
+     * Called before any operation that reads or modifies the AST.
+     * Parses baseSql and binds originalParams on first call.
+     * Nulls out baseSql/originalParams to prevent accidental use of stale data.
+     */
+    private function ensureAST(): void
+    {
+        if ($this->ast !== null) {
+            return;
+        }
+
+        $parser = new SqlParser();
+        $this->ast = $parser->parse($this->baseSql);
+        $this->astIsPrivate = true;
+
+        if (!empty($this->originalParams)) {
+            $paramsCopy = $this->originalParams;
+            $this->bindParamsToAST($this->ast, $paramsCopy);
+        }
+
+        // Defensive: null out original data now that AST is source of truth
+        $this->baseSql = '';
+        $this->originalParams = [];
+    }
+
+    /**
+     * Bind parameter values to PlaceholderNodes in an AST
+     *
+     * Supports both positional (?) and named (:name) placeholders.
+     * For positional, params are consumed in order.
+     * For named, params are looked up by name (without the colon).
+     *
+     * @param ASTNode $node The AST to bind params to
+     * @param array $params Values to bind (positional or named)
+     * @return int Number of params bound
+     */
+    private function bindParamsToAST(ASTNode $node, array &$params): int
+    {
+        $bound = 0;
+
+        if ($node instanceof PlaceholderNode) {
+            if (str_starts_with($node->token, ':')) {
+                // Named placeholder - look up by name
+                $name = substr($node->token, 1);
+                if (!array_key_exists($name, $params)) {
+                    throw new \RuntimeException("Missing parameter for placeholder :$name");
+                }
+                $node->bind($params[$name]);
+            } else {
+                // Positional placeholder - consume next value
+                if (empty($params)) {
+                    throw new \RuntimeException('Not enough parameters for placeholders in query');
+                }
+                $node->bind(array_shift($params));
+            }
+            return 1;
+        }
+
+        // Recursively walk all properties that could contain AST nodes
+        foreach (get_object_vars($node) as $value) {
+            if ($value instanceof ASTNode) {
+                $bound += $this->bindParamsToAST($value, $params);
+            } elseif (is_array($value)) {
+                foreach ($value as $item) {
+                    if ($item instanceof ASTNode) {
+                        $bound += $this->bindParamsToAST($item, $params);
+                    } elseif (is_array($item)) {
+                        // Handle nested arrays (like orderBy: [{column: ..., direction: ...}])
+                        foreach ($item as $subItem) {
+                            if ($subItem instanceof ASTNode) {
+                                $bound += $this->bindParamsToAST($subItem, $params);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return $bound;
+    }
+
+    /**
+     * Ensure AST is mutable (copy-on-write)
+     *
+     * Call this before any AST modification. If the AST is shared
+     * (from a clone), this deep-clones it first.
+     */
+    private function ensureMutableAST(): void
+    {
+        $this->ensureAST();
+        if (!$this->astIsPrivate) {
+            $this->ast = $this->ast->deepClone();
+            $this->astIsPrivate = true;
+        }
+    }
+
+    /**
+     * Get the innermost SelectStatement for modification
+     *
+     * If the AST is a UnionNode, wraps it in a subquery first.
+     * If the AST is a WithStatement, returns its inner query.
+     *
+     * @return SelectStatement The modifiable SELECT statement
+     */
+    private function getModifiableSelect(): SelectStatement
+    {
+        $this->ensureMutableAST();
+
+        // Direct SelectStatement - return it
+        if ($this->ast instanceof SelectStatement) {
+            return $this->ast;
+        }
+
+        // WithStatement - get the inner query
+        if ($this->ast instanceof WithStatement) {
+            if ($this->ast->query instanceof SelectStatement) {
+                return $this->ast->query;
+            }
+            // Inner query is UnionNode - wrap it
+            $this->ast->query = $this->wrapInSelect($this->ast->query);
+            return $this->ast->query;
+        }
+
+        // UnionNode - wrap in subquery
+        $this->ast = $this->wrapInSelect($this->ast);
+        return $this->ast;
+    }
+
+    /**
+     * Wrap an AST node in a SELECT * FROM (...) AS alias
+     *
+     * Uses the source table name as alias if the inner query is a simple
+     * single-table SELECT, otherwise falls back to '_q'.
+     */
+    private function wrapInSelect(ASTNode $node): SelectStatement
+    {
+        $wrapper = new SelectStatement();
+        $wrapper->columns = [new ColumnNode(new IdentifierNode(['*']))];
+        $wrapper->from = new SubqueryNode($node);
+
+        // Try to use a meaningful alias based on the inner query's FROM table
+        $innerSelect = null;
+        if ($node instanceof SelectStatement) {
+            $innerSelect = $node;
+        } elseif ($node instanceof WithStatement && $node->query instanceof SelectStatement) {
+            $innerSelect = $node->query;
+        }
+
+        $alias = '_q';
+        if ($innerSelect !== null
+            && $innerSelect->from instanceof IdentifierNode
+            && empty($innerSelect->joins)) {
+            $alias = $innerSelect->fromAlias ?? $innerSelect->from->getFullName();
+        }
+
+        $wrapper->fromAlias = $alias;
+        return $wrapper;
+    }
+
+    /**
+     * Clone handler - mark AST as shared for copy-on-write
+     */
+    public function __clone()
+    {
+        $this->astIsPrivate = false;
+    }
+
+    /**
+     * Get the AST representation of this query
+     *
+     * Returns a deep clone of the AST to protect internal state from external
+     * mutation. Use this for external consumers (e.g., VirtualDatabase evaluation).
+     *
+     * Internal PartialQuery code should access $this->ast directly to avoid
+     * unnecessary cloning, and use ensureMutableAST() before mutations.
+     *
+     * @return ASTNode The query AST (SelectStatement, WithStatement, or UnionNode)
+     */
+    public function getAST(): ASTNode
+    {
+        $this->ensureAST();
+        return $this->ast->deepClone();
+    }
+
+    /**
+     * Get SQL and parameters for execution
+     *
+     * Fast path: If no modifications were made (AST is null), returns the
+     * original SQL and params directly - no parsing or rendering needed.
+     *
+     * Slow path: If AST exists (query was modified), renders AST to SQL
+     * using the specified dialect.
+     *
+     * @param SqlDialect $dialect SQL dialect for rendering (only used if AST exists)
+     * @return array{string, array<int, mixed>} [sql, params]
+     */
+    public function getSql(SqlDialect $dialect = SqlDialect::Generic): array
+    {
+        // Fast path: no AST means query wasn't modified
+        if ($this->ast === null) {
+            return [$this->baseSql, $this->originalParams];
+        }
+
+        // Slow path: render AST to SQL
+        $renderer = SqlRenderer::get($dialect);
+        return $renderer->renderWithParams($this->ast);
     }
 
     /**
@@ -129,7 +337,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      * method chaining: `query('SELECT * FROM t')->order('id DESC')->limit(10)`
      *
      * @param DatabaseInterface $db       Database connection
-     * @param \Closure          $executor Raw query executor: fn(string $sql, array $params): Traversable
+     * @param \Closure          $executor Query executor: fn(PartialQuery, ?ASTNode): Traversable
      * @param string            $sql      Base SELECT query
      * @param array<int,mixed>  $params   Parameters for placeholders in $sql
      */
@@ -143,54 +351,110 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     }
 
     /**
-     * Analyze the SQL to extract table info (lazy, cached)
+     * Parse SQL and bind parameters, returning the AST
      *
-     * Extracts:
-     * - $sourceTable: The underlying table name (null if multi-table/complex)
-     * - $alias: The alias for subquery wrapping
+     * This is a utility for when you need a parsed AST with bound params
+     * but don't need a full PartialQuery (e.g., for INSERT/UPDATE/DELETE).
+     *
+     * @param string $sql SQL to parse
+     * @param array $params Parameters to bind
+     * @return ASTNode Parsed AST with bound PlaceholderNodes
      */
-    private function analyze(): void
+    public static function parseWithParams(string $sql, array $params = []): ASTNode
     {
-        if ($this->analyzed) {
-            return;
-        }
-        $this->analyzed = true;
+        $parser = new SqlParser();
+        $ast = $parser->parse($sql);
 
-        try {
-            $parser = new SqlParser();
-            $ast = $parser->parse($this->baseSql);
-        } catch (\Throwable $e) {
-            // Parse failed - can't determine table info
-            return;
+        if (!empty($params)) {
+            $paramsCopy = $params;
+            self::bindParamsToASTStatic($ast, $paramsCopy);
+        }
+
+        return $ast;
+    }
+
+    /**
+     * Static version of bindParamsToAST for use by parseWithParams
+     */
+    private static function bindParamsToASTStatic(ASTNode $node, array &$params): int
+    {
+        $bound = 0;
+
+        if ($node instanceof PlaceholderNode) {
+            if (str_starts_with($node->token, ':')) {
+                $name = substr($node->token, 1);
+                if (!array_key_exists($name, $params)) {
+                    throw new \RuntimeException("Missing parameter for placeholder :$name");
+                }
+                $node->bind($params[$name]);
+            } else {
+                if (empty($params)) {
+                    throw new \RuntimeException('Not enough parameters for placeholders in query');
+                }
+                $node->bind(array_shift($params));
+            }
+            return 1;
+        }
+
+        foreach (get_object_vars($node) as $value) {
+            if ($value instanceof ASTNode) {
+                $bound += self::bindParamsToASTStatic($value, $params);
+            } elseif (is_array($value)) {
+                foreach ($value as $item) {
+                    if ($item instanceof ASTNode) {
+                        $bound += self::bindParamsToASTStatic($item, $params);
+                    } elseif (is_array($item)) {
+                        foreach ($item as $subItem) {
+                            if ($subItem instanceof ASTNode) {
+                                $bound += self::bindParamsToASTStatic($subItem, $params);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return $bound;
+    }
+
+    /**
+     * Get source table info from AST (computed on demand)
+     *
+     * @return array{table: string, alias: string}|null Null if multi-table/complex query
+     */
+    private function getSourceTableInfo(): ?array
+    {
+        $this->ensureAST();
+
+        // Get the inner SELECT (skip WithStatement wrapper if present)
+        $ast = $this->ast;
+        if ($ast instanceof WithStatement) {
+            $ast = $ast->query;
         }
 
         // UNION/INTERSECT/EXCEPT = multi-table
         if ($ast instanceof UnionNode) {
-            return;
+            return null;
         }
 
         if (!$ast instanceof SelectStatement) {
-            return;
+            return null;
         }
 
         // Has JOINs = multi-table
         if (!empty($ast->joins)) {
-            return;
+            return null;
         }
 
         // FROM must be a simple identifier (not a subquery)
         if (!$ast->from instanceof IdentifierNode) {
-            return;
+            return null;
         }
 
-        $this->sourceTable = $ast->from->getFullName();
-        $this->alias = $ast->fromAlias ?? $ast->from->getFullName();
-
-        // Extract WHERE clause for row matching
-        if ($ast->where !== null) {
-            $binder = new AstParameterBinder($this->baseParams);
-            $this->baseWhereAst = $binder->bind($ast->where);
-        }
+        return [
+            'table' => $ast->from->getFullName(),
+            'alias' => $ast->fromAlias ?? $ast->from->getFullName(),
+        ];
     }
 
     /**
@@ -198,8 +462,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function isSingleTable(): bool
     {
-        $this->analyze();
-        return $this->sourceTable !== null;
+        return $this->getSourceTableInfo() !== null;
     }
 
     /**
@@ -209,31 +472,16 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function getSourceTable(): string
     {
-        $this->analyze();
-        if ($this->sourceTable === null) {
+        $info = $this->getSourceTableInfo();
+        if ($info === null) {
             throw new \RuntimeException(
                 "Cannot determine source table: query has JOINs, UNIONs, or complex FROM clause"
             );
         }
-        return $this->sourceTable;
+        return $info['table'];
     }
 
-    /**
-     * Get alias for this query when used as a subquery
-     */
-    private function getAlias(): string
-    {
-        $this->analyze();
-        return $this->alias;
-    }
 
-    /**
-     * Get the base query string
-     */
-    public function getBaseQuery(): string
-    {
-        return $this->baseSql;
-    }
 
     /**
      * Get the AST representation of this query
@@ -244,24 +492,9 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      * Used internally for query composition and by withCTE() for deferred rendering.
      *
      * @return ASTNode The parsed AST (SelectStatement, UnionNode, or WithStatement)
+     * @deprecated Use getAST() instead
      */
-    private function getAst(): ASTNode
-    {
-        $parser = new SqlParser();
-        return $parser->parse($this->baseSql);
-    }
-
-    /**
-     * Get a shared SqlRenderer instance
-     */
-    private static function getRenderer(): SqlRenderer
-    {
-        static $renderer = null;
-        if ($renderer === null) {
-            $renderer = new SqlRenderer();
-        }
-        return $renderer;
-    }
+    // Old getAst() removed - use the new public getAST() method
 
     /**
      * Use an entity class for hydration
@@ -312,14 +545,38 @@ final class PartialQuery implements ResultSetInterface, TableInterface
 
     /**
      * Add a WHERE clause with raw SQL
+     *
+     * The SQL expression is parsed into AST and ANDed with existing conditions.
+     * Placeholders (?) in the SQL are matched with the params array.
+     *
+     * If pagination exists (LIMIT/OFFSET), uses barrier() first to preserve
+     * window semantics - filtering applies to the paginated result, not before.
      */
     public function where(string $sql, array $params = []): self
     {
+        // If pagination exists, wrap in barrier first to preserve window semantics
+        if ($this->hasPagination()) {
+            return $this->barrier()->where($sql, $params);
+        }
+
+        $parser = new SqlParser();
+        $condition = $parser->parseExpressionFragment($sql);
+
+        // Bind params to placeholders in the parsed condition
+        if (!empty($params)) {
+            $paramsCopy = $params;
+            $this->bindParamsToAST($condition, $paramsCopy);
+        }
+
         $new = clone $this;
-        $new->whereParts[] = [
-            'sql'    => '(' . $sql . ')',
-            'params' => array_values($params),
-        ];
+        $select = $new->getModifiableSelect();
+
+        if ($select->where === null) {
+            $select->where = $condition;
+        } else {
+            $select->where = new BinaryOperation($select->where, 'AND', $condition);
+        }
+
         return $new;
     }
 
@@ -330,45 +587,33 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     {
         $col = $this->db->quoteIdentifier($column);
         if ($value === null) {
-            $new = $this->where("$col IS NULL");
-            $new->predicate = $this->predicate->eq($column, null);
-            return $new;
+            return $this->where("$col IS NULL");
         }
-        $new = $this->where("$col = ?", [$value]);
-        $new->predicate = $this->predicate->eq($column, $value);
-        return $new;
+        return $this->where("$col = ?", [$value]);
     }
 
     public function lt(string $column, mixed $value): self
     {
         $col = $this->db->quoteIdentifier($column);
-        $new = $this->where("$col < ?", [$value]);
-        $new->predicate = $this->predicate->lt($column, $value);
-        return $new;
+        return $this->where("$col < ?", [$value]);
     }
 
     public function lte(string $column, mixed $value): self
     {
         $col = $this->db->quoteIdentifier($column);
-        $new = $this->where("$col <= ?", [$value]);
-        $new->predicate = $this->predicate->lte($column, $value);
-        return $new;
+        return $this->where("$col <= ?", [$value]);
     }
 
     public function gt(string $column, mixed $value): self
     {
         $col = $this->db->quoteIdentifier($column);
-        $new = $this->where("$col > ?", [$value]);
-        $new->predicate = $this->predicate->gt($column, $value);
-        return $new;
+        return $this->where("$col > ?", [$value]);
     }
 
     public function gte(string $column, mixed $value): self
     {
         $col = $this->db->quoteIdentifier($column);
-        $new = $this->where("$col >= ?", [$value]);
-        $new->predicate = $this->predicate->gte($column, $value);
-        return $new;
+        return $this->where("$col >= ?", [$value]);
     }
 
     /**
@@ -408,14 +653,36 @@ final class PartialQuery implements ResultSetInterface, TableInterface
                 return $this->where("$col IN ($placeholders)", $list);
             }
 
-            // Same database: use real SQL subquery (no materialization)
-            $new = $this->withCTEsFrom($values);
+            // Same database: use real SQL subquery via AST (no materialization)
+            // If pagination exists, wrap in barrier first to preserve window semantics
+            if ($this->hasPagination()) {
+                return $this->barrier()->in($column, $values);
+            }
 
-            // Build subquery SQL (no default limit for subqueries)
-            $subSql    = $values->buildSql(null);
-            $subParams = $values->getAllParams();
+            $new = clone $this;
+            $new->mergeCTEsFrom($values);
 
-            return $new->where("$col IN ($subSql)", $subParams);
+            // Parse column name to identifier parts
+            $columnParts = explode('.', $column);
+            $columnNode = new IdentifierNode($columnParts);
+
+            // Create InOperation with SubqueryNode - share the subquery's AST directly
+            // (copy-on-write: we mark as not private, clone happens only if we mutate later)
+            $subqueryNode = new SubqueryNode($values->ast);
+            $inCondition = new InOperation($columnNode, $subqueryNode, false);
+
+            // Add to WHERE clause - this triggers copy-on-write if needed
+            $select = $new->getModifiableSelect();
+            if ($select->where === null) {
+                $select->where = $inCondition;
+            } else {
+                $select->where = new BinaryOperation($select->where, 'AND', $inCondition);
+            }
+
+            // Mark AST as shared since we're referencing external nodes
+            $new->astIsPrivate = false;
+
+            return $new;
         }
 
         // Other SetInterface - materialize by iterating
@@ -445,9 +712,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     public function like(string $column, string $pattern): self
     {
         $col = $this->db->quoteIdentifier($column);
-        $new = $this->where("$col LIKE ?", [$pattern]);
-        $new->predicate = $this->predicate->like($column, $pattern);
-        return $new;
+        return $this->where("$col LIKE ?", [$pattern]);
     }
 
     /**
@@ -465,22 +730,31 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             throw new \InvalidArgumentException("Cannot union PartialQueries from different databases");
         }
 
-        // Build UNION query as new base SQL
-        $leftSql = $this->buildCoreSql();
-        $rightSql = $other->buildCoreSql();
-        $unionSql = "($leftSql) UNION ($rightSql)";
+        $this->ensureAST();
+        $new = clone $this;
 
-        // Merge params: left params, then right params
-        $params = array_merge($this->getAllParams(), $other->getAllParams());
-
-        // Create new PartialQuery with union as base
-        $new = new self($this->db, $this->executor, $unionSql, $params);
-
-        // Merge CTEs from both sides
-        foreach ($this->cteList as $cte) {
-            $new->cteList[] = $cte;
+        // Create UnionNode from inner queries (without CTE wrappers)
+        // CTEs will be merged at the outer level
+        $leftInner = $new->getInnerQuery();
+        $rightInner = $other->getAST();
+        if ($rightInner instanceof WithStatement) {
+            $rightInner = $rightInner->query;
         }
-        $new = $new->withCTEsFrom($other);
+
+        $unionNode = new UnionNode($leftInner, $rightInner, false, 'UNION');
+
+        // If we had CTEs, rewrap with them; otherwise just use the union
+        if ($new->ast instanceof WithStatement) {
+            $new->ast->query = $unionNode;
+        } else {
+            $new->ast = $unionNode;
+        }
+
+        // Merge CTEs from other query
+        $new->mergeCTEsFrom($other);
+
+        // Note: other query's params are already bound in its AST.
+        // When we render the union, params are collected in order (left then right).
 
         return $new;
     }
@@ -488,7 +762,8 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     /**
      * Difference from another query (NOT IN semantics)
      *
-     * For SQL databases, uses NOT IN subquery or EXCEPT where supported.
+     * Creates an EXCEPT node in the AST. The renderer will throw if the
+     * target dialect doesn't support EXCEPT (e.g., MySQL).
      */
     public function except(SetInterface $other): TableInterface
     {
@@ -500,97 +775,110 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             throw new \InvalidArgumentException("Cannot except PartialQueries from different databases");
         }
 
-        $dialect = $this->db->getDialect();
+        $this->ensureAST();
+        $new = clone $this;
 
-        // Most databases support EXCEPT
-        if ($dialect !== SqlDialect::MySQL) {
-            $leftSql = $this->buildCoreSql();
-            $rightSql = $other->buildCoreSql();
-            $exceptSql = "($leftSql) EXCEPT ($rightSql)";
-
-            $params = array_merge($this->getAllParams(), $other->getAllParams());
-            $new = new self($this->db, $this->executor, $exceptSql, $params);
-
-            foreach ($this->cteList as $cte) {
-                $new->cteList[] = $cte;
-            }
-            return $new->withCTEsFrom($other);
+        // Create EXCEPT node from inner queries (without CTE wrappers)
+        $leftInner = $new->getInnerQuery();
+        $rightInner = $other->getAST();
+        if ($rightInner instanceof WithStatement) {
+            $rightInner = $rightInner->query;
         }
 
-        // MySQL doesn't support EXCEPT - use NOT IN with primary key
-        // This requires knowing the primary key, fall back to NOT EXISTS
-        $new = $this->withCTEsFrom($other);
-        $subSql = $other->buildCoreSql(PHP_INT_MAX);
-        $subParams = $other->getMainParams();
+        $exceptNode = new UnionNode($leftInner, $rightInner, false, 'EXCEPT');
 
-        // Use NOT EXISTS with correlated subquery matching all columns
-        // This is the safest fallback but may be slow
-        $alias = $this->getAlias();
-        return $new->where("NOT EXISTS (SELECT 1 FROM ($subSql) AS _exc WHERE _exc.* = {$alias}.*)", $subParams);
+        // If we had CTEs, rewrap with them; otherwise just use the except
+        if ($new->ast instanceof WithStatement) {
+            $new->ast->query = $exceptNode;
+        } else {
+            $new->ast = $exceptNode;
+        }
+
+        // Merge CTEs from other query
+        $new->mergeCTEsFrom($other);
+
+        return $new;
     }
 
     /**
-     * Return new instance with CTEs from another PartialQuery merged in.
+     * Merge CTEs from another query into this one
      *
-     * CTEs are merged by name. Duplicate names with identical AST are silently
-     * deduplicated. Conflicting definitions throw LogicException.
+     * Used by union/except to combine CTEs from both queries.
+     * Duplicate CTEs with identical definitions are silently deduplicated.
      *
-     * @throws \InvalidArgumentException If queries use different database connections
-     * @throws \LogicException           If conflicting CTE definitions are detected
+     * @throws \LogicException If conflicting CTE definitions are detected
      */
-    private function withCTEsFrom(self $query): self
+    private function mergeCTEsFrom(self $other): void
     {
-        if ($this->db !== $query->db) {
-            throw new \InvalidArgumentException(
-                'Cannot combine PartialQueries from different database connections. ' .
-                'Use ->column() to materialize the subquery first.'
-            );
+        $otherAst = $other->getAST();
+        if (!$otherAst instanceof WithStatement) {
+            return; // No CTEs to merge
         }
 
-        $new = clone $this;
-        $renderer = self::getRenderer();
+        $with = $this->ensureWithStatement();
 
-        foreach ($query->cteList as $foreignCte) {
-            $name = $foreignCte['name'];
-
-            // Check if CTE with the same name already exists
-            $existingIndex = null;
-            foreach ($new->cteList as $idx => $existing) {
-                if ($existing['name'] === $name) {
-                    $existingIndex = $idx;
-                    break;
-                }
-            }
-
-            if ($existingIndex !== null) {
-                $existing = $new->cteList[$existingIndex];
-
-                // Compare by rendering to SQL (AST comparison is complex)
-                $existingSql = $renderer->render($existing['ast']);
-                $foreignSql = $renderer->render($foreignCte['ast']);
-
-                // Same definition -> reuse silently
-                if ($existingSql === $foreignSql
-                    && $existing['params'] === $foreignCte['params']
-                ) {
+        foreach ($otherAst->ctes as $foreignCte) {
+            $existingIdx = $this->findCTEIndex($foreignCte['name']);
+            if ($existingIdx !== null) {
+                // Same name - only skip if it's literally the same AST node
+                if ($with->ctes[$existingIdx]['query'] === $foreignCte['query']) {
                     continue;
                 }
-
-                // Same name, different definition -> ambiguous
                 throw new \LogicException(
-                    "Conflicting CTE definition for '{$name}' between combined PartialQueries."
+                    "Conflicting CTE definition for '{$foreignCte['name']}' between combined PartialQueries."
                 );
             }
+            // Bring in the foreign CTE - mark AST as shared since we're referencing external nodes
+            $with->ctes[] = $foreignCte;
+            $this->astIsPrivate = false;
+        }
+    }
 
-            // New CTE -> deep clone AST to ensure independence
-            $new->cteList[] = [
-                'name' => $foreignCte['name'],
-                'ast' => $renderer->deepClone($foreignCte['ast']),
-                'params' => $foreignCte['params'],
-            ];
+    /**
+     * Get the inner query (without CTE wrapper)
+     */
+    private function getInnerQuery(): ASTNode
+    {
+        $this->ensureAST();
+        if ($this->ast instanceof WithStatement) {
+            return $this->ast->query;
+        }
+        return $this->ast;
+    }
+
+    /**
+     * Find a CTE by name in the AST
+     *
+     * @return int|null Index in WithStatement->ctes, or null if not found
+     */
+    private function findCTEIndex(string $name): ?int
+    {
+        if (!$this->ast instanceof WithStatement) {
+            return null;
+        }
+        foreach ($this->ast->ctes as $i => $cte) {
+            if ($cte['name'] === $name) {
+                return $i;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Ensure AST is wrapped in a WithStatement (for adding CTEs)
+     *
+     * If already a WithStatement, returns it. Otherwise wraps the current AST.
+     */
+    private function ensureWithStatement(): WithStatement
+    {
+        $this->ensureMutableAST();
+
+        if ($this->ast instanceof WithStatement) {
+            return $this->ast;
         }
 
-        return $new;
+        $this->ast = new WithStatement([], false, $this->ast);
+        return $this->ast;
     }
 
     /**
@@ -632,139 +920,237 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             );
         }
 
-        $renderer = self::getRenderer();
+        // Get source query's AST and CTEs
+        $sourceAst = $query->getAST();
+        $sourceCtes = [];
+        $sourceInnerQuery = $sourceAst;
 
-        // Hide same-named CTE in the query being added (its internal implementation detail)
-        $query = $query->hideCTE($name);
-
-        // Merge any nested CTEs from the source query
-        $new = $this->withCTEsFrom($query);
-
-        // Get the AST for the new CTE - deep clone to ensure independence
-        // If the query has its own CTEs (WithStatement), extract the inner query
-        $queryAst = $query->getAst();
-        if ($queryAst instanceof WithStatement) {
-            // Flatten: the inner CTEs are already merged via withCTEsFrom()
-            // Use the inner SELECT as the CTE definition
-            $newCteAst = $renderer->deepClone($queryAst->query);
-        } else {
-            $newCteAst = $renderer->deepClone($queryAst);
+        if ($sourceAst instanceof WithStatement) {
+            $sourceCtes = $sourceAst->ctes;
+            $sourceInnerQuery = $sourceAst->query;
         }
 
-        // Get params for the new CTE (excluding CTE params which were already merged)
-        $newCteParams = $query->getMainParams();
-
-        // Check if we already have a CTE with this name
-        $existingIndex = null;
-        foreach ($new->cteList as $i => $cte) {
+        // Check for name conflict with source query's CTEs
+        foreach ($sourceCtes as $cte) {
             if ($cte['name'] === $name) {
-                $existingIndex = $i;
-                break;
+                throw new \LogicException(
+                    "Cannot add CTE '{$name}': the source query already has a CTE with this name. " .
+                    'CTE shadowing is not supported.'
+                );
             }
         }
 
-        if ($existingIndex !== null) {
-            // Rename OLD CTE to unique name
-            $renamedName = '_cte_' . str_replace('.', '_', (string) hrtime(true));
-            $new->cteList[$existingIndex]['name'] = $renamedName;
+        // Clone and ensure we have a WithStatement
+        $this->ensureAST();
+        $new = clone $this;
+        $with = $new->ensureWithStatement();
 
-            // Update NEW CTE's AST to reference the renamed OLD CTE
-            // This makes the new CTE wrap the old one
-            $newCteAst = $renderer->renameIdentifier($newCteAst, $name, $renamedName);
+        // Check for name conflict with existing CTEs
+        if ($new->findCTEIndex($name) !== null) {
+            throw new \LogicException(
+                "Cannot add CTE '{$name}': a CTE with this name already exists. " .
+                'CTE shadowing is not supported.'
+            );
         }
 
-        // Add NEW CTE with the requested name
-        $new->cteList[] = [
+        // Merge source CTEs into our WithStatement
+        foreach ($sourceCtes as $foreignCte) {
+            $existingIdx = $new->findCTEIndex($foreignCte['name']);
+            if ($existingIdx !== null) {
+                // Same object = same CTE, skip
+                if ($with->ctes[$existingIdx]['query'] === $foreignCte['query']) {
+                    continue;
+                }
+                throw new \LogicException(
+                    "Conflicting CTE definition for '{$foreignCte['name']}' between combined PartialQueries."
+                );
+            }
+            $with->ctes[] = $foreignCte;
+            $this->astIsPrivate = false;
+        }
+
+        // Add the new CTE
+        $with->ctes[] = [
             'name' => $name,
-            'ast' => $newCteAst,
-            'params' => $newCteParams,
+            'columns' => null,
+            'query' => $sourceInnerQuery,
         ];
 
         return $new;
     }
 
+
     /**
-     * Hide a CTE by renaming it to a unique internal name
+     * Set SELECT clause (wraps query with new projection)
      *
-     * This is a safety mechanism for composable queries. When a method
-     * internally uses a CTE (e.g., for soft-delete filtering), it can
-     * hide that CTE before returning, preventing conflicts when the
-     * query is used as a CTE in an outer query.
+     * Creates: SELECT {selectPart} FROM ({current_query}) AS _q
      *
-     * If no CTE with the given name exists, this is a no-op.
-     *
-     * @param string $name CTE name to hide
-     * @return self New instance with the CTE renamed (or same instance if not found)
-     * @internal
+     * Validates that column references are available (if restricted).
+     * Computed expressions like `a + b as sum` are allowed if 'a' and 'b' exist.
      */
-    protected function hideCTE(string $name): self
+    public function select(string $selectPart): self
     {
-        // Find the CTE
-        $cteIndex = null;
-        foreach ($this->cteList as $i => $cte) {
-            if ($cte['name'] === $name) {
-                $cteIndex = $i;
-                break;
+        // Parse the select part to get column nodes
+        $parser = new SqlParser();
+        $columns = [];
+        try {
+            $tempSql = "SELECT {$selectPart} FROM _dummy";
+            $tempAst = $parser->parse($tempSql);
+            if ($tempAst instanceof SelectStatement) {
+                $columns = $tempAst->columns;
+            }
+        } catch (\Throwable $e) {
+            // Fallback: create a simple column node
+            $columns = [new ColumnNode(new IdentifierNode([$selectPart]))];
+        }
+
+        // If we have restricted columns, validate all references
+        if ($this->availableColumns !== null) {
+            foreach ($columns as $col) {
+                if ($col instanceof ColumnNode) {
+                    $refs = $this->extractColumnRefs($col->expression);
+                    foreach ($refs as $ref) {
+                        if (!isset($this->availableColumns[$ref])) {
+                            $available = implode(', ', array_keys($this->availableColumns));
+                            throw new \InvalidArgumentException(
+                                "Column '$ref' is not available. Available columns: $available"
+                            );
+                        }
+                    }
+                }
             }
         }
 
-        if ($cteIndex === null) {
-            return $this; // No-op - safe to call even if CTE doesn't exist
+        // Determine output column names
+        $outputColumns = [];
+        foreach ($columns as $col) {
+            if ($col instanceof ColumnNode) {
+                $name = $this->getColumnOutputName($col);
+                if ($name !== null) {
+                    $outputColumns[$name] = true;
+                }
+            }
         }
 
-        // Generate unique name using monotonic nanosecond timestamp
-        $newName = '_cte_' . str_replace('.', '_', (string) hrtime(true));
+        $new = $this->selectInternal($selectPart);
 
-        $new = clone $this;
-        $renderer = self::getRenderer();
-
-        // Rename in cteList
-        $new->cteList[$cteIndex]['name'] = $newName;
-
-        // Rename references in CTE AST
-        $new->cteList[$cteIndex]['ast'] = $renderer->renameIdentifier(
-            $new->cteList[$cteIndex]['ast'],
-            $name,
-            $newName
-        );
-
-        // Rename references in baseSql using word boundaries
-        // This is safe because $newName is unique and won't collide
-        $pattern = '/\b' . preg_quote($name, '/') . '\b/';
-        $new->baseSql = preg_replace($pattern, $newName, $new->baseSql);
-
-        // Rename references in whereParts
-        foreach ($new->whereParts as $i => $part) {
-            $new->whereParts[$i]['sql'] = preg_replace($pattern, $newName, $part['sql']);
+        // Update available columns to output names (if we tracked any)
+        // Only restrict if we had restrictions or we have definite output names
+        if ($this->availableColumns !== null || !empty($outputColumns)) {
+            $new->availableColumns = $outputColumns ?: null;
         }
-
-        // Invalidate cached analysis (SQL changed)
-        $new->analyzed = false;
-        $new->sourceTable = null;
-        $new->baseWhereAst = null;
 
         return $new;
     }
 
     /**
-     * Set SELECT clause (overwrites previous, default is *)
+     * Internal: wrap query with new SELECT clause
      */
-    public function select(string $selectPart): self
+    private function selectInternal(string $selectPart): self
     {
-        $new         = clone $this;
-        $new->select = $selectPart;
+        $new = clone $this;
+        $new->ensureMutableAST();
+        $new->selectCalled = true;
+
+        $wrapper = new SelectStatement();
+
+        $parser = new SqlParser();
+        try {
+            $tempSql = "SELECT {$selectPart} FROM _dummy";
+            $tempAst = $parser->parse($tempSql);
+            if ($tempAst instanceof SelectStatement) {
+                $wrapper->columns = $tempAst->columns;
+            }
+        } catch (\Throwable $e) {
+            $wrapper->columns = [new ColumnNode(new IdentifierNode([$selectPart]))];
+        }
+
+        $wrapper->from = new SubqueryNode($new->ast);
+        $wrapper->fromAlias = '_q';
+
+        $new->ast = $wrapper;
         return $new;
+    }
+
+    /**
+     * Extract column references from an expression AST
+     *
+     * @return array<string> Column names referenced in the expression
+     */
+    private function extractColumnRefs(ASTNode $node): array
+    {
+        $refs = [];
+
+        if ($node instanceof IdentifierNode) {
+            // Single-part identifier is a column reference
+            // Multi-part (table.column) - take the last part as column name
+            $refs[] = $node->parts[count($node->parts) - 1];
+        } elseif ($node instanceof BinaryOperation) {
+            $refs = array_merge($refs, $this->extractColumnRefs($node->left));
+            $refs = array_merge($refs, $this->extractColumnRefs($node->right));
+        } elseif ($node instanceof UnaryOperation) {
+            $refs = array_merge($refs, $this->extractColumnRefs($node->expression));
+        } elseif ($node instanceof FunctionCallNode) {
+            foreach ($node->arguments as $arg) {
+                $refs = array_merge($refs, $this->extractColumnRefs($arg));
+            }
+        } elseif ($node instanceof SubqueryNode) {
+            // Don't descend into subqueries - they have their own scope
+        }
+        // LiteralNode, PlaceholderNode - no column refs
+
+        return $refs;
+    }
+
+    /**
+     * Get the output name of a column node
+     *
+     * @return string|null Column name (alias or simple identifier), null if complex
+     */
+    private function getColumnOutputName(ColumnNode $col): ?string
+    {
+        // If aliased, use the alias
+        if ($col->alias !== null) {
+            return $col->alias;
+        }
+
+        // If simple identifier, use it
+        if ($col->expression instanceof IdentifierNode) {
+            $parts = $col->expression->parts;
+            return $parts[count($parts) - 1];
+        }
+
+        // Complex expression without alias - can't determine name
+        return null;
     }
 
     /**
      * Project to specific columns (TableInterface method)
      *
-     * Alias for select() with column quoting, enables use as SetInterface
+     * Enforces narrowing: once columns are restricted, you can only
+     * narrow further, not add columns back.
      */
     public function columns(string ...$columns): self
     {
+        // Validate narrowing if we already have restricted columns
+        if ($this->availableColumns !== null) {
+            foreach ($columns as $col) {
+                if (!isset($this->availableColumns[$col])) {
+                    $available = implode(', ', array_keys($this->availableColumns));
+                    throw new \InvalidArgumentException(
+                        "Column '$col' is not available. Available columns: $available"
+                    );
+                }
+            }
+        }
+
         $quoted = array_map(fn($c) => $this->db->quoteIdentifier($c), $columns);
-        return $this->select(implode(', ', $quoted));
+        $new = $this->selectInternal(implode(', ', $quoted));
+
+        // Update available columns to exactly what was requested
+        $new->availableColumns = array_fill_keys($columns, true);
+
+        return $new;
     }
 
     /**
@@ -774,7 +1160,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function has(object $member): bool
     {
-        if ($this->select === null) {
+        if (!$this->selectCalled) {
             throw new \RuntimeException("has() requires columns() or select() to be called first");
         }
 
@@ -785,41 +1171,111 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         return $query->limit(1)->one() !== null;
     }
 
-    /**
-     * Get the SELECT clause (null means *)
-     */
-    public function getSelect(): ?string
-    {
-        return $this->select;
-    }
 
     /**
      * Set ORDER BY clause (overwrites previous)
+     *
+     * The order specification is parsed into AST for clean composition.
      */
     public function order(?string $orderSpec): TableInterface
     {
-        $new          = clone $this;
-        $new->orderBy = $orderSpec;
+        $new = clone $this;
+        $select = $new->getModifiableSelect();
+
+        if ($orderSpec === null) {
+            $select->orderBy = null;
+            return $new;
+        }
+
+        $parser = new SqlParser();
+        $select->orderBy = $parser->parseOrderByFragment($orderSpec);
         return $new;
     }
 
     /**
-     * Set LIMIT (overwrites previous)
+     * Set LIMIT (can only narrow, never expand)
+     *
+     * PartialQuery represents a "window" into data. Limit can shrink the
+     * window but never expand it beyond what was originally available.
+     *
+     * ```php
+     * $q->limit(10)->limit(5);   // limit becomes 5 (shrink OK)
+     * $q->limit(10)->limit(20);  // limit stays 10 (can't expand)
+     * ```
      */
     public function limit(int $limit): self
     {
-        $new        = clone $this;
-        $new->limit = $limit;
+        $new = clone $this;
+        $select = $new->getModifiableSelect();
+
+        // Get current limit (if any)
+        $currentLimit = $select->limit instanceof LiteralNode
+            ? (int) $select->limit->value
+            : null;
+
+        // Can only shrink, never expand
+        if ($currentLimit !== null) {
+            $limit = min($limit, $currentLimit);
+        }
+
+        $select->limit = new LiteralNode($limit, 'number');
         return $new;
     }
 
     /**
-     * Set OFFSET (overwrites previous)
+     * Set OFFSET (additive, stays within window)
+     *
+     * Offset is added to any existing offset. If there's a limit, it's
+     * reduced accordingly to stay within the original window.
+     *
+     * ```php
+     * $q->limit(10)->offset(5);  // becomes LIMIT 5 OFFSET 5 (still within 10)
+     * $q->offset(10)->offset(5); // becomes OFFSET 15
+     * ```
      */
     public function offset(int $offset): self
     {
-        $new         = clone $this;
-        $new->offset = $offset;
+        $new = clone $this;
+        $select = $new->getModifiableSelect();
+
+        // Get current offset and limit
+        $currentOffset = $select->offset instanceof LiteralNode
+            ? (int) $select->offset->value
+            : 0;
+        $currentLimit = $select->limit instanceof LiteralNode
+            ? (int) $select->limit->value
+            : null;
+
+        // New offset is additive
+        $newOffset = $currentOffset + $offset;
+
+        // If there was a limit, shrink it by the offset amount (stay within window)
+        if ($currentLimit !== null) {
+            $newLimit = max(0, $currentLimit - $offset);
+            $select->limit = new LiteralNode($newLimit, 'number');
+        }
+
+        $select->offset = $newOffset > 0 ? new LiteralNode($newOffset, 'number') : null;
+        return $new;
+    }
+
+    /**
+     * Create a barrier - wrap current query as subquery (internal)
+     *
+     * Automatically called by filter methods (where, in, or) when pagination
+     * exists, ensuring filters apply to the paginated result set rather than
+     * modifying the original query structure.
+     *
+     * CTEs are captured inside the barrier (wrapped in the subquery).
+     */
+    protected function barrier(): self
+    {
+        $this->ensureAST();
+        $new = clone $this;
+
+        // Wrap the entire AST (including any CTEs) in a subquery
+        $new->ast = $new->wrapInSelect($this->ast);
+
         return $new;
     }
 
@@ -840,250 +1296,36 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     }
 
     /**
-     * Build SQL query string with optional WITH prefix
-     *
-     * @param int|null $defaultLimit Default limit for outer queries (null = no limit)
+     * Get SelectStatement for reading (without triggering copy-on-write)
      */
-    private function buildSql(?int $defaultLimit = null): string
+    private function getSelectForReading(): ?SelectStatement
     {
-        $core = $this->buildCoreSql($defaultLimit);
-
-        if (empty($this->cteList)) {
-            return $core;
+        if ($this->ast === null) {
+            return null;
         }
 
-        $renderer = self::getRenderer();
-        $withParts = [];
-        foreach ($this->cteList as $cte) {
-            $cteSql = $renderer->render($cte['ast']);
-            $withParts[] = $cte['name'] . ' AS (' . $cteSql . ')';
+        if ($this->ast instanceof SelectStatement) {
+            return $this->ast;
         }
 
-        return 'WITH ' . implode(', ', $withParts) . ' ' . $core;
+        if ($this->ast instanceof WithStatement && $this->ast->query instanceof SelectStatement) {
+            return $this->ast->query;
+        }
+
+        return null;
     }
 
     /**
-     * Build core SQL (without WITH prefix)
+     * Check if query has pagination (LIMIT or OFFSET)
      *
-     * Strategy:
-     * - If base SQL is a simple SELECT without WHERE/ORDER/LIMIT, append directly
-     * - Otherwise, wrap as subquery for safety
-     *
-     * @param int|null $defaultLimit Default limit to apply if none set (null = no limit)
+     * Used to determine if filter operations need barrier() to preserve
+     * window semantics. Forces AST parsing if not yet done.
      */
-    private function buildCoreSql(?int $defaultLimit = null): string
+    private function hasPagination(): bool
     {
-        $dialect = $this->db->getDialect();
-
-        // If no composition at all, use base SQL directly
-        if (empty($this->whereParts) && $this->orderBy === null
-            && $this->limit === null && $defaultLimit === null
-            && $this->offset === 0 && $this->select === null) {
-            return $this->baseSql;
-        }
-
-        // Try to append directly if base SQL is simple enough
-        if ($this->canAppendToBaseSql()) {
-            return $this->buildByAppending($dialect, $defaultLimit);
-        }
-
-        // Fall back to wrapping as subquery
-        return $this->buildByWrapping($dialect, $defaultLimit);
-    }
-
-    /**
-     * Check if we can safely append WHERE/ORDER/LIMIT to base SQL
-     *
-     * Returns true if base SQL is a simple SELECT without existing WHERE/ORDER/LIMIT
-     */
-    private function canAppendToBaseSql(): bool
-    {
-        // Only try if we're not changing SELECT columns
-        if ($this->select !== null) {
-            return false;
-        }
-
-        try {
-            $parser = new SqlParser();
-            $ast = $parser->parse($this->baseSql);
-        } catch (\Throwable $e) {
-            return false;
-        }
-
-        // Must be a simple SELECT (not UNION etc)
-        if (!$ast instanceof SelectStatement) {
-            return false;
-        }
-
-        // Can append if no existing WHERE, ORDER BY, or LIMIT
-        return $ast->where === null
-            && empty($ast->orderBy)
-            && $ast->limit === null
-            && $ast->offset === null;
-    }
-
-    /**
-     * Build SQL by appending clauses to base SQL
-     */
-    private function buildByAppending(SqlDialect $dialect, ?int $defaultLimit): string
-    {
-        $sql = $this->baseSql;
-
-        if (!empty($this->whereParts)) {
-            $sql .= ' WHERE ' . $this->buildWhereSql();
-        }
-
-        if ($this->orderBy !== null) {
-            $sql .= " ORDER BY {$this->orderBy}";
-        }
-
-        $sql .= $this->buildLimitClause($dialect, $defaultLimit);
-
-        return $sql;
-    }
-
-    /**
-     * Build SQL by wrapping base SQL as subquery
-     */
-    private function buildByWrapping(SqlDialect $dialect, ?int $defaultLimit): string
-    {
-        $select = $this->select ?? '*';
-        $alias = $this->getAlias();
-        $sql = "SELECT {$select} FROM ({$this->baseSql}) AS {$alias}";
-
-        if (!empty($this->whereParts)) {
-            $sql .= ' WHERE ' . $this->buildWhereSql();
-        }
-
-        if ($this->orderBy !== null) {
-            $sql .= " ORDER BY {$this->orderBy}";
-        } elseif ($dialect === SqlDialect::SqlServer || $dialect === SqlDialect::Oracle) {
-            if ($this->limit !== null || $defaultLimit !== null || $this->offset > 0) {
-                $sql .= " ORDER BY (SELECT 0)";
-            }
-        }
-
-        $sql .= $this->buildLimitClause($dialect, $defaultLimit);
-
-        return $sql;
-    }
-
-    /**
-     * Build WHERE clause string (without "WHERE")
-     */
-    private function buildWhereSql(): string
-    {
-        if (empty($this->whereParts)) {
-            return '';
-        }
-
-        $parts = [];
-        foreach ($this->whereParts as $part) {
-            $parts[] = $part['sql'];
-        }
-
-        return implode(' AND ', $parts);
-    }
-
-    /**
-     * Build LIMIT/OFFSET clause according to database dialect
-     *
-     * @param SqlDialect $dialect Database dialect
-     * @param int|null $defaultLimit Default limit to use if none set (null = no limit)
-     */
-    private function buildLimitClause(SqlDialect $dialect, ?int $defaultLimit = null): string
-    {
-        $limit  = $this->limit ?? $defaultLimit;
-        $offset = $this->offset;
-
-        // No limit and no offset -> no clause needed
-        if ($limit === null && $offset === 0) {
-            return '';
-        }
-
-        // If we have offset but no limit, we need a very large limit for some dialects
-        if ($limit === null) {
-            $limit = PHP_INT_MAX;
-        }
-
-        return match ($dialect) {
-            SqlDialect::MySQL =>
-                $offset > 0
-                    ? " LIMIT {$offset}, {$limit}"
-                    : " LIMIT {$limit}",
-
-            SqlDialect::SqlServer,
-            SqlDialect::Oracle =>
-                // SQL Server (2012+) & modern Oracle: OFFSET .. FETCH
-                // For SQL Server we ensured an ORDER BY earlier.
-                " OFFSET {$offset} ROWS FETCH NEXT {$limit} ROWS ONLY",
-
-            SqlDialect::Postgres,
-            SqlDialect::Sqlite,
-            SqlDialect::Generic,
-            SqlDialect::Virtual =>
-                $offset > 0
-                    ? " LIMIT {$limit} OFFSET {$offset}"
-                    : " LIMIT {$limit}",
-        };
-    }
-
-    /**
-     * Params for the "main" query (base SQL + WHERE params), excluding CTE params
-     *
-     * @return array<int, mixed>
-     */
-    private function getMainParams(): array
-    {
-        $params = $this->baseParams;
-
-        foreach ($this->whereParts as $part) {
-            if (!empty($part['params'])) {
-                foreach ($part['params'] as $key => $p) {
-                    if (is_string($key)) {
-                        $params[$key] = $p;  // Named placeholder
-                    } else {
-                        $params[] = $p;  // Positional placeholder
-                    }
-                }
-            }
-        }
-
-        return $params;
-    }
-
-    /**
-     * Flattened params for all CTEs (in order), then main query params
-     *
-     * Preserves named placeholder keys (e.g., 'status' for :status).
-     *
-     * @return array<int|string, mixed>
-     */
-    private function getAllParams(): array
-    {
-        $params = [];
-
-        // CTE params first
-        foreach ($this->cteList as $cte) {
-            foreach ($cte['params'] as $key => $p) {
-                if (is_string($key)) {
-                    $params[$key] = $p;
-                } else {
-                    $params[] = $p;
-                }
-            }
-        }
-
-        // Then main/base + WHERE params
-        foreach ($this->getMainParams() as $key => $p) {
-            if (is_string($key)) {
-                $params[$key] = $p;
-            } else {
-                $params[] = $p;
-            }
-        }
-
-        return $params;
+        $this->ensureAST();
+        $select = $this->getSelectForReading();
+        return $select !== null && ($select->limit !== null || $select->offset !== null);
     }
 
     /**
@@ -1102,27 +1344,34 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     /**
      * Fetch first column from all rows
      *
-     * Applies default limit of 1000 if no explicit limit was set.
-     * Note: When using a PartialQuery as subquery via in(), the limit
-     * is bypassed automatically.
+     * Uses the executor path (AST-based) for consistency with iteration.
      *
      * @return array<int, mixed>
      */
     public function column(): array
     {
-        return $this->db->queryColumn($this->buildSql(1000), $this->getAllParams());
+        $result = [];
+        foreach ($this as $row) {
+            $vars = get_object_vars($row);
+            $result[] = reset($vars);
+        }
+        return $result;
     }
 
     /**
      * Fetch first column of first row
      *
-     * Does NOT apply default limit - intended for scalar subquery use cases
+     * Uses the executor path (AST-based) for consistency with iteration.
      *
      * @return mixed
      */
     public function field(): mixed
     {
-        return $this->db->queryField($this->buildSql(), $this->getAllParams());
+        foreach ($this->limit(1) as $row) {
+            $vars = get_object_vars($row);
+            return reset($vars);
+        }
+        return null;
     }
 
     /**
@@ -1175,58 +1424,59 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     }
 
     /**
-     * Count total matching rows (ignores ORDER BY and LIMIT/OFFSET)
+     * Count rows that would be returned by iteration
+     *
+     * Respects LIMIT/OFFSET if set on the query.
      */
     public function count(): int
     {
-        $cteSql = '';
-        if (!empty($this->cteList)) {
-            $parts = [];
-            foreach ($this->cteList as $cte) {
-                $parts[] = $cte['name'] . ' AS (' . $cte['sql'] . ')';
-            }
-            $cteSql = 'WITH ' . implode(', ', $parts) . ' ';
+        $this->ensureAST();
+
+        // Clone and strip ORDER BY for performance (doesn't affect count)
+        $innerAst = $this->ast->deepClone();
+        $this->stripOrderBy($innerAst);
+
+        // Build: SELECT COUNT(*) FROM (innerAst) AS _count
+        $countSelect = new SelectStatement();
+        $countSelect->columns = [
+            new ColumnNode(new FunctionCallNode('COUNT', [new IdentifierNode(['*'])]), null)
+        ];
+        $countSelect->from = new SubqueryNode($innerAst);
+        $countSelect->fromAlias = '_count';
+
+        // Execute via executor and extract count from first row
+        // Pass $this for context (db reference), but use constructed countSelect AST
+        $rows = ($this->executor)($this, $countSelect);
+        foreach ($rows as $row) {
+            $vars = get_object_vars($row);
+            return (int) reset($vars);
         }
 
-        $whereSql = $this->buildWhereSql();
+        return 0;
+    }
 
-        $baseParams  = $this->baseParams;
-        $whereParams = [];
-        foreach ($this->whereParts as $part) {
-            foreach ($part['params'] as $p) {
-                $whereParams[] = $p;
-            }
+    /**
+     * Strip ORDER BY from an AST (mutates)
+     */
+    private function stripOrderBy(ASTNode $ast): void
+    {
+        if ($ast instanceof SelectStatement) {
+            $ast->orderBy = null;
+        } elseif ($ast instanceof WithStatement && $ast->query instanceof SelectStatement) {
+            $ast->query->orderBy = null;
         }
-
-        $cteParams = [];
-        foreach ($this->cteList as $cte) {
-            foreach ($cte['params'] as $p) {
-                $cteParams[] = $p;
-            }
-        }
-
-        $params = array_merge($cteParams, $baseParams, $whereParams);
-
-        $sql = "SELECT COUNT(*) FROM ({$this->baseSql}) AS _count";
-
-        if ($whereSql !== '') {
-            $sql .= ' WHERE ' . $whereSql;
-        }
-
-        return (int) $this->db->queryField($cteSql . $sql, $params);
     }
 
     /**
      * Iterator over results (streaming)
      *
-     * Applies default limit of 1000 if no explicit limit was set.
-     * This protects against accidental unbounded queries.
-     *
      * @return \Traversable<int, T>
      */
     public function getIterator(): \Traversable
     {
-        $rows = ($this->executor)($this->buildSql(1000), $this->getAllParams());
+        // Pass both query and AST to executor
+        // If AST is null, executor can use fast path with baseSql/originalParams
+        $rows = ($this->executor)($this, $this->ast);
 
         // No hydration -> yield rows as-is
         if ($this->entityClass === null && $this->hydrator === null) {
@@ -1276,7 +1526,6 @@ final class PartialQuery implements ResultSetInterface, TableInterface
                                 continue;
                             }
                             $prop = $refClass->getProperty($propertyName);
-                            $prop->setAccessible(true);
 
                             // Get target type name for conversion
                             $targetType = null;
@@ -1342,18 +1591,17 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function getWhere(): array
     {
-        if (empty($this->whereParts)) {
+        $this->ensureAST();
+
+        // Get WHERE from AST
+        $select = $this->getSelectForReading();
+        if ($select === null || $select->where === null) {
             return ['sql' => '', 'params' => []];
         }
 
-        $sql = $this->buildWhereSql();
-
-        $params = [];
-        foreach ($this->whereParts as $part) {
-            foreach ($part['params'] as $p) {
-                $params[] = $p;
-            }
-        }
+        // Derive SQL and params from the WHERE clause (params are bound in PlaceholderNodes)
+        $renderer = SqlRenderer::get($this->db->getDialect());
+        [$sql, $params] = $renderer->renderWithParams($select->where);
 
         return [
             'sql'    => $sql,
@@ -1362,43 +1610,44 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     }
 
     /**
-     * Get the structured predicate for row matching
+     * Test if a row matches the query's WHERE conditions
      *
-     * Returns a Predicate representing the filter conditions added via
-     * eq(), lt(), gt(), like(), etc. Raw where() clauses are NOT included
-     * since they can't be represented structurally.
-     *
-     * Use ->getPredicate()->test($row) to check if a row matches.
-     */
-    public function getPredicate(): Predicate
-    {
-        return $this->predicate;
-    }
-
-    /**
-     * Test if a row matches the structured filter conditions
-     *
-     * Convenience method for getPredicate()->test($row).
-     *
-     * Note: Only tests conditions added via eq(), lt(), gt(), like(), etc.
-     * Raw where() clauses cannot be tested without database access.
+     * Evaluates the full WHERE clause from the AST against the row.
+     * This works correctly with barrier() - conditions apply to the
+     * appropriate level of query nesting.
      *
      * @param object $row The row to test
-     * @return bool True if row matches all structured conditions
+     * @return bool True if row matches all WHERE conditions
+     * @throws \RuntimeException If query has CTEs or UNION (can't evaluate)
      */
     public function matches(object $row): bool
     {
-        // First check base SQL WHERE conditions (if any)
-        $this->analyze(); // Ensure AST is parsed
-        if ($this->baseWhereAst !== null) {
-            $evaluator = new ExpressionEvaluator();
-            if (!$evaluator->evaluateAsBool($this->baseWhereAst, $row)) {
-                return false;
-            }
+        $this->ensureAST();
+
+        // CTEs not supported for in-memory evaluation
+        if ($this->ast instanceof WithStatement) {
+            throw new \RuntimeException(
+                'matches() is not supported for queries with CTEs. ' .
+                'Use the database to execute the query instead.'
+            );
         }
 
-        // Then check Predicate conditions (from eq()/lt()/etc. calls)
-        return $this->predicate->test($row);
+        // UnionNode - can't easily evaluate
+        if (!$this->ast instanceof SelectStatement) {
+            throw new \RuntimeException(
+                'matches() is not supported for UNION/EXCEPT queries. ' .
+                'Use the database to execute the query instead.'
+            );
+        }
+
+        // No WHERE clause - all rows match
+        if ($this->ast->where === null) {
+            return true;
+        }
+
+        // Params are already bound in PlaceholderNodes - evaluate directly
+        $evaluator = new ExpressionEvaluator();
+        return $evaluator->evaluateAsBool($this->ast->where, $row);
     }
 
     /**
@@ -1408,7 +1657,11 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function getLimit(): ?int
     {
-        return $this->limit;
+        $select = $this->getSelectForReading();
+        if ($select !== null && $select->limit instanceof LiteralNode) {
+            return (int) $select->limit->value;
+        }
+        return null;
     }
 
     /**
@@ -1416,7 +1669,11 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function getOffset(): int
     {
-        return $this->offset;
+        $select = $this->getSelectForReading();
+        if ($select !== null && $select->offset instanceof LiteralNode) {
+            return (int) $select->offset->value;
+        }
+        return 0;
     }
 
     /**
@@ -1451,11 +1708,149 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     /**
      * OR predicate support
      *
-     * Not yet implemented for PartialQuery - use raw where() with OR.
+     * Adds an OR condition to the WHERE clause. Each predicate's conditions
+     * are ANDed together, then predicates are ORed.
+     *
+     * Example: or(p->eq('a', 1)->eq('b', 2), p->eq('c', 3))
+     * Produces: WHERE ... AND ((a = 1 AND b = 2) OR (c = 3))
+     *
+     * Requires at least 2 predicates - OR semantically needs multiple alternatives.
      */
-    public function or(\mini\Table\Predicate ...$predicates): TableInterface
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): TableInterface
     {
-        throw new \RuntimeException("or() not yet implemented for PartialQuery - use where() with OR clause");
+        $predicates = [$a, $b, ...$more];
+
+        // If pagination exists, wrap in barrier first to preserve window semantics
+        if ($this->hasPagination()) {
+            return $this->barrier()->or($a, $b, ...$more);
+        }
+
+        // Convert predicates to AST and OR them together
+        $orCondition = null;
+        foreach ($predicates as $predicate) {
+            $predicateAst = $this->predicateToAst($predicate);
+            if ($predicateAst === null) {
+                continue; // Empty predicate matches everything
+            }
+            if ($orCondition === null) {
+                $orCondition = $predicateAst;
+            } else {
+                $orCondition = new BinaryOperation($orCondition, 'OR', $predicateAst);
+            }
+        }
+
+        if ($orCondition === null) {
+            return $this; // All predicates were empty
+        }
+
+        // Add to WHERE clause
+        $new = clone $this;
+        $new->ensureMutableAST();
+        $select = $new->getModifiableSelect();
+
+        if ($select->where === null) {
+            $select->where = $orCondition;
+        } else {
+            $select->where = new BinaryOperation($select->where, 'AND', $orCondition);
+        }
+
+        return $new;
+    }
+
+    /**
+     * Convert a Predicate to AST expression
+     *
+     * Returns null for empty predicates (match everything).
+     * Throws for predicates that match nothing.
+     */
+    private function predicateToAst(Predicate $predicate): ?ASTNode
+    {
+        $conditions = $predicate->getConditions();
+
+        if (empty($conditions)) {
+            return null; // Empty predicate matches everything
+        }
+
+        $result = null;
+        foreach ($conditions as $cond) {
+            $condAst = $this->conditionToAst($cond);
+            if ($result === null) {
+                $result = $condAst;
+            } else {
+                $result = new BinaryOperation($result, 'AND', $condAst);
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Convert a single condition to AST
+     */
+    private function conditionToAst(array $cond): ASTNode
+    {
+        $column = new IdentifierNode([$cond['column']]);
+        $value = $cond['value'];
+        $bound = $cond['bound'];
+
+        // Create value node - bound values become literals, unbound become placeholders
+        if ($cond['operator'] === Operator::In) {
+            // IN requires special handling - value is a SetInterface
+            if ($value instanceof SetInterface) {
+                // Convert set to list of values for IN clause
+                // Set should already be projected to the right column(s)
+                $values = [];
+                $setColumns = array_keys($value->getColumns());
+                $colName = $setColumns[0] ?? $cond['column'];
+                foreach ($value as $row) {
+                    $rowValue = $row->$colName;
+                    $values[] = $this->valueToLiteral($rowValue);
+                }
+                return new InOperation($column, $values, false);
+            }
+            throw new \RuntimeException("IN operator requires SetInterface value");
+        }
+
+        if ($cond['operator'] === Operator::Like) {
+            $valueNode = $bound
+                ? $this->valueToLiteral($value)
+                : $this->createBoundPlaceholder($value);
+            return new LikeOperation($column, $valueNode, false);
+        }
+
+        // Standard comparison operators
+        $valueNode = $bound
+            ? $this->valueToLiteral($value)
+            : $this->createBoundPlaceholder($value);
+
+        return new BinaryOperation($column, $cond['operator']->value, $valueNode);
+    }
+
+    /**
+     * Convert a PHP value to a LiteralNode
+     */
+    private function valueToLiteral(mixed $value): LiteralNode
+    {
+        if ($value === null) {
+            return new LiteralNode(null, 'null');
+        }
+        if (is_int($value) || is_float($value)) {
+            return new LiteralNode((string)$value, 'number');
+        }
+        return new LiteralNode($value, 'string');
+    }
+
+    /**
+     * Create a bound placeholder (named parameter that's already resolved)
+     */
+    private function createBoundPlaceholder(string $paramName): PlaceholderNode
+    {
+        // For unbound predicates, we create a named placeholder
+        // The predicate should be bound before use
+        $placeholder = new PlaceholderNode($paramName);
+        // Note: The predicate's bind() should have been called before or()
+        // If not, this will fail at evaluation time
+        return $placeholder;
     }
 
     /**
@@ -1472,28 +1867,27 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      * Get CTE (Common Table Expression) prefix for DELETE/UPDATE
      *
      * Returns the WITH clause if CTEs are present, empty string otherwise.
-     * Also returns the parameters needed for the CTEs.
+     * Note: CTE params are included in the AST and returned by getSql().
      *
      * @return array{sql: string, params: array<int, mixed>}
      */
     public function getCTEs(): array
     {
-        if (empty($this->cteList)) {
+        $this->ensureAST();
+
+        if (!$this->ast instanceof WithStatement || empty($this->ast->ctes)) {
             return ['sql' => '', 'params' => []];
         }
 
+        $renderer = SqlRenderer::get($this->db->getDialect());
         $withParts = [];
-        $params = [];
-        foreach ($this->cteList as $cte) {
-            $withParts[] = $cte['name'] . ' AS (' . $cte['sql'] . ')';
-            foreach ($cte['params'] as $p) {
-                $params[] = $p;
-            }
+        foreach ($this->ast->ctes as $cte) {
+            $withParts[] = $cte['name'] . ' AS (' . $renderer->render($cte['query']) . ')';
         }
 
         return [
             'sql' => 'WITH ' . implode(', ', $withParts) . ' ',
-            'params' => $params,
+            'params' => [], // Params are bound in AST, returned by getSql()
         ];
     }
 
@@ -1502,9 +1896,10 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function __debugInfo(): array
     {
+        [$sql, $params] = $this->getSql($this->db->getDialect());
         return [
-            'sql'    => $this->buildSql(),
-            'params' => $this->getAllParams(),
+            'sql'    => $sql,
+            'params' => $params,
         ];
     }
 
@@ -1516,9 +1911,8 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function __toString(): string
     {
-        $sql    = $this->buildSql();
-        $params = $this->getAllParams();
-        $db     = $this->db;
+        [$sql, $params] = $this->getSql($this->db->getDialect());
+        $db = $this->db;
 
         $tree = GenericParser::sql()->parse($sql);
 

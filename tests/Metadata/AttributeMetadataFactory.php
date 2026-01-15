@@ -271,7 +271,6 @@ $test = new class extends Test {
 
         $reflection = new \ReflectionClass($meta);
         $prop = $reflection->getProperty('annotations');
-        $prop->setAccessible(true);
         $annotations = $prop->getValue($meta);
 
         // The title should be a Translatable instance
@@ -289,7 +288,6 @@ $test = new class extends Test {
 
         $reflection = new \ReflectionClass($usernameMeta);
         $prop = $reflection->getProperty('annotations');
-        $prop->setAccessible(true);
         $annotations = $prop->getValue($usernameMeta);
 
         $this->assertInstanceOf(Translatable::class, $annotations['title']);
@@ -303,7 +301,6 @@ $test = new class extends Test {
 
         $reflection = new \ReflectionClass($idMeta);
         $prop = $reflection->getProperty('annotations');
-        $prop->setAccessible(true);
         $annotations = $prop->getValue($idMeta);
 
         $this->assertInstanceOf(Translatable::class, $annotations['title']);

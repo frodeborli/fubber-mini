@@ -96,7 +96,7 @@ final class EmptyTable extends AbstractTable
         return $this;
     }
 
-    public function or(Predicate ...$predicates): TableInterface
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): TableInterface
     {
         // OR on empty table is still empty
         return $this;

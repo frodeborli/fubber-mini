@@ -33,7 +33,7 @@ namespace mini\Database;
  * }
  * ```
  *
- * @see SqlRowHydrator For hydrating from a full database row
+ * @see Hydration For hydrating from a full database row
  * @see SqlValue For the reverse direction (PHP → SQL)
  */
 interface SqlValueHydrator

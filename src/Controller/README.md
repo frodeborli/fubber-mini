@@ -470,4 +470,3 @@ public function show(int $id): array
 - **Converter System** - src/Converter/README.md
 - **Database** - src/Database/README.md
 - **Authentication** - src/Auth/README.md
-- **Tables (ORM)** - src/Tables/README.md

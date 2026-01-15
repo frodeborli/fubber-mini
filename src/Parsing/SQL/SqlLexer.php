@@ -77,6 +77,12 @@ class SqlLexer
     public const T_CURRENT_DATE = 'CURRENT_DATE';
     public const T_CURRENT_TIME = 'CURRENT_TIME';
     public const T_CURRENT_TIMESTAMP = 'CURRENT_TIMESTAMP';
+    public const T_FETCH = 'FETCH';
+    public const T_FIRST = 'FIRST';
+    public const T_NEXT  = 'NEXT';
+    public const T_ROWS  = 'ROWS';
+    public const T_ROW   = 'ROW';
+    public const T_ONLY  = 'ONLY';
     public const T_IDENTIFIER = 'IDENTIFIER';
     public const T_STRING = 'STRING';
     public const T_NUMBER = 'NUMBER';
@@ -354,6 +360,12 @@ class SqlLexer
                         'CURRENT_DATE' => self::T_CURRENT_DATE,
                         'CURRENT_TIME' => self::T_CURRENT_TIME,
                         'CURRENT_TIMESTAMP' => self::T_CURRENT_TIMESTAMP,
+                        'FETCH' => self::T_FETCH,
+                        'FIRST' => self::T_FIRST,
+                        'NEXT' => self::T_NEXT,
+                        'ROWS' => self::T_ROWS,
+                        'ROW' => self::T_ROW,
+                        'ONLY' => self::T_ONLY,
                         default => self::T_IDENTIFIER
                     };
                 }

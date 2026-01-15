@@ -184,7 +184,6 @@ class ResultSet implements ResultSetInterface
         foreach ($row as $key => $value) {
             if ($refClass->hasProperty($key)) {
                 $prop = $refClass->getProperty($key);
-                $prop->setAccessible(true);
                 $prop->setValue($entity, $value);
             }
         }

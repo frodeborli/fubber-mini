@@ -219,9 +219,9 @@ Exceptions are caught and converted to responses via the `exceptionConverter` re
 
 ## Data Layer Philosophy
 
-### Repository or Active Record; what's your taste?
+### Active Record via ModelTrait
 
-We enable you to use Eloquent style queries, on top of a Repository pattern as championed by .NET Entity Framework. So while many enterprise frameworks consider ActiveRecord an antipattern - it's popularized by Laravel, so we created the ActiveRecordTrait you can use in your entity class, to get Eloquent style SQL abstraction:
+We provide Active Record style persistence via `ModelTrait`. Entities use validation attributes for schema definition, and `VirtualDatabase` decouples persistence from storage backend - so the "coupling" argument against Active Record is moot.
 
 We provide Eloquent-style queries, but we don't hide SQL:
 ```php

@@ -143,10 +143,10 @@ final class SingleRowTable implements TableInterface
         return new UnionTable($this, $other);
     }
 
-    public function or(Predicate ...$predicates): TableInterface
+    public function or(Predicate $a, Predicate $b, Predicate ...$more): TableInterface
     {
         // Single row - just check if any predicate matches
-        foreach ($predicates as $p) {
+        foreach ([$a, $b, ...$more] as $p) {
             if ($p->test((object) $this->values)) {
                 return $this;
             }

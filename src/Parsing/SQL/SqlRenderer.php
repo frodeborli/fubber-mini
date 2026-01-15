@@ -2,6 +2,7 @@
 
 namespace mini\Parsing\SQL;
 
+use mini\Database\SqlDialect;
 use mini\Parsing\SQL\AST\{
     ASTNode,
     SelectStatement,
@@ -37,10 +38,49 @@ use mini\Parsing\SQL\AST\{
  * ```php
  * $renderer = new SqlRenderer();
  * $sql = $renderer->render($ast);
+ *
+ * // Or with params collection (for prepared statements):
+ * [$sql, $params] = $renderer->renderWithParams($ast);
+ *
+ * // For dialect-specific SQL:
+ * $renderer = SqlRenderer::forDialect(SqlDialect::MySQL);
  * ```
  */
 class SqlRenderer
 {
+    private SqlDialect $dialect;
+
+    public function __construct(SqlDialect $dialect = SqlDialect::Generic)
+    {
+        $this->dialect = $dialect;
+    }
+
+    /**
+     * Create a renderer for a specific SQL dialect
+     */
+    public static function forDialect(SqlDialect $dialect): self
+    {
+        return new self($dialect);
+    }
+
+    /**
+     * Get a cached renderer for the specified dialect
+     *
+     * Reuses renderer instances per dialect for efficiency.
+     */
+    public static function get(SqlDialect $dialect = SqlDialect::Generic): self
+    {
+        static $renderers = [];
+        $key = $dialect->name;
+        return $renderers[$key] ??= new self($dialect);
+    }
+
+    /**
+     * Collected params during renderWithParams()
+     * @var array<int, mixed>|null
+     */
+    private ?array $collectingParams = null;
+
     /**
      * Render an AST node to SQL string
      *
@@ -48,6 +88,52 @@ class SqlRenderer
      * @return string The SQL string
      */
     public function render(ASTNode $node): string
+    {
+        return $this->doRender($node);
+    }
+
+    /**
+     * Render an AST node to SQL string and collect bound parameter values
+     *
+     * Returns both the SQL (with ? placeholders) and an array of bound values
+     * in the order they appear. This ensures params are always correctly
+     * ordered to match their placeholders.
+     *
+     * @param ASTNode $node The AST node to render
+     * @return array{string, array<int, mixed>} [sql, params]
+     * @throws \RuntimeException If any placeholder is unbound
+     */
+    public function renderWithParams(ASTNode $node): array
+    {
+        $this->collectingParams = [];
+        try {
+            $sql = $this->doRender($node);
+            return [$sql, $this->collectingParams];
+        } finally {
+            $this->collectingParams = null;
+        }
+    }
+
+    /**
+     * Render ORDER BY items to SQL string (without ORDER BY keywords)
+     *
+     * @param array<int, array{column: ASTNode, direction: string}> $orderBy
+     * @return string The rendered ORDER BY clause body
+     */
+    public function renderOrderByItems(array $orderBy): string
+    {
+        $parts = [];
+        foreach ($orderBy as $order) {
+            $part = $this->doRender($order['column']);
+            if (isset($order['direction']) && strtoupper($order['direction']) === 'DESC') {
+                $part .= ' DESC';
+            }
+            $parts[] = $part;
+        }
+        return implode(', ', $parts);
+    }
+
+    private function doRender(ASTNode $node): string
     {
         return match (true) {
             $node instanceof WithStatement => $this->renderWith($node),
@@ -58,7 +144,7 @@ class SqlRenderer
             $node instanceof JoinNode => $this->renderJoin($node),
             $node instanceof IdentifierNode => $this->renderIdentifier($node),
             $node instanceof LiteralNode => $this->renderLiteral($node),
-            $node instanceof PlaceholderNode => $node->token,
+            $node instanceof PlaceholderNode => $this->renderPlaceholder($node),
             $node instanceof BinaryOperation => $this->renderBinary($node),
             $node instanceof UnaryOperation => $this->renderUnary($node),
             $node instanceof InOperation => $this->renderIn($node),
@@ -164,30 +250,72 @@ class SqlRenderer
             $sql .= ' ORDER BY ' . implode(', ', $orderParts);
         }
 
-        // LIMIT
-        if ($node->limit !== null) {
-            $sql .= ' LIMIT ' . $this->render($node->limit);
+        // LIMIT/OFFSET - dialect-specific
+        $sql .= $this->renderLimitOffset($node->limit, $node->offset);
+
+        return $sql;
+    }
+
+    /**
+     * Render LIMIT/OFFSET clause based on dialect
+     */
+    private function renderLimitOffset(?ASTNode $limit, ?ASTNode $offset): string
+    {
+        if ($limit === null && $offset === null) {
+            return '';
         }
 
-        // OFFSET
-        if ($node->offset !== null) {
-            $sql .= ' OFFSET ' . $this->render($node->offset);
+        // SQL Server uses OFFSET/FETCH syntax (requires ORDER BY)
+        if ($this->dialect === SqlDialect::SqlServer) {
+            $sql = '';
+            // OFFSET is required for FETCH in SQL Server
+            $sql .= ' OFFSET ' . ($offset !== null ? $this->render($offset) : '0') . ' ROWS';
+            if ($limit !== null) {
+                $sql .= ' FETCH NEXT ' . $this->render($limit) . ' ROWS ONLY';
+            }
+            return $sql;
         }
 
+        // Standard LIMIT/OFFSET syntax (PostgreSQL, SQLite, MySQL, etc.)
+        $sql = '';
+        if ($limit !== null) {
+            $sql .= ' LIMIT ' . $this->render($limit);
+        }
+        if ($offset !== null) {
+            $sql .= ' OFFSET ' . $this->render($offset);
+        }
         return $sql;
     }
 
     private function renderUnion(UnionNode $node): string
     {
+        $op = $node->operator;
+
+        // Check dialect support for EXCEPT/INTERSECT
+        if (($op === 'EXCEPT' || $op === 'INTERSECT') && !$this->dialect->supportsExcept()) {
+            throw new \RuntimeException(
+                "{$op} is not supported by {$this->dialect->getName()}. " .
+                "Use alternative query patterns (e.g., NOT EXISTS for EXCEPT)."
+            );
+        }
+
+        // Render without parentheses for simple SELECTs
+        // Only add parentheses if needed for nested UNIONs
         $left = $this->render($node->left);
         $right = $this->render($node->right);
 
-        $op = $node->operator;
         if ($node->all) {
             $op .= ' ALL';
         }
 
-        return "($left) $op ($right)";
+        // Wrap in parens only if nested UNION
+        $needsLeftParen = $node->left instanceof UnionNode;
+        $needsRightParen = $node->right instanceof UnionNode;
+
+        $leftSql = $needsLeftParen ? "($left)" : $left;
+        $rightSql = $needsRightParen ? "($right)" : $right;
+
+        return "$leftSql $op $rightSql";
     }
 
     private function renderSubquery(SubqueryNode $node): string
@@ -227,9 +355,19 @@ class SqlRenderer
 
     private function renderIdentifier(IdentifierNode $node): string
     {
-        // For now, render as simple name without quoting
-        // PartialQuery can handle quoting at a higher level if needed
-        return $node->getFullName();
+        $parts = [];
+        foreach ($node->parts as $part) {
+            // Asterisk is the wildcard, not an identifier - don't quote
+            if ($part === '*') {
+                $parts[] = $part;
+            } elseif (preg_match('/[^a-zA-Z0-9_]/', $part)) {
+                // Quote if contains special characters (spaces, etc.)
+                $parts[] = '"' . str_replace('"', '""', $part) . '"';
+            } else {
+                $parts[] = $part;
+            }
+        }
+        return implode('.', $parts);
     }
 
     private function renderLiteral(LiteralNode $node): string
@@ -245,6 +383,29 @@ class SqlRenderer
         // String - quote with single quotes, escape internal quotes
         $escaped = str_replace("'", "''", (string) $node->value);
         return "'" . $escaped . "'";
+    }
+
+    private function renderPlaceholder(PlaceholderNode $node): string
+    {
+        // If we're collecting params, add the bound value to the collection
+        if ($this->collectingParams !== null) {
+            if (!$node->isBound) {
+                throw new \RuntimeException(
+                    'Unbound placeholder encountered during renderWithParams(). ' .
+                    'All placeholders must have bound values.'
+                );
+            }
+            $this->collectingParams[] = $node->boundValue;
+        }
+
+        // Always emit positional placeholder when value is bound (normalize named to positional)
+        // This ensures SQL and params stay consistent
+        if ($node->isBound) {
+            return '?';
+        }
+
+        // Not bound - output original token
+        return $node->token;
     }
 
     private function renderBinary(BinaryOperation $node): string
@@ -415,7 +576,7 @@ class SqlRenderer
             $node instanceof JoinNode => $this->cloneJoin($node),
             $node instanceof IdentifierNode => new IdentifierNode($node->parts),
             $node instanceof LiteralNode => new LiteralNode($node->value, $node->valueType),
-            $node instanceof PlaceholderNode => new PlaceholderNode($node->token),
+            $node instanceof PlaceholderNode => $this->clonePlaceholder($node),
             $node instanceof BinaryOperation => new BinaryOperation(
                 $this->deepClone($node->left),
                 $node->operator,
@@ -535,6 +696,15 @@ class SqlRenderer
         );
     }
 
+    private function clonePlaceholder(PlaceholderNode $node): PlaceholderNode
+    {
+        $new = new PlaceholderNode($node->token);
+        if ($node->isBound) {
+            $new->bind($node->boundValue);
+        }
+        return $new;
+    }
+
     private function cloneIn(InOperation $node): InOperation
     {
         if ($node->isSubquery()) {
@@ -626,7 +796,7 @@ class SqlRenderer
             ),
             $node instanceof JoinNode => $this->renameInJoin($node, $oldName, $newName),
             $node instanceof LiteralNode => new LiteralNode($node->value, $node->valueType),
-            $node instanceof PlaceholderNode => new PlaceholderNode($node->token),
+            $node instanceof PlaceholderNode => $this->clonePlaceholder($node),
             $node instanceof BinaryOperation => new BinaryOperation(
                 $this->renameIdentifier($node->left, $oldName, $newName),
                 $node->operator,

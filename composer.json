@@ -44,7 +44,6 @@
             "src/Static/functions.php",
             "src/Table/functions.php",
             "src/Template/functions.php",
-            "src/Tables/functions.php",
             "src/Logger/functions.php",
             "src/Auth/functions.php",
             "src/CLI/functions.php",

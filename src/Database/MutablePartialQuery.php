@@ -401,14 +401,6 @@ final class MutablePartialQuery implements MutableTableInterface
     }
 
     /**
-     * Get the predicate for row matching
-     */
-    public function getPredicate(): Predicate
-    {
-        return $this->query->getPredicate();
-    }
-
-    /**
      * Test if a row matches the filter conditions
      */
     public function matches(object $row): bool

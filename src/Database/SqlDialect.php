@@ -130,6 +130,17 @@ enum SqlDialect
     }
 
     /**
+     * Check if this dialect supports EXCEPT/INTERSECT set operations
+     */
+    public function supportsExcept(): bool
+    {
+        return match($this) {
+            self::MySQL => false,  // MySQL doesn't support EXCEPT/INTERSECT
+            self::Postgres, self::Sqlite, self::SqlServer, self::Oracle, self::Generic, self::Virtual => true,
+        };
+    }
+
+    /**
      * Get human-readable dialect name
      */
     public function getName(): string
