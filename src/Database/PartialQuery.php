@@ -14,7 +14,9 @@ use mini\Table\Wrappers\DistinctTable;
 use mini\Parsing\GenericParser;
 use mini\Parsing\TextNode;
 use mini\Parsing\SQL\SqlParser;
+use mini\Parsing\SQL\SqlRenderer;
 use mini\Parsing\SQL\AST\SelectStatement;
+use mini\Parsing\SQL\AST\WithStatement;
 use mini\Parsing\SQL\AST\UnionNode;
 use mini\Parsing\SQL\AST\IdentifierNode;
 use mini\Parsing\SQL\AST\BinaryOperation;
@@ -69,15 +71,15 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     private array $whereParts = [];
 
     /**
-     * Verbatim CTE definitions
-     * Each entry: ['name' => string, 'sql' => string, 'params' => array]
+     * CTE definitions stored as AST
      *
-     * Example: ['name' => '_cte0', 'sql' => 'SELECT ...', 'params' => [1, 2]]
+     * Each entry: ['name' => string, 'ast' => ASTNode, 'params' => array]
      *
-     * Params for CTEs are kept separate so we can prepend them
-     * in the correct order when executing.
+     * AST is stored instead of SQL strings to enable identifier renaming
+     * without re-parsing. Params are kept separate to maintain placeholder
+     * order for prepared statements.
      *
-     * @var array<int, array{name: string, sql: string, params: array<int, mixed>}>
+     * @var array<int, array{name: string, ast: ASTNode, params: array<int, mixed>}>
      */
     private array $cteList = [];
 
@@ -231,6 +233,34 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     public function getBaseQuery(): string
     {
         return $this->baseSql;
+    }
+
+    /**
+     * Get the AST representation of this query
+     *
+     * Parses the base SQL and applies any modifications (WHERE, ORDER BY, etc.)
+     * Returns the main query AST without CTEs - CTEs are stored separately.
+     *
+     * Used internally for query composition and by withCTE() for deferred rendering.
+     *
+     * @return ASTNode The parsed AST (SelectStatement, UnionNode, or WithStatement)
+     */
+    private function getAst(): ASTNode
+    {
+        $parser = new SqlParser();
+        return $parser->parse($this->baseSql);
+    }
+
+    /**
+     * Get a shared SqlRenderer instance
+     */
+    private static function getRenderer(): SqlRenderer
+    {
+        static $renderer = null;
+        if ($renderer === null) {
+            $renderer = new SqlRenderer();
+        }
+        return $renderer;
     }
 
     /**
@@ -502,9 +532,8 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     /**
      * Return new instance with CTEs from another PartialQuery merged in.
      *
-     * CTEs are merged by name:
-     * - If a CTE with the same name, SQL and params already exists, it is reused.
-     * - If a CTE with the same name but different SQL or params exists, a LogicException is thrown.
+     * CTEs are merged by name. Duplicate names with identical AST are silently
+     * deduplicated. Conflicting definitions throw LogicException.
      *
      * @throws \InvalidArgumentException If queries use different database connections
      * @throws \LogicException           If conflicting CTE definitions are detected
@@ -519,6 +548,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         }
 
         $new = clone $this;
+        $renderer = self::getRenderer();
 
         foreach ($query->cteList as $foreignCte) {
             $name = $foreignCte['name'];
@@ -535,8 +565,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             if ($existingIndex !== null) {
                 $existing = $new->cteList[$existingIndex];
 
+                // Compare by rendering to SQL (AST comparison is complex)
+                $existingSql = $renderer->render($existing['ast']);
+                $foreignSql = $renderer->render($foreignCte['ast']);
+
                 // Same definition -> reuse silently
-                if ($existing['sql'] === $foreignCte['sql']
+                if ($existingSql === $foreignSql
                     && $existing['params'] === $foreignCte['params']
                 ) {
                     continue;
@@ -548,8 +582,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
                 );
             }
 
-            // New CTE -> append
-            $new->cteList[] = $foreignCte;
+            // New CTE -> deep clone AST to ensure independence
+            $new->cteList[] = [
+                'name' => $foreignCte['name'],
+                'ast' => $renderer->deepClone($foreignCte['ast']),
+                'params' => $foreignCte['params'],
+            ];
         }
 
         return $new;
@@ -594,15 +632,27 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             );
         }
 
+        $renderer = self::getRenderer();
+
         // Hide same-named CTE in the query being added (its internal implementation detail)
         $query = $query->hideCTE($name);
 
         // Merge any nested CTEs from the source query
         $new = $this->withCTEsFrom($query);
 
-        // Build the new CTE's SQL
-        $newCteSql = $query->buildSql(null);
-        $newCteParams = $query->getAllParams();
+        // Get the AST for the new CTE - deep clone to ensure independence
+        // If the query has its own CTEs (WithStatement), extract the inner query
+        $queryAst = $query->getAst();
+        if ($queryAst instanceof WithStatement) {
+            // Flatten: the inner CTEs are already merged via withCTEsFrom()
+            // Use the inner SELECT as the CTE definition
+            $newCteAst = $renderer->deepClone($queryAst->query);
+        } else {
+            $newCteAst = $renderer->deepClone($queryAst);
+        }
+
+        // Get params for the new CTE (excluding CTE params which were already merged)
+        $newCteParams = $query->getMainParams();
 
         // Check if we already have a CTE with this name
         $existingIndex = null;
@@ -618,16 +668,15 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             $renamedName = '_cte_' . str_replace('.', '_', (string) hrtime(true));
             $new->cteList[$existingIndex]['name'] = $renamedName;
 
-            // Update NEW CTE's SQL to reference the renamed OLD CTE
+            // Update NEW CTE's AST to reference the renamed OLD CTE
             // This makes the new CTE wrap the old one
-            $pattern = '/\b' . preg_quote($name, '/') . '\b/';
-            $newCteSql = preg_replace($pattern, $renamedName, $newCteSql);
+            $newCteAst = $renderer->renameIdentifier($newCteAst, $name, $renamedName);
         }
 
         // Add NEW CTE with the requested name
         $new->cteList[] = [
             'name' => $name,
-            'sql' => $newCteSql,
+            'ast' => $newCteAst,
             'params' => $newCteParams,
         ];
 
@@ -667,9 +716,17 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         $newName = '_cte_' . str_replace('.', '_', (string) hrtime(true));
 
         $new = clone $this;
+        $renderer = self::getRenderer();
 
         // Rename in cteList
         $new->cteList[$cteIndex]['name'] = $newName;
+
+        // Rename references in CTE AST
+        $new->cteList[$cteIndex]['ast'] = $renderer->renameIdentifier(
+            $new->cteList[$cteIndex]['ast'],
+            $name,
+            $newName
+        );
 
         // Rename references in baseSql using word boundaries
         // This is safe because $newName is unique and won't collide
@@ -795,9 +852,11 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             return $core;
         }
 
+        $renderer = self::getRenderer();
         $withParts = [];
         foreach ($this->cteList as $cte) {
-            $withParts[] = $cte['name'] . ' AS (' . $cte['sql'] . ')';
+            $cteSql = $renderer->render($cte['ast']);
+            $withParts[] = $cte['name'] . ' AS (' . $cteSql . ')';
         }
 
         return 'WITH ' . implode(', ', $withParts) . ' ' . $core;

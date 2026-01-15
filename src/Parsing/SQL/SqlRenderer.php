@@ -579,4 +579,229 @@ class SqlRenderer
             $orderBy
         );
     }
+
+    /**
+     * Rename an identifier throughout an AST
+     *
+     * Creates a new AST with all occurrences of $oldName replaced with $newName.
+     * Used for CTE renaming when composing queries.
+     *
+     * Only renames table/CTE references (single-part identifiers that match exactly).
+     * Does not rename column qualifiers like `users.id` to `_cte_123.id` since
+     * the table alias should be preserved.
+     *
+     * @param ASTNode $node The AST to transform
+     * @param string $oldName The identifier name to find
+     * @param string $newName The new name to use
+     * @return ASTNode New AST with renamed identifiers
+     */
+    public function renameIdentifier(ASTNode $node, string $oldName, string $newName): ASTNode
+    {
+        // For identifiers, check if it matches and rename
+        if ($node instanceof IdentifierNode) {
+            // Only rename single-part identifiers (table/CTE names)
+            // Multi-part identifiers like table.column keep their qualifier
+            if (count($node->parts) === 1 && $node->parts[0] === $oldName) {
+                return new IdentifierNode([$newName]);
+            }
+            return new IdentifierNode($node->parts);
+        }
+
+        // Recursively transform all other node types
+        return match (true) {
+            $node instanceof WithStatement => $this->renameInWith($node, $oldName, $newName),
+            $node instanceof SelectStatement => $this->renameInSelect($node, $oldName, $newName),
+            $node instanceof UnionNode => new UnionNode(
+                $this->renameIdentifier($node->left, $oldName, $newName),
+                $this->renameIdentifier($node->right, $oldName, $newName),
+                $node->all,
+                $node->operator
+            ),
+            $node instanceof SubqueryNode => new SubqueryNode(
+                $this->renameIdentifier($node->query, $oldName, $newName)
+            ),
+            $node instanceof ColumnNode => new ColumnNode(
+                $this->renameIdentifier($node->expression, $oldName, $newName),
+                $node->alias
+            ),
+            $node instanceof JoinNode => $this->renameInJoin($node, $oldName, $newName),
+            $node instanceof LiteralNode => new LiteralNode($node->value, $node->valueType),
+            $node instanceof PlaceholderNode => new PlaceholderNode($node->token),
+            $node instanceof BinaryOperation => new BinaryOperation(
+                $this->renameIdentifier($node->left, $oldName, $newName),
+                $node->operator,
+                $this->renameIdentifier($node->right, $oldName, $newName)
+            ),
+            $node instanceof UnaryOperation => new UnaryOperation(
+                $node->operator,
+                $this->renameIdentifier($node->expression, $oldName, $newName)
+            ),
+            $node instanceof InOperation => $this->renameInIn($node, $oldName, $newName),
+            $node instanceof IsNullOperation => new IsNullOperation(
+                $this->renameIdentifier($node->expression, $oldName, $newName),
+                $node->negated
+            ),
+            $node instanceof LikeOperation => new LikeOperation(
+                $this->renameIdentifier($node->left, $oldName, $newName),
+                $this->renameIdentifier($node->pattern, $oldName, $newName),
+                $node->negated
+            ),
+            $node instanceof BetweenOperation => new BetweenOperation(
+                $this->renameIdentifier($node->expression, $oldName, $newName),
+                $this->renameIdentifier($node->low, $oldName, $newName),
+                $this->renameIdentifier($node->high, $oldName, $newName),
+                $node->negated
+            ),
+            $node instanceof ExistsOperation => new ExistsOperation(
+                new SubqueryNode($this->renameIdentifier($node->subquery->query, $oldName, $newName)),
+                $node->negated
+            ),
+            $node instanceof FunctionCallNode => new FunctionCallNode(
+                $node->name,
+                array_map(fn($a) => $this->renameIdentifier($a, $oldName, $newName), $node->arguments),
+                $node->distinct
+            ),
+            $node instanceof CaseWhenNode => $this->renameInCase($node, $oldName, $newName),
+            $node instanceof WindowFunctionNode => $this->renameInWindow($node, $oldName, $newName),
+            $node instanceof NiladicFunctionNode => new NiladicFunctionNode($node->name),
+            $node instanceof QuantifiedComparisonNode => new QuantifiedComparisonNode(
+                $this->renameIdentifier($node->left, $oldName, $newName),
+                $node->operator,
+                $node->quantifier,
+                new SubqueryNode($this->renameIdentifier($node->subquery->query, $oldName, $newName))
+            ),
+            default => throw new \RuntimeException('Cannot rename in unknown AST node type: ' . get_class($node)),
+        };
+    }
+
+    private function renameInWith(WithStatement $node, string $oldName, string $newName): WithStatement
+    {
+        $ctes = [];
+        foreach ($node->ctes as $cte) {
+            $ctes[] = [
+                'name' => $cte['name'] === $oldName ? $newName : $cte['name'],
+                'columns' => $cte['columns'] ?? null,
+                'query' => $this->renameIdentifier($cte['query'], $oldName, $newName),
+            ];
+        }
+        return new WithStatement(
+            $ctes,
+            $node->recursive,
+            $this->renameIdentifier($node->query, $oldName, $newName)
+        );
+    }
+
+    private function renameInSelect(SelectStatement $node, string $oldName, string $newName): SelectStatement
+    {
+        $new = new SelectStatement();
+        $new->distinct = $node->distinct;
+        $new->columns = array_map(
+            fn($c) => $this->renameIdentifier($c, $oldName, $newName),
+            $node->columns
+        );
+
+        if ($node->from instanceof SubqueryNode) {
+            $new->from = new SubqueryNode($this->renameIdentifier($node->from->query, $oldName, $newName));
+        } elseif ($node->from !== null) {
+            $new->from = $this->renameIdentifier($node->from, $oldName, $newName);
+        }
+
+        $new->fromAlias = $node->fromAlias;
+        $new->joins = array_map(
+            fn($j) => $this->renameInJoin($j, $oldName, $newName),
+            $node->joins
+        );
+        $new->where = $node->where !== null
+            ? $this->renameIdentifier($node->where, $oldName, $newName)
+            : null;
+
+        if ($node->groupBy !== null) {
+            $new->groupBy = array_map(
+                fn($g) => $this->renameIdentifier($g, $oldName, $newName),
+                $node->groupBy
+            );
+        }
+
+        $new->having = $node->having !== null
+            ? $this->renameIdentifier($node->having, $oldName, $newName)
+            : null;
+
+        if ($node->orderBy !== null) {
+            $new->orderBy = array_map(fn($o) => [
+                'column' => $this->renameIdentifier($o['column'], $oldName, $newName),
+                'direction' => $o['direction'] ?? 'ASC',
+            ], $node->orderBy);
+        }
+
+        // Limit and offset are expressions, rename in case they reference tables (unlikely but safe)
+        $new->limit = $node->limit !== null
+            ? $this->renameIdentifier($node->limit, $oldName, $newName)
+            : null;
+        $new->offset = $node->offset !== null
+            ? $this->renameIdentifier($node->offset, $oldName, $newName)
+            : null;
+
+        return $new;
+    }
+
+    private function renameInJoin(JoinNode $node, string $oldName, string $newName): JoinNode
+    {
+        $table = $node->table instanceof SubqueryNode
+            ? new SubqueryNode($this->renameIdentifier($node->table->query, $oldName, $newName))
+            : $this->renameIdentifier($node->table, $oldName, $newName);
+
+        return new JoinNode(
+            $node->joinType,
+            $table,
+            $node->condition !== null
+                ? $this->renameIdentifier($node->condition, $oldName, $newName)
+                : null,
+            $node->alias
+        );
+    }
+
+    private function renameInIn(InOperation $node, string $oldName, string $newName): InOperation
+    {
+        if ($node->isSubquery()) {
+            return new InOperation(
+                $this->renameIdentifier($node->left, $oldName, $newName),
+                new SubqueryNode($this->renameIdentifier($node->values->query, $oldName, $newName)),
+                $node->negated
+            );
+        }
+
+        return new InOperation(
+            $this->renameIdentifier($node->left, $oldName, $newName),
+            array_map(fn($v) => $this->renameIdentifier($v, $oldName, $newName), $node->values),
+            $node->negated
+        );
+    }
+
+    private function renameInCase(CaseWhenNode $node, string $oldName, string $newName): CaseWhenNode
+    {
+        $whenClauses = array_map(fn($w) => [
+            'when' => $this->renameIdentifier($w['when'], $oldName, $newName),
+            'then' => $this->renameIdentifier($w['then'], $oldName, $newName),
+        ], $node->whenClauses);
+
+        return new CaseWhenNode(
+            $node->operand !== null ? $this->renameIdentifier($node->operand, $oldName, $newName) : null,
+            $whenClauses,
+            $node->elseResult !== null ? $this->renameIdentifier($node->elseResult, $oldName, $newName) : null
+        );
+    }
+
+    private function renameInWindow(WindowFunctionNode $node, string $oldName, string $newName): WindowFunctionNode
+    {
+        $orderBy = array_map(fn($o) => [
+            'expr' => $this->renameIdentifier($o['expr'], $oldName, $newName),
+            'direction' => $o['direction'] ?? 'ASC',
+        ], $node->orderBy);
+
+        return new WindowFunctionNode(
+            $this->renameIdentifier($node->function, $oldName, $newName),
+            array_map(fn($p) => $this->renameIdentifier($p, $oldName, $newName), $node->partitionBy),
+            $orderBy
+        );
+    }
 }
