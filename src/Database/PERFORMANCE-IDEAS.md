@@ -86,5 +86,96 @@ SELECT * FROM a WHERE EXISTS (
 
 The AST already knows and could provide both the unqualified name and possibly the qualified name directly. So when we need a qualified name, we could just use $node->qualifiedName or $node->unqualifiedName and avoid one billion str_contains calls.
 
-## 2. (Future ideas go here)
+---
+
+## 2. Predicate Pushdown for Multi-Table Joins (CRITICAL)
+
+**Problem:** A query like:
+```sql
+SELECT * FROM t1, t9, t6, t3, t2
+WHERE d6 in (885,924) AND d2=488 AND a3=b9 AND c9=688 AND a1=d9
+```
+
+Currently executes as:
+1. Build full cross join: t1 × t9 × t6 × t3 × t2 (100^5 = 10 billion rows)
+2. Filter the result
+
+SQLite does:
+1. Push single-table predicates to their tables (reduces each to ~1-10 rows)
+2. Build join with join conditions
+
+**Analysis of WHERE predicates:**
+
+| Condition | Type | Pushdown Target |
+|-----------|------|-----------------|
+| `d6 in (885,924)` | Single-table | Filter t6 first |
+| `d2 = 488` | Single-table | Filter t2 first |
+| `c9 = 688` | Single-table | Filter t9 first |
+| `a3 = b9` | Cross-table | Join t3 ↔ t9 |
+| `a1 = d9` | Cross-table | Join t1 ↔ t9 |
+
+**Solution:** Before building cross joins, analyze WHERE and:
+
+1. **Classify predicates:**
+   - Single-table: all referenced columns belong to one table
+   - Cross-table: references columns from multiple tables
+
+2. **Push single-table predicates to source tables:**
+   ```php
+   // Instead of:
+   $result = new CrossJoin(t1, new CrossJoin(t9, ...));
+   $result = $this->filterByExpression($result, $whereClause);
+
+   // Do:
+   $t6_filtered = $this->getTable('t6')->in('d6', [885,924]);
+   $t2_filtered = $this->getTable('t2')->eq('d2', 488);
+   $t9_filtered = $this->getTable('t9')->eq('c9', 688);
+   // Then build cross join with filtered tables
+   ```
+
+3. **Handle cross-table predicates as join conditions:**
+   - After filtering, remaining predicates involve multiple tables
+   - These become the final filter on the join result
+
+**Implementation approach:**
+
+```php
+private function executeSelectWithCommaJoins(SelectStatement $ast): TableInterface
+{
+    // 1. Collect all tables (primary + comma-joined)
+    $tables = ['t1' => $this->getTable('t1'), ...];
+
+    // 2. Flatten WHERE into AND-connected predicates
+    $predicates = $this->flattenAndPredicates($ast->where);
+
+    // 3. Classify and push single-table predicates
+    foreach ($predicates as $i => $pred) {
+        $tablesReferenced = $this->findTablesInPredicate($pred);
+        if (count($tablesReferenced) === 1) {
+            $tableName = $tablesReferenced[0];
+            $tables[$tableName] = $this->applyPredicateToTable($tables[$tableName], $pred);
+            unset($predicates[$i]); // Remove from remaining
+        }
+    }
+
+    // 4. Build cross join with filtered tables
+    $result = array_shift($tables);
+    foreach ($tables as $table) {
+        $result = new CrossJoinTable($result, $table);
+    }
+
+    // 5. Apply remaining cross-table predicates
+    if (!empty($predicates)) {
+        $result = $this->filterByExpression($result, $this->rebuildAndExpression($predicates));
+    }
+
+    return $result;
+}
+```
+
+**Expected speedup:** From 10 billion rows to ~100 rows (1000x+ improvement)
+
+---
+
+## 3. (Future ideas go here)
 

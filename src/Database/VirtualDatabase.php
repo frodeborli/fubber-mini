@@ -1952,19 +1952,33 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("Table not found: $tableName");
         }
 
-        // Process JOINs - only apply aliasing when there are joins
-        if (!empty($ast->joins)) {
-            $baseAlias = $ast->fromAlias ?? $tableName;
-            $table = $table->withAlias($baseAlias);
-
-            foreach ($ast->joins as $join) {
-                $table = $this->applyJoin($table, $join);
+        // Check if we have CROSS JOINs that could benefit from predicate pushdown
+        $hasCrossJoins = !empty($ast->joins) && $ast->where !== null;
+        foreach ($ast->joins as $join) {
+            if (strtoupper($join->joinType) !== 'CROSS') {
+                $hasCrossJoins = false;
+                break;
             }
         }
 
-        // Apply WHERE
-        if ($ast->where !== null) {
-            $table = $this->applyWhereToTableInterface($table, $ast->where);
+        if ($hasCrossJoins) {
+            // Use optimized path with predicate pushdown for comma-joins
+            $table = $this->executeSelectWithPredicatePushdown($ast);
+        } else {
+            // Standard path: process JOINs then WHERE
+            if (!empty($ast->joins)) {
+                $baseAlias = $ast->fromAlias ?? $tableName;
+                $table = $table->withAlias($baseAlias);
+
+                foreach ($ast->joins as $join) {
+                    $table = $this->applyJoin($table, $join);
+                }
+            }
+
+            // Apply WHERE
+            if ($ast->where !== null) {
+                $table = $this->applyWhereToTableInterface($table, $ast->where);
+            }
         }
 
         // Apply ORDER BY
@@ -1996,6 +2010,164 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         return $table;
+    }
+
+    /**
+     * Execute SELECT with CROSS JOINs using predicate pushdown optimization
+     *
+     * Analyzes WHERE clause to push single-table predicates to their source
+     * tables before building the cross join. This dramatically reduces the
+     * intermediate result size.
+     *
+     * @param SelectStatement $ast The SELECT statement with CROSS JOINs
+     * @return TableInterface
+     */
+    private function executeSelectWithPredicatePushdown(SelectStatement $ast): TableInterface
+    {
+        // 1. Collect all tables with their aliases
+        $tableName = $ast->from->getFullName();
+        $baseAlias = $ast->fromAlias ?? $tableName;
+        $tables = [$baseAlias => $this->getTable($tableName)->withAlias($baseAlias)];
+
+        foreach ($ast->joins as $join) {
+            $joinTableName = $join->table->getFullName();
+            $joinAlias = $join->alias ?? $joinTableName;
+            $tables[$joinAlias] = $this->getTable($joinTableName)->withAlias($joinAlias);
+        }
+
+        // 2. Flatten WHERE into AND-connected predicates
+        $predicates = [];
+        $this->flattenAndPredicates($ast->where, $predicates);
+
+        // 3. Classify predicates and push single-table ones
+        $remainingPredicates = [];
+        foreach ($predicates as $pred) {
+            $tablesReferenced = $this->findTablesInPredicate($pred, array_keys($tables));
+
+            if (count($tablesReferenced) === 1) {
+                // Single-table predicate - push to that table
+                $tableAlias = $tablesReferenced[0];
+                try {
+                    $tables[$tableAlias] = $this->applyWhereToTableInterface($tables[$tableAlias], $pred);
+                } catch (\RuntimeException $e) {
+                    // Can't push this predicate - keep for later
+                    $remainingPredicates[] = $pred;
+                }
+            } else {
+                // Cross-table predicate - apply after join
+                $remainingPredicates[] = $pred;
+            }
+        }
+
+        // 4. Build cross join with (possibly filtered) tables
+        $result = null;
+        foreach ($tables as $table) {
+            if ($result === null) {
+                $result = $table;
+            } else {
+                $result = new CrossJoinTable($result, $table);
+            }
+        }
+
+        // 5. Apply remaining cross-table predicates
+        if (!empty($remainingPredicates)) {
+            $combinedPredicate = $this->rebuildAndExpression($remainingPredicates);
+            $result = $this->filterByExpression($result, $combinedPredicate);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Flatten an AND-connected expression into a list of predicates
+     */
+    private function flattenAndPredicates(ASTNode $node, array &$predicates): void
+    {
+        if ($node instanceof BinaryOperation && strtoupper($node->operator) === 'AND') {
+            $this->flattenAndPredicates($node->left, $predicates);
+            $this->flattenAndPredicates($node->right, $predicates);
+        } else {
+            $predicates[] = $node;
+        }
+    }
+
+    /**
+     * Find which tables are referenced in a predicate
+     *
+     * @param ASTNode $node The predicate to analyze
+     * @param array $knownTables List of table aliases to look for
+     * @return array Table aliases referenced
+     */
+    private function findTablesInPredicate(ASTNode $node, array $knownTables): array
+    {
+        $tables = [];
+        $this->collectTableReferences($node, $knownTables, $tables);
+        return array_unique($tables);
+    }
+
+    /**
+     * Recursively collect table references from an expression
+     */
+    private function collectTableReferences(ASTNode $node, array $knownTables, array &$tables): void
+    {
+        if ($node instanceof IdentifierNode) {
+            $colName = $node->getName();
+            // Check if column name starts with a known table alias
+            foreach ($knownTables as $alias) {
+                // Match "alias.col" or unqualified names like "d6" matching table "t6"
+                if (str_starts_with($colName, $alias . '.')) {
+                    $tables[] = $alias;
+                    return;
+                }
+                // For unqualified columns, try to match by suffix (e.g., d6 -> t6)
+                if (!str_contains($colName, '.') && strlen($colName) >= 2) {
+                    $tableSuffix = substr($colName, -1);
+                    if ($alias === 't' . $tableSuffix) {
+                        $tables[] = $alias;
+                        return;
+                    }
+                }
+            }
+        } elseif ($node instanceof BinaryOperation) {
+            $this->collectTableReferences($node->left, $knownTables, $tables);
+            $this->collectTableReferences($node->right, $knownTables, $tables);
+        } elseif ($node instanceof UnaryOperation) {
+            $this->collectTableReferences($node->expression, $knownTables, $tables);
+        } elseif ($node instanceof InOperation) {
+            $this->collectTableReferences($node->left, $knownTables, $tables);
+            foreach ($node->values as $val) {
+                $this->collectTableReferences($val, $knownTables, $tables);
+            }
+        } elseif ($node instanceof BetweenOperation) {
+            $this->collectTableReferences($node->expression, $knownTables, $tables);
+            $this->collectTableReferences($node->low, $knownTables, $tables);
+            $this->collectTableReferences($node->high, $knownTables, $tables);
+        } elseif ($node instanceof IsNullOperation) {
+            $this->collectTableReferences($node->expression, $knownTables, $tables);
+        } elseif ($node instanceof LikeOperation) {
+            $this->collectTableReferences($node->left, $knownTables, $tables);
+            $this->collectTableReferences($node->pattern, $knownTables, $tables);
+        } elseif ($node instanceof FunctionCallNode) {
+            foreach ($node->arguments as $arg) {
+                $this->collectTableReferences($arg, $knownTables, $tables);
+            }
+        }
+    }
+
+    /**
+     * Rebuild an AND expression from a list of predicates
+     */
+    private function rebuildAndExpression(array $predicates): ASTNode
+    {
+        if (empty($predicates)) {
+            throw new \RuntimeException("Cannot rebuild empty predicate list");
+        }
+
+        $result = array_shift($predicates);
+        foreach ($predicates as $pred) {
+            $result = new BinaryOperation($result, 'AND', $pred);
+        }
+        return $result;
     }
 
     /**

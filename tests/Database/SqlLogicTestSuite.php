@@ -67,7 +67,6 @@ foreach ($testFiles as $file) {
     $vdb->setQueryTimeout(1.0); // 1 second max per query
     $runner->addBackend('vdb', $vdb);
 
-    fprintf(STDERR, "Running %s...\n", $file);
     $content = file_get_contents($path);
     $result = $runner->run($content);
     $stats = $result->getStats();

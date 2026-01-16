@@ -21,6 +21,7 @@ class SqlLogicTest
 
     private int $hashThreshold = 8;
     private bool $stopOnError = false;
+    private bool $verbose = false;
 
     public function __construct()
     {
@@ -41,6 +42,15 @@ class SqlLogicTest
     public function stopOnError(bool $stop = true): self
     {
         $this->stopOnError = $stop;
+        return $this;
+    }
+
+    /**
+     * Enable verbose mode - print each query to STDERR before running
+     */
+    public function verbose(bool $verbose = true): self
+    {
+        $this->verbose = $verbose;
         return $this;
     }
 
@@ -275,6 +285,10 @@ class SqlLogicTest
 
     private function executeQuery(string $name, DatabaseInterface $db, SqlLogicTestRecord $record, SqlLogicTestResult $result): void
     {
+        if ($this->verbose) {
+            fprintf(STDERR, "[%s] Line %d: %s\n", $name, $record->lineNumber, substr(str_replace("\n", " ", $record->sql), 0, 80));
+        }
+
         try {
             $rows = iterator_to_array($db->query($record->sql));
             $actual = $this->formatResults($rows, $record->types);
