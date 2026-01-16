@@ -16,7 +16,8 @@ use mini\Parsing\SQL\AST\{
     BetweenOperation,
     CaseWhenNode,
     SubqueryNode,
-    NiladicFunctionNode
+    NiladicFunctionNode,
+    ExistsOperation
 };
 
 /**
@@ -117,6 +118,11 @@ class ExpressionEvaluator
         // Scalar subquery
         if ($node instanceof SubqueryNode) {
             return $this->evaluateSubquery($node, $row, $context);
+        }
+
+        // EXISTS operation
+        if ($node instanceof ExistsOperation) {
+            return $this->evaluateExists($node, $row, $context);
         }
 
         // Niladic functions (CURRENT_DATE, CURRENT_TIME, CURRENT_TIMESTAMP)
@@ -331,26 +337,94 @@ class ExpressionEvaluator
         return null;
     }
 
-    private function evaluateIn(InOperation $node, ?object $row, array $context): bool
+    /**
+     * Evaluate IN/NOT IN with proper three-valued NULL logic
+     *
+     * SQL IN semantics:
+     * - If left is NULL: result is NULL (unless empty list: IN()=FALSE, NOT IN()=TRUE)
+     * - If definite match found: IN=TRUE, NOT IN=FALSE
+     * - If no match but NULLs in list: result is NULL
+     * - If no match and no NULLs: IN=FALSE, NOT IN=TRUE
+     */
+    private function evaluateIn(InOperation $node, ?object $row, array $context): int|null
     {
-        if ($node->isSubquery()) {
-            throw new \RuntimeException("IN with subquery not yet supported");
-        }
-
         $left = $this->evaluate($node->left, $row, $context);
 
-        if ($left === null) {
-            return false;
+        if ($node->isSubquery()) {
+            // IN (SELECT ...) - execute subquery and check membership
+            if ($this->subqueryExecutor === null) {
+                throw new \RuntimeException("Subquery executor not configured for IN clause");
+            }
+
+            $subqueryNode = $node->values; // SubqueryNode
+            $results = ($this->subqueryExecutor)($subqueryNode->query, $row);
+
+            $hasRows = false;
+            $hasNull = false;
+            foreach ($results as $resultRow) {
+                $hasRows = true;
+                // Get first column value from each row
+                $props = get_object_vars($resultRow);
+                $value = reset($props);
+                if ($value === null) {
+                    $hasNull = true;
+                } elseif ($left !== null && $left == $value) {
+                    return $node->negated ? 0 : 1;
+                }
+            }
+
+            // Empty set: IN()=FALSE, NOT IN()=TRUE
+            if (!$hasRows) {
+                return $node->negated ? 1 : 0;
+            }
+
+            // Left is NULL: result is NULL
+            if ($left === null) {
+                return null;
+            }
+
+            // No match found, but NULLs in list: result is NULL
+            if ($hasNull) {
+                return null;
+            }
+
+            return $node->negated ? 1 : 0;
         }
 
-        foreach ($node->values as $valueNode) {
+        // Literal list
+        $values = $node->values;
+        $isEmpty = true;
+        foreach ($values as $_) {
+            $isEmpty = false;
+            break;
+        }
+
+        // Empty set: IN()=FALSE, NOT IN()=TRUE
+        if ($isEmpty) {
+            return $node->negated ? 1 : 0;
+        }
+
+        // Left is NULL: result is NULL
+        if ($left === null) {
+            return null;
+        }
+
+        $hasNull = false;
+        foreach ($values as $valueNode) {
             $value = $this->evaluate($valueNode, $row, $context);
-            if ($left == $value) {
-                return !$node->negated;
+            if ($value === null) {
+                $hasNull = true;
+            } elseif ($left == $value) {
+                return $node->negated ? 0 : 1;
             }
         }
 
-        return $node->negated;
+        // No match found, but NULLs in list: result is NULL
+        if ($hasNull) {
+            return null;
+        }
+
+        return $node->negated ? 1 : 0;
     }
 
     private function evaluateIsNull(IsNullOperation $node, ?object $row, array $context): bool
@@ -484,6 +558,28 @@ class ExpressionEvaluator
         }
 
         return reset($props); // Return first column value
+    }
+
+    /**
+     * Evaluate EXISTS operation - returns true if subquery returns any rows
+     */
+    private function evaluateExists(ExistsOperation $node, ?object $row, array $context): bool
+    {
+        if ($this->subqueryExecutor === null) {
+            throw new \RuntimeException("Subquery executor not configured");
+        }
+
+        // Execute the subquery, passing the outer row for correlated subqueries
+        $results = ($this->subqueryExecutor)($node->subquery->query, $row);
+
+        // Check if any rows exist (only need to check first row)
+        $hasRows = false;
+        foreach ($results as $_) {
+            $hasRows = true;
+            break;
+        }
+
+        return $node->negated ? !$hasRows : $hasRows;
     }
 
     /**

@@ -467,6 +467,12 @@ class SqlParser
             $this->expect(SqlLexer::T_RPAREN);
         }
 
+        // INSERT INTO table SELECT ... syntax
+        if ($this->current()['type'] === SqlLexer::T_SELECT) {
+            $stmt->select = $this->parseSelectStatement();
+            return $stmt;
+        }
+
         $this->expect(SqlLexer::T_VALUES);
 
         do {
@@ -722,6 +728,17 @@ class SqlParser
 
     private function parseInOperation(ASTNode $left, bool $negated): InOperation
     {
+        // SQLite shorthand: IN table_name means IN (SELECT * FROM table_name)
+        if ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+            $tableName = $this->current()['value'];
+            $this->pos++;
+            // Build: SELECT * FROM table_name
+            $select = new SelectStatement();
+            $select->columns = [new ColumnNode(new IdentifierNode('*'))];
+            $select->from = new IdentifierNode($tableName);
+            return new InOperation($left, new SubqueryNode($select), $negated);
+        }
+
         $this->expect(SqlLexer::T_LPAREN);
 
         // Check for Subquery (supports UNION/INTERSECT/EXCEPT)
@@ -731,10 +748,13 @@ class SqlParser
             return new InOperation($left, new SubqueryNode($subquery), $negated);
         } else {
             // Simple List - only scalar/additive expressions, not comparisons or boolean
+            // Handle empty list: IN () is valid SQL (always false)
             $values = [];
-            do {
-                $values[] = $this->parseAdditive();
-            } while ($this->match(SqlLexer::T_COMMA));
+            if ($this->current()['type'] !== SqlLexer::T_RPAREN) {
+                do {
+                    $values[] = $this->parseAdditive();
+                } while ($this->match(SqlLexer::T_COMMA));
+            }
             $this->expect(SqlLexer::T_RPAREN);
             return new InOperation($left, $values, $negated);
         }

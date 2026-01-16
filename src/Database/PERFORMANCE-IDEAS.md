@@ -177,5 +177,88 @@ private function executeSelectWithCommaJoins(SelectStatement $ast): TableInterfa
 
 ---
 
-## 3. (Future ideas go here)
+## 3. AST Rewriting for Negated Predicates
+
+**Problem:** Negated predicates like `NOT BETWEEN`, `NOT IN`, `NOT (a > b)` require special handling in `applyWhereToTableInterface`. The current approach using `table->except()` has NULL semantics bugs (e.g., `d NOT BETWEEN 110 AND 150` incorrectly included rows where `d` is NULL).
+
+**Solution:** Add an AST rewriting pass that transforms negated predicates into their positive equivalents before query execution:
+
+```
+NOT BETWEEN low AND high  →  col < low OR col > high
+NOT IN (a, b, c)          →  col <> a AND col <> b AND col <> c
+NOT (a > b)               →  a <= b
+NOT (a >= b)              →  a < b
+NOT (a < b)               →  a >= b
+NOT (a <= b)              →  a > b
+NOT (a = b)               →  a <> b  (or a != b)
+NOT (a <> b)              →  a = b
+NOT (a AND b)             →  NOT a OR NOT b   (De Morgan)
+NOT (a OR b)              →  NOT a AND NOT b  (De Morgan)
+NOT NOT a                 →  a
+```
+
+**Benefits:**
+- NULL semantics correct by construction (comparisons with NULL return false)
+- Simpler `applyWhereToTableInterface` - no special cases for negated ops
+- Better predicate pushdown (rewritten predicates are easier to classify)
+- `col < low OR col > high` can push both parts to index scans
+
+**Implementation:**
+```php
+private function rewriteNegatedPredicates(ASTNode $node): ASTNode
+{
+    if ($node instanceof BetweenOperation && $node->negated) {
+        // NOT BETWEEN → col < low OR col > high
+        return new BinaryOperation(
+            new BinaryOperation($node->expression, '<', $node->low),
+            'OR',
+            new BinaryOperation($node->expression, '>', $node->high)
+        );
+    }
+
+    if ($node instanceof UnaryOperation && $node->operator === 'NOT') {
+        $inner = $node->expression;
+        if ($inner instanceof BinaryOperation) {
+            // NOT (a > b) → a <= b
+            $flipped = $this->flipComparison($inner->operator);
+            if ($flipped !== null) {
+                return new BinaryOperation($inner->left, $flipped, $inner->right);
+            }
+            // De Morgan for AND/OR
+            if ($inner->operator === 'AND') {
+                return new BinaryOperation(
+                    new UnaryOperation('NOT', $inner->left),
+                    'OR',
+                    new UnaryOperation('NOT', $inner->right)
+                );
+            }
+            // ... etc
+        }
+    }
+
+    // Recursively rewrite children
+    // ...
+}
+
+private function flipComparison(string $op): ?string
+{
+    return match(strtoupper($op)) {
+        '>' => '<=',
+        '>=' => '<',
+        '<' => '>=',
+        '<=' => '>',
+        '=' => '<>',
+        '<>', '!=' => '=',
+        default => null,
+    };
+}
+```
+
+**When to apply:** Early in query execution, before predicate classification and pushdown.
+
+**Note:** Some predicates can't be easily rewritten (`NOT LIKE`, `NOT EXISTS` with complex subqueries) - those fall back to row-by-row evaluation.
+
+---
+
+## 4. (Future ideas go here)
 

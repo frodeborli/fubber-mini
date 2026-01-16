@@ -116,9 +116,17 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
             $def = $this->quoteIdentifier($col->name) . ' ' . $sqlType;
 
             if ($col->index === IndexType::Primary) {
-                // INTEGER PRIMARY KEY becomes rowid alias in SQLite
-                $def .= ' PRIMARY KEY';
-                $primaryKey = $col->name;
+                if ($primaryKey === null) {
+                    // First PRIMARY KEY becomes the actual primary key
+                    $def .= ' PRIMARY KEY';
+                    $primaryKey = $col->name;
+                } else {
+                    // Additional PRIMARY KEY columns become UNIQUE indexes
+                    // (SQLite only allows one PRIMARY KEY per table)
+                    $indexName = $this->quoteIdentifier('idx_' . $col->name);
+                    $indexes[] = "CREATE UNIQUE INDEX {$indexName} ON {$this->tableName} ("
+                        . $this->quoteIdentifier($col->name) . ')';
+                }
             }
 
             $colDefs[] = $def;
@@ -823,6 +831,7 @@ class InMemoryTable extends AbstractTable implements MutableTableInterface
         $sql .= $this->buildOrderByClause();
         $sql .= $this->buildLimitClause();
 
+        //echo spl_object_id($this) . ': ' . $sql . "\n";
         $stmt = $this->db->prepare($sql);
         foreach ($whereParams as $name => $value) {
             $stmt->bindValue($name, $value);

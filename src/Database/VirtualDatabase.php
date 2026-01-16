@@ -89,6 +89,8 @@ class VirtualDatabase implements DatabaseInterface
 
     private ExpressionEvaluator $evaluator;
 
+    private AstOptimizer $optimizer;
+
     /** Last insert ID from most recent INSERT */
     private ?string $lastInsertId = null;
 
@@ -105,6 +107,7 @@ class VirtualDatabase implements DatabaseInterface
     {
         $this->evaluator = new ExpressionEvaluator();
         $this->evaluator->setSubqueryExecutor(fn($query, $outerRow) => $this->executeSubqueryWithContext($query, $outerRow));
+        $this->optimizer = new AstOptimizer();
         $this->registerBuiltinAggregates();
         $this->queryMap = new \WeakMap();
     }
@@ -1114,19 +1117,44 @@ class VirtualDatabase implements DatabaseInterface
             }
         }
 
-        // Process JOINs - only apply aliasing when there are joins
-        if (!empty($ast->joins)) {
-            $baseAlias = $ast->fromAlias ?? $tableName;
-            $table = $table->withAlias($baseAlias);
-
-            foreach ($ast->joins as $join) {
-                $table = $this->applyJoin($table, $join);
+        // Check if we have CROSS JOINs that could benefit from predicate pushdown
+        $hasCrossJoins = !empty($ast->joins) && $ast->where !== null;
+        foreach ($ast->joins as $join) {
+            if (strtoupper($join->joinType) !== 'CROSS') {
+                $hasCrossJoins = false;
+                break;
             }
         }
 
-        // Apply WHERE - delegate to table backend
-        if ($ast->where !== null) {
-            $table = $this->applyWhereToTableInterface($table, $ast->where);
+        if ($hasCrossJoins) {
+            // Limit: VDB supports up to 4 tables in comma-joins (1 base + 3 joins)
+            // Beyond this, join ordering becomes critical and VDB doesn't optimize it
+            $tableCount = 1 + count($ast->joins);
+            if ($tableCount > 4) {
+                throw new \RuntimeException(
+                    "VDB limitation: comma-joins support up to 4 tables, got $tableCount. " .
+                    "Use explicit JOIN syntax with ON clauses for larger joins."
+                );
+            }
+
+            // Use optimized path with predicate pushdown for comma-joins
+            $table = $this->executeSelectWithPredicatePushdown($ast);
+        } else {
+            // Standard path: process JOINs then WHERE
+            if (!empty($ast->joins)) {
+                $baseAlias = $ast->fromAlias ?? $tableName;
+                $table = $table->withAlias($baseAlias);
+
+                foreach ($ast->joins as $join) {
+                    $table = $this->applyJoin($table, $join);
+                }
+            }
+
+            // Apply WHERE - delegate to table backend
+            if ($ast->where !== null) {
+                $where = $this->optimizer->optimize($ast->where);
+                $table = $this->applyWhereToTableInterface($table, $where);
+            }
         }
 
         // Check for window functions - requires materializing rows first
@@ -1962,6 +1990,15 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         if ($hasCrossJoins) {
+            // Limit: VDB supports up to 4 tables in comma-joins
+            $tableCount = 1 + count($ast->joins);
+            if ($tableCount > 4) {
+                throw new \RuntimeException(
+                    "VDB limitation: comma-joins support up to 4 tables, got $tableCount. " .
+                    "Use explicit JOIN syntax with ON clauses for larger joins."
+                );
+            }
+
             // Use optimized path with predicate pushdown for comma-joins
             $table = $this->executeSelectWithPredicatePushdown($ast);
         } else {
@@ -1977,7 +2014,8 @@ class VirtualDatabase implements DatabaseInterface
 
             // Apply WHERE
             if ($ast->where !== null) {
-                $table = $this->applyWhereToTableInterface($table, $ast->where);
+                $where = $this->optimizer->optimize($ast->where);
+                $table = $this->applyWhereToTableInterface($table, $where);
             }
         }
 
@@ -2035,9 +2073,10 @@ class VirtualDatabase implements DatabaseInterface
             $tables[$joinAlias] = $this->getTable($joinTableName)->withAlias($joinAlias);
         }
 
-        // 2. Flatten WHERE into AND-connected predicates
+        // 2. Optimize and flatten WHERE into AND-connected predicates
         $predicates = [];
-        $this->flattenAndPredicates($ast->where, $predicates);
+        $optimizedWhere = $ast->where !== null ? $this->optimizer->optimize($ast->where) : null;
+        $this->flattenAndPredicates($optimizedWhere, $predicates);
 
         // 3. Classify predicates and push single-table ones
         $remainingPredicates = [];
@@ -2059,19 +2098,48 @@ class VirtualDatabase implements DatabaseInterface
             }
         }
 
-        // 4. Build cross join with (possibly filtered) tables
+        // 4. Build cross join incrementally, attaching predicates as dependencies are met
+        // This follows the rule: "Place predicate immediately after LAST table it depends on"
         $result = null;
-        foreach ($tables as $table) {
+        $activeTables = [];
+        $tableNames = array_keys($tables);
+
+        foreach ($tableNames as $alias) {
+            $activeTables[] = $alias;
+
             if ($result === null) {
-                $result = $table;
+                $result = $tables[$alias];
             } else {
-                $result = new CrossJoinTable($result, $table);
+                $join = new CrossJoinTable($result, $tables[$alias]);
+
+                // Find predicates whose dependencies are now ALL satisfied
+                foreach ($remainingPredicates as $k => $pred) {
+                    $deps = $this->findTablesInPredicate($pred, $tableNames);
+                    if (!empty($deps) && array_diff($deps, $activeTables) === []) {
+                        // All dependencies satisfied - attach as join condition
+                        // Check if this is an equi-join (col1 = col2) for hash join optimization
+                        $equiJoin = $this->tryExtractEquiJoin($pred, $tableNames);
+                        if ($equiJoin !== null) {
+                            // Use hash join - O(n+m) instead of O(n*m)
+                            $join = $join->withEquiJoin($equiJoin['left'], $equiJoin['right']);
+                        } else {
+                            // General predicate - evaluated during iteration
+                            $evaluator = $this->evaluator;
+                            $join = $join->withJoinCondition(
+                                fn($row) => $evaluator->evaluateAsBool($pred, $row)
+                            );
+                        }
+                        unset($remainingPredicates[$k]);
+                    }
+                }
+
+                $result = $join;
             }
         }
 
-        // 5. Apply remaining cross-table predicates
+        // 5. Any remaining predicates (shouldn't be any if dependency tracking is correct)
         if (!empty($remainingPredicates)) {
-            $combinedPredicate = $this->rebuildAndExpression($remainingPredicates);
+            $combinedPredicate = $this->rebuildAndExpression(array_values($remainingPredicates));
             $result = $this->filterByExpression($result, $combinedPredicate);
         }
 
@@ -2106,6 +2174,65 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Try to extract equi-join columns from a predicate
+     *
+     * Detects patterns like: col1 = col2 or table1.col1 = table2.col2
+     * Returns null if not a simple equi-join between two columns.
+     *
+     * @param ASTNode $node The predicate to check
+     * @param array $knownTables List of table aliases to resolve unqualified columns
+     * @return array{left: string, right: string}|null Fully qualified column names or null
+     */
+    private function tryExtractEquiJoin(ASTNode $node, array $knownTables = []): ?array
+    {
+        if (!$node instanceof BinaryOperation) {
+            return null;
+        }
+
+        // Must be equality comparison
+        if ($node->operator !== '=') {
+            return null;
+        }
+
+        // Both sides must be simple column references
+        if (!$node->left instanceof IdentifierNode || !$node->right instanceof IdentifierNode) {
+            return null;
+        }
+
+        $leftCol = $this->resolveColumnWithTable($node->left, $knownTables);
+        $rightCol = $this->resolveColumnWithTable($node->right, $knownTables);
+
+        return ['left' => $leftCol, 'right' => $rightCol];
+    }
+
+    /**
+     * Resolve a column identifier to its fully qualified name (table.column)
+     */
+    private function resolveColumnWithTable(IdentifierNode $node, array $knownTables): string
+    {
+        // Already qualified
+        if ($node->isQualified()) {
+            $qualifier = $node->getQualifier()[0] ?? '';
+            return $qualifier . '.' . $node->getName();
+        }
+
+        $colName = $node->getName();
+
+        // Try to infer table from column numeric suffix (a1 -> t1, b36 -> t36, x61 -> t61)
+        // Column names follow pattern: letter + digits (e.g., a1, b36, x61)
+        if (preg_match('/^[a-z]+(\d+)$/i', $colName, $m)) {
+            $tableSuffix = $m[1];
+            $inferredTable = 't' . $tableSuffix;
+            if (in_array($inferredTable, $knownTables, true)) {
+                return $inferredTable . '.' . $colName;
+            }
+        }
+
+        // Fallback: return unqualified name
+        return $colName;
+    }
+
+    /**
      * Recursively collect table references from an expression
      */
     private function collectTableReferences(ASTNode $node, array $knownTables, array &$tables): void
@@ -2119,13 +2246,13 @@ class VirtualDatabase implements DatabaseInterface
                     $tables[] = $alias;
                     return;
                 }
-                // For unqualified columns, try to match by suffix (e.g., d6 -> t6)
-                if (!str_contains($colName, '.') && strlen($colName) >= 2) {
-                    $tableSuffix = substr($colName, -1);
-                    if ($alias === 't' . $tableSuffix) {
-                        $tables[] = $alias;
-                        return;
-                    }
+            }
+            // For unqualified columns, infer table from numeric suffix (a1 -> t1, b36 -> t36)
+            if (!str_contains($colName, '.') && preg_match('/^[a-z]+(\d+)$/i', $colName, $m)) {
+                $inferredTable = 't' . $m[1];
+                if (in_array($inferredTable, $knownTables, true)) {
+                    $tables[] = $inferredTable;
+                    return;
                 }
             }
         } elseif ($node instanceof BinaryOperation) {
@@ -2448,7 +2575,7 @@ class VirtualDatabase implements DatabaseInterface
         // Build template and evaluate per row (more efficient for AND-only cases)
         $template = $this->buildCorrelatedTemplate($subqueryAst, $outerRefs);
 
-        // Find primary key column for later filtering
+        // Find primary key column for later filtering (optional optimization)
         $columns = $table->getColumns();
         $pkColumn = null;
         foreach ($columns as $colName => $colDef) {
@@ -2460,6 +2587,7 @@ class VirtualDatabase implements DatabaseInterface
 
         // Filter rows where EXISTS evaluates to desired result
         $matchingPkValues = [];
+        $matchingRows = [];
         foreach ($table as $row) {
             // Bind outer values
             $bindings = [];
@@ -2478,17 +2606,32 @@ class VirtualDatabase implements DatabaseInterface
                 $exists = !$exists;
             }
 
-            if ($exists && $pkColumn !== null) {
-                $matchingPkValues[] = $row->$pkColumn;
+            if ($exists) {
+                if ($pkColumn !== null) {
+                    $matchingPkValues[] = $row->$pkColumn;
+                } else {
+                    $matchingRows[] = $row;
+                }
             }
         }
 
-        // Build result from matching PK values
-        if (empty($matchingPkValues) || $pkColumn === null) {
-            return $table->except($table);
+        // Build result - use PK optimization if available, otherwise build from rows
+        if ($pkColumn !== null) {
+            if (empty($matchingPkValues)) {
+                return $table->except($table);
+            }
+            return $table->in($pkColumn, new \mini\Table\Utility\Set($pkColumn, $matchingPkValues));
+        } else {
+            // No PK - build result from collected rows
+            if (empty($matchingRows)) {
+                return $table->except($table);
+            }
+            $result = new \mini\Table\InMemoryTable(...array_values($columns));
+            foreach ($matchingRows as $row) {
+                $result->insert((array) $row);
+            }
+            return $result;
         }
-
-        return $table->in($pkColumn, new \mini\Table\Utility\Set($pkColumn, $matchingPkValues));
     }
 
     /**
@@ -2939,6 +3082,11 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("Table '$tableName' does not support INSERT");
         }
 
+        // Handle INSERT INTO ... SELECT ... syntax
+        if ($ast->select !== null) {
+            return $this->executeInsertSelect($ast, $table);
+        }
+
         // Use provided column names, or fall back to table's column order
         if (!empty($ast->columns)) {
             $columnNames = array_map(fn($col) => $col->getName(), $ast->columns);
@@ -2962,6 +3110,39 @@ class VirtualDatabase implements DatabaseInterface
         return $lastId;
     }
 
+    /**
+     * Execute INSERT INTO ... SELECT ... statement
+     */
+    private function executeInsertSelect(InsertStatement $ast, MutableTableInterface $table): int
+    {
+        $results = $this->executeSelect($ast->select);
+
+        // Use provided column names, or fall back to table's column order
+        if (!empty($ast->columns)) {
+            $columnNames = array_map(fn($col) => $col->getName(), $ast->columns);
+        } else {
+            $columnNames = array_keys($table->getColumns());
+        }
+
+        $count = 0;
+        $lastId = 0;
+
+        foreach ($results as $row) {
+            $rowArray = [];
+            $i = 0;
+            foreach ((array)$row as $value) {
+                $colName = $columnNames[$i] ?? "col_$i";
+                $rowArray[$colName] = $value;
+                $i++;
+            }
+            $lastId = $table->insert($rowArray);
+            $count++;
+        }
+
+        $this->lastInsertId = (string) $lastId;
+        return $count;
+    }
+
     private function executeUpdate(UpdateStatement $ast): int
     {
         $tableName = $ast->table->getFullName();
@@ -2975,16 +3156,132 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("Table '$tableName' does not support UPDATE");
         }
 
-        // Build changes from SET clause
+        // Check if any SET expression needs row context (e.g., SET x = x + 2)
+        $needsRowContext = false;
+        foreach ($ast->updates as $update) {
+            if ($this->expressionNeedsRowContext($update['value'])) {
+                $needsRowContext = true;
+                break;
+            }
+        }
+
+        // Apply WHERE filter
+        $query = $this->applyWhereToTable($table, $ast->where);
+
+        if ($needsRowContext) {
+            // Row-by-row update: iterate over matching rows and compute expressions per-row
+            return $this->executeUpdateWithRowContext($table, $query, $ast->updates);
+        }
+
+        // Static update: evaluate expressions once without row context
         $changes = [];
         foreach ($ast->updates as $update) {
             $colName = $update['column']->getName();
             $changes[$colName] = $this->evaluator->evaluate($update['value'], null);
         }
 
-        // Apply WHERE filter and execute update
-        $query = $this->applyWhereToTable($table, $ast->where);
         return $table->update($query, $changes);
+    }
+
+    /**
+     * Check if an expression contains column references (needs row context to evaluate)
+     */
+    private function expressionNeedsRowContext(ASTNode $node): bool
+    {
+        // IdentifierNode is a column reference (e.g., 'x' in SET x = x + 2)
+        if ($node instanceof IdentifierNode) {
+            return true;
+        }
+
+        // ColumnNode wraps IdentifierNode for qualified columns (e.g., 't.x')
+        if ($node instanceof ColumnNode) {
+            return true;
+        }
+
+        // BinaryOperation: check both operands
+        if ($node instanceof BinaryOperation) {
+            return $this->expressionNeedsRowContext($node->left)
+                || $this->expressionNeedsRowContext($node->right);
+        }
+
+        // UnaryOperation: check operand
+        if ($node instanceof UnaryOperation) {
+            return $this->expressionNeedsRowContext($node->expression);
+        }
+
+        // FunctionCall: check arguments
+        if ($node instanceof FunctionCall) {
+            foreach ($node->arguments as $arg) {
+                if ($this->expressionNeedsRowContext($arg)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Literals don't need row context
+        return false;
+    }
+
+    /**
+     * Execute UPDATE with row-by-row evaluation for self-referencing expressions
+     */
+    private function executeUpdateWithRowContext(MutableTableInterface $table, TableInterface $query, array $updates): int
+    {
+        $count = 0;
+        $pkColumn = null;
+
+        // Find primary key column for targeted updates
+        foreach ($table->getColumns() as $name => $col) {
+            if ($col->index === IndexType::Primary) {
+                $pkColumn = $name;
+                break;
+            }
+        }
+
+        // Collect all updates first (evaluate expressions with current row values)
+        // Then apply them. This prevents issues where updates affect subsequent rows.
+        $pendingUpdates = [];
+
+        // Iterate over matching rows
+        foreach ($query as $rowid => $row) {
+            $changes = [];
+            foreach ($updates as $update) {
+                $colName = $update['column']->getName();
+                $changes[$colName] = $this->evaluator->evaluate($update['value'], $row);
+            }
+
+            // Store for later update, using either primary key or rowid
+            if ($pkColumn !== null) {
+                $pkValue = $row->{$pkColumn} ?? null;
+                if ($pkValue !== null) {
+                    $pendingUpdates[] = ['pk' => $pkColumn, 'value' => $pkValue, 'changes' => $changes];
+                }
+            } else {
+                // Use rowid for tables without primary key (InMemoryTable yields rowid as key)
+                $pendingUpdates[] = ['rowid' => $rowid, 'changes' => $changes];
+            }
+        }
+
+        // Apply all updates
+        foreach ($pendingUpdates as $pending) {
+            if (isset($pending['pk'])) {
+                $rowQuery = $table->eq($pending['pk'], $pending['value']);
+            } else {
+                // For InMemoryTable, we can use rowid via eq on _rowid_
+                // But _rowid_ is internal to SQLite. Use a workaround - build WHERE clause manually
+                if ($table instanceof InMemoryTable) {
+                    // InMemoryTable supports eq with rowid column
+                    $rowQuery = $table->eq('_rowid_', $pending['rowid']);
+                } else {
+                    throw new \RuntimeException("UPDATE with self-referencing expressions requires a primary key or InMemoryTable");
+                }
+            }
+            $table->update($rowQuery, $pending['changes']);
+            $count++;
+        }
+
+        return $count;
     }
 
     private function executeDelete(DeleteStatement $ast): int
@@ -3115,10 +3412,34 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function applyWhereToTableInterface(TableInterface $table, \mini\Parsing\SQL\AST\ASTNode $node): TableInterface
     {
-        // Binary AND: apply both sides
+        // Binary AND: flatten, push simple predicates first, then filter with complex ones
         if ($node instanceof BinaryOperation && strtoupper($node->operator) === 'AND') {
-            $table = $this->applyWhereToTableInterface($table, $node->left);
-            return $this->applyWhereToTableInterface($table, $node->right);
+            // Flatten AND chain
+            $predicates = [];
+            $this->flattenAndPredicates($node, $predicates);
+
+            // Separate into pushable and complex
+            $pushable = [];
+            $complex = [];
+            foreach ($predicates as $pred) {
+                if ($this->canPushPredicate($pred)) {
+                    $pushable[] = $pred;
+                } else {
+                    $complex[] = $pred;
+                }
+            }
+
+            // Apply pushable predicates first (reduces row count)
+            foreach ($pushable as $pred) {
+                $table = $this->applySinglePredicate($table, $pred);
+            }
+
+            // Then filter with complex predicates on the reduced set
+            foreach ($complex as $pred) {
+                $table = $this->filterByExpression($table, $pred);
+            }
+
+            return $table;
         }
 
         // Binary OR: use table's or() method with predicates, or fall back to row-by-row
@@ -3188,7 +3509,7 @@ class VirtualDatabase implements DatabaseInterface
                     '<=' => $table->lte($column, $value),
                     '>' => $table->gt($column, $value),
                     '>=' => $table->gte($column, $value),
-                    '!=', '<>' => $table->except($table->eq($column, $value)),
+                    '!=', '<>' => $this->filterByExpression($table, $node),
                     default => $this->filterByExpression($table, $node),
                 };
             }
@@ -3214,7 +3535,9 @@ class VirtualDatabase implements DatabaseInterface
                     '<=' => $table->lte($column, $value),
                     '>' => $table->gt($column, $value),
                     '>=' => $table->gte($column, $value),
-                    '!=', '<>' => $table->except($table->eq($column, $value)),
+                    // != and <> can't use except() - it would include NULL rows incorrectly
+                    // NULL <> 100 is UNKNOWN (not TRUE), so row-by-row evaluation is needed
+                    '!=', '<>' => $this->filterByExpression($table, $node),
                     default => throw new \RuntimeException("Unsupported operator: $op"),
                 };
             }
@@ -3230,7 +3553,7 @@ class VirtualDatabase implements DatabaseInterface
                     '<=' => $table->lte($simplified['column'], $simplified['value']),
                     '>' => $table->gt($simplified['column'], $simplified['value']),
                     '>=' => $table->gte($simplified['column'], $simplified['value']),
-                    '!=', '<>' => $table->except($table->eq($simplified['column'], $simplified['value'])),
+                    '!=', '<>' => $this->filterByExpression($table, $node),
                     default => $this->filterByExpression($table, $node),
                 };
             }
@@ -3262,8 +3585,9 @@ class VirtualDatabase implements DatabaseInterface
 
         // IN operation
         if ($node instanceof InOperation) {
+            // If left side is not a column, fall back to row-by-row evaluation
             if (!$node->left instanceof IdentifierNode) {
-                throw new \RuntimeException("Left side of IN must be a column");
+                return $this->filterByExpression($table, $node);
             }
             $column = $this->buildQualifiedColumnName($node->left);
 
@@ -3288,18 +3612,18 @@ class VirtualDatabase implements DatabaseInterface
             return $this->applyExistsToTable($table, $node);
         }
 
-        // BETWEEN operation
+        // BETWEEN operation (NOT BETWEEN is rewritten by AstOptimizer to col < low OR col > high)
         if ($node instanceof \mini\Parsing\SQL\AST\BetweenOperation) {
             // Can only push to table if expression is a simple column and bounds are literals
-            if ($node->expression instanceof IdentifierNode
+            if (!$node->negated
+                && $node->expression instanceof IdentifierNode
                 && $node->low instanceof LiteralNode
                 && $node->high instanceof LiteralNode
             ) {
                 $column = $this->buildQualifiedColumnName($node->expression);
                 $low = $this->evaluator->evaluate($node->low, null);
                 $high = $this->evaluator->evaluate($node->high, null);
-                $result = $table->gte($column, $low)->lte($column, $high);
-                return $node->negated ? $table->except($result) : $result;
+                return $table->gte($column, $low)->lte($column, $high);
             }
             // Fall back to row-by-row evaluation
             return $this->filterByExpression($table, $node);
@@ -3316,7 +3640,77 @@ class VirtualDatabase implements DatabaseInterface
             return $this->applyQuantifiedComparison($table, $node);
         }
 
+        // Literal value (e.g., from NOT IN () optimization returning 1)
+        if ($node instanceof LiteralNode) {
+            // Truthy literal: return all rows; falsy: return empty
+            if ($node->value) {
+                return $table;
+            }
+            // Return empty result - filter with always-false condition
+            return $this->filterByExpression($table, $node);
+        }
+
         throw new \RuntimeException("Unsupported WHERE expression: " . get_class($node));
+    }
+
+    /**
+     * Check if a predicate can be pushed to the table interface
+     *
+     * Returns true for simple predicates: column op literal, IN, BETWEEN, IS NULL, LIKE
+     */
+    private function canPushPredicate(\mini\Parsing\SQL\AST\ASTNode $node): bool
+    {
+        // Simple comparisons: column op value or value op column
+        if ($node instanceof BinaryOperation) {
+            $op = strtoupper($node->operator);
+            if (in_array($op, ['=', '!=', '<>', '<', '<=', '>', '>='], true)) {
+                // Check for column op literal or literal op column
+                $hasColumn = $node->left instanceof IdentifierNode || $node->right instanceof IdentifierNode;
+                $hasLiteral = $node->left instanceof LiteralNode || $node->right instanceof LiteralNode
+                    || ($node->left instanceof PlaceholderNode && $node->left->isBound)
+                    || ($node->right instanceof PlaceholderNode && $node->right->isBound);
+                return $hasColumn && $hasLiteral;
+            }
+            return false;
+        }
+
+        // IN with column and literal values (not subquery for simplicity)
+        if ($node instanceof InOperation) {
+            return $node->left instanceof IdentifierNode && !$node->isSubquery();
+        }
+
+        // BETWEEN with column and literal bounds
+        if ($node instanceof \mini\Parsing\SQL\AST\BetweenOperation) {
+            return $node->expression instanceof IdentifierNode
+                && $node->low instanceof LiteralNode
+                && $node->high instanceof LiteralNode;
+        }
+
+        // IS NULL / IS NOT NULL
+        if ($node instanceof IsNullOperation) {
+            return $node->expression instanceof IdentifierNode;
+        }
+
+        // LIKE with column and pattern
+        if ($node instanceof LikeOperation) {
+            return $node->left instanceof IdentifierNode
+                && ($node->pattern instanceof LiteralNode || ($node->pattern instanceof PlaceholderNode && $node->pattern->isBound));
+        }
+
+        return false;
+    }
+
+    /**
+     * Apply a single pushable predicate to the table
+     *
+     * This is a subset of applyWhereToTableInterface that only handles
+     * predicates that canPushPredicate() returns true for.
+     */
+    private function applySinglePredicate(TableInterface $table, \mini\Parsing\SQL\AST\ASTNode $node): TableInterface
+    {
+        // Delegate to the full handler - it will handle these cases
+        // We know it won't recurse into AND because canPushPredicate returns false for AND
+        return $this->applyWhereToTableInterface($table, $node);
     }
 
     /**
@@ -3327,6 +3721,7 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function filterByExpression(TableInterface $table, \mini\Parsing\SQL\AST\ASTNode $condition): TableInterface
     {
+
         $columns = $table->getColumns();
         $filteredRows = [];
 
@@ -4016,6 +4411,9 @@ class VirtualDatabase implements DatabaseInterface
         if ($where === null) {
             return $table;
         }
+
+        // Optimize WHERE clause (rewrite negations for correct NULL semantics)
+        $where = $this->optimizer->optimize($where);
 
         return $this->applyWhereToTableInterface($table, $where);
     }

@@ -99,9 +99,18 @@ class AliasTable implements TableInterface
      */
     public function resolveToOriginal(string $name): string
     {
-        // Must be an aliased name
+        // Exact match on aliased name (e.g., "t1.col")
         if (isset($this->reverseMap[$name])) {
             return $this->reverseMap[$name];
+        }
+
+        // Try unqualified match - find aliased name ending with ".{name}"
+        // This allows using "col" to match "t1.col"
+        $suffix = '.' . $name;
+        foreach ($this->reverseMap as $aliased => $original) {
+            if (str_ends_with($aliased, $suffix)) {
+                return $original;
+            }
         }
 
         throw new \InvalidArgumentException(

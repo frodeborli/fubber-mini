@@ -7,6 +7,7 @@ use IteratorAggregate;
 use mini\Table\Contracts\MutableTableInterface;
 use mini\Table\Contracts\TableInterface;
 use mini\Table\Predicate;
+use mini\Table\Utility\EmptyTable;
 use Traversable;
 
 /**
@@ -206,6 +207,12 @@ final class BindableTable implements IteratorAggregate, Countable
                     continue;
                 }
                 [$column, $op] = $bind;
+                // SQL: comparisons with NULL return UNKNOWN (no rows match)
+                // col = NULL, col < NULL, col > NULL etc. all return no rows
+                if ($value === null) {
+                    $c->source = EmptyTable::from($c->source);
+                    continue;
+                }
                 $c->source = match ($op) {
                     'eq' => $c->source->eq($column, $value),
                     'lt' => $c->source->lt($column, $value),

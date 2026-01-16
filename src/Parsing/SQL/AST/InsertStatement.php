@@ -13,4 +13,6 @@ class InsertStatement extends ASTNode
     public array $columns = [];
     /** @var array[] Array of arrays of expressions */
     public array $values = [];
+    /** @var ?SelectStatement For INSERT INTO ... SELECT ... syntax */
+    public ?SelectStatement $select = null;
 }

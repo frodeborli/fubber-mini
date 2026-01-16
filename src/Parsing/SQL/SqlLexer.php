@@ -288,6 +288,28 @@ class SqlLexer
                 continue;
             }
 
+            // Blob literals: x'hexdigits' or X'hexdigits'
+            if (($char === 'x' || $char === 'X') && $next === "'") {
+                $this->cursor += 2; // Skip x'
+                $hex = '';
+                while ($this->cursor < $this->length) {
+                    $c = $this->sql[$this->cursor];
+                    if ($c === "'") {
+                        $this->cursor++;
+                        break;
+                    }
+                    $hex .= $c;
+                    $this->cursor++;
+                }
+                // Convert hex string to binary data
+                $binary = hex2bin($hex);
+                if ($binary === false) {
+                    throw new SqlSyntaxException("Invalid hex literal: x'$hex'", $this->sql, $start);
+                }
+                $tokens[] = ['type' => self::T_STRING, 'value' => $binary, 'pos' => $start];
+                continue;
+            }
+
             // Identifiers and Keywords
             // Supports: bare identifiers, `backtick` (MySQL), "double quote" (standard SQL)
             if (ctype_alpha($char) || $char === '_' || $char === '`' || $char === '"') {
