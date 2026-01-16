@@ -11,9 +11,9 @@ namespace mini\Database;
 interface DatabaseInterface
 {
     /**
-     * Execute a SELECT query and return a composable PartialQuery
+     * Execute a SELECT query and return a composable Query
      *
-     * Returns a PartialQuery that can be iterated, further composed, or used
+     * Returns a Query that can be iterated, further composed, or used
      * for updates/deletes (if single-table). Rows are returned as stdClass objects.
      *
      * Example:
@@ -35,9 +35,9 @@ interface DatabaseInterface
      *
      * @param string $sql SQL query with parameter placeholders
      * @param array $params Parameters to bind to the query
-     * @return PartialQuery Composable query object
+     * @return Query Composable query object
      */
-    public function query(string $sql, array $params = []): PartialQuery;
+    public function query(string $sql, array $params = []): Query;
 
     /**
      * Execute query and return first row only as object
@@ -155,7 +155,7 @@ interface DatabaseInterface
     public function quoteIdentifier(string $identifier): string;
 
     /**
-     * Delete rows matching a partial query
+     * Delete rows matching a query
      *
      * Respects WHERE clauses and LIMIT from the query.
      * Ignores SELECT, ORDER BY, and OFFSET.
@@ -165,13 +165,13 @@ interface DatabaseInterface
      * $deleted = db()->delete(User::inactive());
      * ```
      *
-     * @param PartialQuery $query Query defining which rows to delete
+     * @param Query|PartialQuery $query Query defining which rows to delete
      * @return int Number of affected rows
      */
-    public function delete(PartialQuery $query): int;
+    public function delete(Query|PartialQuery $query): int;
 
     /**
-     * Update rows matching a partial query
+     * Update rows matching a query
      *
      * Respects WHERE clauses and LIMIT from the query.
      * Ignores SELECT, ORDER BY, and OFFSET.
@@ -190,12 +190,12 @@ interface DatabaseInterface
      * WARNING: Values are NOT converted automatically. You must handle
      * conversion yourself (dates to strings, objects to JSON, etc).
      *
-     * @param PartialQuery $query Query defining which rows to update
+     * @param Query|PartialQuery $query Query defining which rows to update
      * @param string|array $set Either raw SQL expression or ['column' => 'value'] array
      * @param array $params Parameters for placeholders in SQL expression (only used when $set is string)
      * @return int Number of affected rows
      */
-    public function update(PartialQuery $query, string|array $set, array $params = []): int;
+    public function update(Query|PartialQuery $query, string|array $set, array $params = []): int;
 
     /**
      * Insert a new row into a table
@@ -240,6 +240,32 @@ interface DatabaseInterface
      * @return int Number of affected rows
      */
     public function upsert(string $table, array $data, string ...$conflictColumns): int;
+
+    /**
+     * Create a VirtualDatabase with shadowed tables
+     *
+     * Returns a VirtualDatabase where specified tables are replaced with mock data
+     * while all other tables remain accessible. Perfect for testing - shadow specific
+     * tables while keeping real data for others.
+     *
+     * For PDODatabase: Creates VirtualDatabase with all real tables (as PartialQuery),
+     * then shadows with provided tables. Allows JOINs between mock and real data.
+     *
+     * For VirtualDatabase: Inherits all existing tables, shadows with provided ones.
+     *
+     * Example:
+     * ```php
+     * // Shadow users table with mock data, keep real orders
+     * $testDb = $db->withTables(['users' => $mockUsers]);
+     *
+     * // Can now JOIN mock users with real orders
+     * $testDb->query('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id');
+     * ```
+     *
+     * @param array<string, \mini\Table\Contracts\TableInterface> $tables Table name => TableInterface to shadow
+     * @return DatabaseInterface VirtualDatabase with real + shadowed tables
+     */
+    public function withTables(array $tables): DatabaseInterface;
 
     /**
      * Get database schema as a TableInterface

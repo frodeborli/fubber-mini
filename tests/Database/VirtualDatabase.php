@@ -9,13 +9,27 @@ require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Database\VirtualDatabase;
-use mini\Database\MutablePartialQuery;
+use mini\Database\PartialQuery;
+use mini\Database\Query;
 use mini\Table\InMemoryTable;
 use mini\Table\ColumnDef;
 use mini\Table\Types\ColumnType;
 use mini\Table\Types\IndexType;
 
 $test = new class extends Test {
+
+    private static ?\ReflectionProperty $pqRef = null;
+
+    /**
+     * Extract the internal PartialQuery from a Query via reflection
+     */
+    private function pq(Query $query): PartialQuery
+    {
+        if (self::$pqRef === null) {
+            self::$pqRef = new \ReflectionProperty(Query::class, 'pq');
+        }
+        return self::$pqRef->getValue($query);
+    }
 
     private function createUsersTable(): InMemoryTable
     {
@@ -1146,7 +1160,7 @@ $test = new class extends Test {
 
         // VDB2: Wrap VDB1 query with additional filter
         $vdb2 = new VirtualDatabase();
-        $vdb2->registerTable('users', $vdb1->query("SELECT * FROM users WHERE gender = 'male'"));
+        $vdb2->registerTable('users', $this->pq($vdb1->query("SELECT * FROM users WHERE gender = 'male'")));
 
         // Query VDB2 with age filter
         $rows = iterator_to_array($vdb2->query('SELECT * FROM users WHERE age >= 18 ORDER BY id'));
@@ -1175,11 +1189,11 @@ $test = new class extends Test {
 
         // Level 2: Only active users
         $vdb2 = new VirtualDatabase();
-        $vdb2->registerTable('users', $vdb1->query("SELECT * FROM users WHERE status = 'active'"));
+        $vdb2->registerTable('users', $this->pq($vdb1->query("SELECT * FROM users WHERE status = 'active'")));
 
         // Level 3: Only high scorers (score >= 50)
         $vdb3 = new VirtualDatabase();
-        $vdb3->registerTable('users', $vdb2->query('SELECT * FROM users WHERE score >= 50'));
+        $vdb3->registerTable('users', $this->pq($vdb2->query('SELECT * FROM users WHERE score >= 50')));
 
         // Query level 3 - should get only active users with score >= 50
         $rows = iterator_to_array($vdb3->query('SELECT * FROM users ORDER BY id'));
@@ -1190,7 +1204,7 @@ $test = new class extends Test {
         // Charlie excluded (inactive), Dave excluded (score 30)
     }
 
-    public function testNestedVdbWithMutablePartialQuery(): void
+    public function testNestedVdbWithConstrainedPartialQuery(): void
     {
         $usersTable = new InMemoryTable(
             new ColumnDef('id', ColumnType::Int, IndexType::Primary),
@@ -1200,21 +1214,17 @@ $test = new class extends Test {
         $usersTable->insert(['id' => 1, 'name' => 'Alice', 'role' => 'admin']);
         $usersTable->insert(['id' => 2, 'name' => 'Bob', 'role' => 'user']);
 
-        // VDB1 with MutablePartialQuery (allows mutations with constraints)
+        // VDB1 with constrained PartialQuery (PartialQuery now implements MutableTableInterface)
         $vdb1 = new VirtualDatabase();
-        $mutableUsers = new MutablePartialQuery(
-            $vdb1->query("SELECT * FROM users WHERE role = 'user'"),
-            $vdb1
-        );
         $vdb1->registerTable('users', $usersTable);
-        $vdb1->registerTable('user_users', $mutableUsers);
 
-        // VDB2 wraps VDB1's mutable table
+        // PartialQuery with role='user' constraint - allows filtered mutations
+        $constrainedUsers = $this->pq($vdb1->query("SELECT * FROM users WHERE role = 'user'"));
+        $vdb1->registerTable('user_users', $constrainedUsers);
+
+        // VDB2 wraps VDB1's constrained query
         $vdb2 = new VirtualDatabase();
-        $vdb2->registerTable('users', new MutablePartialQuery(
-            $vdb1->query("SELECT * FROM user_users"),
-            $vdb1
-        ));
+        $vdb2->registerTable('users', $this->pq($vdb1->query("SELECT * FROM user_users")));
 
         // Query works
         $rows = iterator_to_array($vdb2->query('SELECT * FROM users'));
@@ -1230,8 +1240,13 @@ $test = new class extends Test {
         $this->assertSame('Charlie', $rows[1]->name);
 
         // Insert violating constraint should fail
-        $this->expectException(\RuntimeException::class);
-        $vdb2->exec("INSERT INTO users (id, name, role) VALUES (4, 'Dave', 'admin')");
+        $threw = false;
+        try {
+            $vdb2->exec("INSERT INTO users (id, name, role) VALUES (4, 'Dave', 'admin')");
+        } catch (\RuntimeException $e) {
+            $threw = true;
+        }
+        $this->assertTrue($threw, 'Expected RuntimeException for constraint violation');
     }
 
     public function testVdbQueryReturnsPartialQueryWithQuotedIdentifiers(): void
@@ -1248,7 +1263,7 @@ $test = new class extends Test {
         $vdb1->registerTable('users', $usersTable);
 
         // Query with special column name - generates quoted identifier
-        $query = $vdb1->query('SELECT * FROM users')->eq('user name', 'Alice');
+        $query = $this->pq($vdb1->query('SELECT * FROM users')->eq('user name', 'Alice'));
 
         // Nested VDB should parse the quoted identifier correctly
         $vdb2 = new VirtualDatabase();

@@ -8,6 +8,13 @@ use mini\Parsing\SQL\AST\{
     InsertStatement,
     UpdateStatement,
     DeleteStatement,
+    CreateTableStatement,
+    CreateIndexStatement,
+    DropTableStatement,
+    DropIndexStatement,
+    ColumnDefinition,
+    TableConstraint,
+    IndexColumn,
     ColumnNode,
     FunctionCallNode,
     WindowFunctionNode,
@@ -71,6 +78,8 @@ class SqlParser
             SqlLexer::T_INSERT => $this->parseInsertStatement(),
             SqlLexer::T_UPDATE => $this->parseUpdateStatement(),
             SqlLexer::T_DELETE => $this->parseDeleteStatement(),
+            SqlLexer::T_CREATE => $this->parseCreateStatement(),
+            SqlLexer::T_DROP => $this->parseDropStatement(),
             default => throw new SqlSyntaxException(
                 "Unexpected start of query: " . $token['type'],
                 $this->sql,
@@ -802,6 +811,13 @@ class SqlParser
             return new UnaryOperation('-', $expr);
         }
 
+        // Handle Unary Plus
+        if ($token['type'] === SqlLexer::T_OP && $token['value'] === '+') {
+            $this->pos++;
+            $expr = $this->parseAtom();
+            return new UnaryOperation('+', $expr);
+        }
+
         // Handle Parentheses and Scalar Subqueries
         if ($this->match(SqlLexer::T_LPAREN)) {
             // Check for scalar subquery: (SELECT ...), (SELECT ... UNION ...), (WITH ... SELECT ...)
@@ -1151,5 +1167,587 @@ class SqlParser
             $this->sql,
             $this->current()['pos']
         );
+    }
+
+    /**
+     * Parse SQL and bind parameters, returning the AST
+     *
+     * Convenience method that parses SQL and binds parameter values to
+     * PlaceholderNodes in a single call.
+     *
+     * @param string $sql SQL to parse
+     * @param array $params Parameters to bind (positional or named)
+     * @return ASTNode Parsed AST with bound PlaceholderNodes
+     */
+    public static function parseWithParams(string $sql, array $params = []): ASTNode
+    {
+        $parser = new self();
+        $ast = $parser->parse($sql);
+
+        if (!empty($params)) {
+            $paramsCopy = $params;
+            self::bindParams($ast, $paramsCopy);
+        }
+
+        return $ast;
+    }
+
+    // =========================================================================
+    // DDL Parsing (CREATE, DROP, etc.)
+    // =========================================================================
+
+    /**
+     * Parse CREATE statement (TABLE, INDEX, VIEW)
+     */
+    private function parseCreateStatement(): ASTNode
+    {
+        $this->expect(SqlLexer::T_CREATE);
+        $token = $this->current();
+
+        // CREATE UNIQUE INDEX
+        if ($token['type'] === SqlLexer::T_UNIQUE) {
+            $this->pos++;
+            $this->expect(SqlLexer::T_INDEX);
+            return $this->parseCreateIndex(unique: true);
+        }
+
+        if ($token['type'] === SqlLexer::T_TABLE) {
+            return $this->parseCreateTable();
+        }
+
+        if ($token['type'] === SqlLexer::T_INDEX) {
+            $this->pos++; // consume INDEX
+            return $this->parseCreateIndex(unique: false);
+        }
+
+        throw new SqlSyntaxException(
+            "Expected TABLE or INDEX after CREATE",
+            $this->sql,
+            $token['pos']
+        );
+    }
+
+    /**
+     * Parse CREATE TABLE statement
+     *
+     * Syntax: CREATE TABLE [IF NOT EXISTS] name (column_def, ..., [constraint, ...])
+     */
+    private function parseCreateTable(): CreateTableStatement
+    {
+        $this->expect(SqlLexer::T_TABLE);
+        $stmt = new CreateTableStatement();
+
+        // IF NOT EXISTS
+        if ($this->match(SqlLexer::T_IF)) {
+            $this->expect(SqlLexer::T_NOT);
+            $this->expectKeyword('EXISTS');
+            $stmt->ifNotExists = true;
+        }
+
+        // Table name
+        $stmt->table = $this->parseIdentifier();
+
+        // Column definitions and constraints
+        $this->expect(SqlLexer::T_LPAREN);
+
+        do {
+            // Check for table-level constraint
+            $token = $this->current();
+            if (in_array($token['type'], [SqlLexer::T_PRIMARY, SqlLexer::T_UNIQUE, SqlLexer::T_FOREIGN, SqlLexer::T_CHECK, SqlLexer::T_CONSTRAINT])) {
+                $stmt->constraints[] = $this->parseTableConstraint();
+            } else {
+                $stmt->columns[] = $this->parseColumnDefinition();
+            }
+        } while ($this->match(SqlLexer::T_COMMA));
+
+        $this->expect(SqlLexer::T_RPAREN);
+
+        return $stmt;
+    }
+
+    /**
+     * Parse column definition
+     */
+    private function parseColumnDefinition(): ColumnDefinition
+    {
+        $col = new ColumnDefinition();
+
+        // Column name
+        $col->name = $this->expectIdentifierName();
+
+        // Data type (optional in SQLite)
+        if ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+            $col->dataType = strtoupper($this->current()['value']);
+            $this->pos++;
+
+            // Type parameters: VARCHAR(255), DECIMAL(10,2)
+            if ($this->match(SqlLexer::T_LPAREN)) {
+                $col->length = (int) $this->current()['value'];
+                $this->expect(SqlLexer::T_NUMBER);
+
+                if ($this->match(SqlLexer::T_COMMA)) {
+                    $col->scale = (int) $this->current()['value'];
+                    $this->expect(SqlLexer::T_NUMBER);
+                    $col->precision = $col->length;
+                    $col->length = null;
+                }
+
+                $this->expect(SqlLexer::T_RPAREN);
+            }
+        }
+
+        // Column constraints
+        while ($this->parseColumnConstraint($col)) {
+            // Keep parsing constraints
+        }
+
+        return $col;
+    }
+
+    /**
+     * Parse a single column constraint
+     * @return bool True if a constraint was parsed
+     */
+    private function parseColumnConstraint(ColumnDefinition $col): bool
+    {
+        $token = $this->current();
+
+        // PRIMARY KEY
+        if ($token['type'] === SqlLexer::T_PRIMARY) {
+            $this->pos++;
+            $this->expect(SqlLexer::T_KEY);
+            $col->primaryKey = true;
+
+            // AUTOINCREMENT
+            if ($this->match(SqlLexer::T_AUTOINCREMENT)) {
+                $col->autoIncrement = true;
+            }
+            return true;
+        }
+
+        // NOT NULL
+        if ($token['type'] === SqlLexer::T_NOT) {
+            $this->pos++;
+            $this->expect(SqlLexer::T_NULL);
+            $col->notNull = true;
+            return true;
+        }
+
+        // NULL (explicit nullable)
+        if ($token['type'] === SqlLexer::T_NULL) {
+            $this->pos++;
+            return true;
+        }
+
+        // UNIQUE
+        if ($token['type'] === SqlLexer::T_UNIQUE) {
+            $this->pos++;
+            $col->unique = true;
+            return true;
+        }
+
+        // DEFAULT value
+        if ($token['type'] === SqlLexer::T_DEFAULT) {
+            $this->pos++;
+            $col->default = $this->parseDefaultValue();
+            return true;
+        }
+
+        // REFERENCES table(column)
+        if ($token['type'] === SqlLexer::T_REFERENCES) {
+            $this->pos++;
+            $col->references = $this->expectIdentifierName();
+            if ($this->match(SqlLexer::T_LPAREN)) {
+                $col->referencesColumn = $this->expectIdentifierName();
+                $this->expect(SqlLexer::T_RPAREN);
+            }
+            return true;
+        }
+
+        // CHECK (expression)
+        if ($token['type'] === SqlLexer::T_CHECK) {
+            $this->pos++;
+            $this->expect(SqlLexer::T_LPAREN);
+            // Skip the check expression for now (complex parsing)
+            $depth = 1;
+            while ($depth > 0 && $this->current()['type'] !== SqlLexer::T_EOF) {
+                if ($this->match(SqlLexer::T_LPAREN)) $depth++;
+                elseif ($this->match(SqlLexer::T_RPAREN)) $depth--;
+                else $this->pos++;
+            }
+            return true;
+        }
+
+        // AUTOINCREMENT (standalone, SQLite style)
+        if ($token['type'] === SqlLexer::T_AUTOINCREMENT) {
+            $this->pos++;
+            $col->autoIncrement = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Parse default value expression
+     */
+    private function parseDefaultValue(): ASTNode
+    {
+        $token = $this->current();
+
+        // NULL
+        if ($this->match(SqlLexer::T_NULL)) {
+            return new LiteralNode(null, 'null');
+        }
+
+        // String literal
+        if ($token['type'] === SqlLexer::T_STRING) {
+            $this->pos++;
+            return new LiteralNode($token['value'], 'string');
+        }
+
+        // Number literal
+        if ($token['type'] === SqlLexer::T_NUMBER) {
+            $this->pos++;
+            return new LiteralNode($token['value'], 'number');
+        }
+
+        // TRUE/FALSE
+        if ($this->match(SqlLexer::T_TRUE)) {
+            return new LiteralNode(true, 'boolean');
+        }
+        if ($this->match(SqlLexer::T_FALSE)) {
+            return new LiteralNode(false, 'boolean');
+        }
+
+        // CURRENT_TIMESTAMP, etc.
+        if ($token['type'] === SqlLexer::T_CURRENT_TIMESTAMP) {
+            $this->pos++;
+            return new LiteralNode('CURRENT_TIMESTAMP', 'keyword');
+        }
+
+        // Parenthesized expression
+        if ($this->match(SqlLexer::T_LPAREN)) {
+            $expr = $this->parseExpression();
+            $this->expect(SqlLexer::T_RPAREN);
+            return $expr;
+        }
+
+        throw new SqlSyntaxException(
+            "Expected default value",
+            $this->sql,
+            $token['pos']
+        );
+    }
+
+    /**
+     * Parse table-level constraint
+     */
+    private function parseTableConstraint(): TableConstraint
+    {
+        $constraint = new TableConstraint();
+
+        // CONSTRAINT name
+        if ($this->match(SqlLexer::T_CONSTRAINT)) {
+            $constraint->name = $this->expectIdentifierName();
+        }
+
+        $token = $this->current();
+
+        // PRIMARY KEY (col1, col2, ...)
+        if ($token['type'] === SqlLexer::T_PRIMARY) {
+            $this->pos++;
+            $this->expect(SqlLexer::T_KEY);
+            $constraint->constraintType = 'PRIMARY KEY';
+            $constraint->columns = $this->parseConstraintColumnList();
+            return $constraint;
+        }
+
+        // UNIQUE (col1, col2, ...)
+        if ($token['type'] === SqlLexer::T_UNIQUE) {
+            $this->pos++;
+            $constraint->constraintType = 'UNIQUE';
+            $constraint->columns = $this->parseConstraintColumnList();
+            return $constraint;
+        }
+
+        // FOREIGN KEY (col1, ...) REFERENCES table(col1, ...)
+        if ($token['type'] === SqlLexer::T_FOREIGN) {
+            $this->pos++;
+            $this->expect(SqlLexer::T_KEY);
+            $constraint->constraintType = 'FOREIGN KEY';
+            $constraint->columns = $this->parseConstraintColumnList();
+
+            $this->expect(SqlLexer::T_REFERENCES);
+            $constraint->references = $this->expectIdentifierName();
+            $constraint->referencesColumns = $this->parseConstraintColumnList();
+
+            // ON DELETE / ON UPDATE
+            while ($this->match(SqlLexer::T_ON)) {
+                if ($this->match(SqlLexer::T_DELETE)) {
+                    $constraint->onDelete = $this->parseReferentialAction();
+                } elseif ($this->match(SqlLexer::T_UPDATE)) {
+                    $constraint->onUpdate = $this->parseReferentialAction();
+                }
+            }
+
+            return $constraint;
+        }
+
+        // CHECK (expression)
+        if ($token['type'] === SqlLexer::T_CHECK) {
+            $this->pos++;
+            $constraint->constraintType = 'CHECK';
+            $this->expect(SqlLexer::T_LPAREN);
+            $constraint->checkExpression = $this->parseExpression();
+            $this->expect(SqlLexer::T_RPAREN);
+            return $constraint;
+        }
+
+        throw new SqlSyntaxException(
+            "Expected constraint type (PRIMARY KEY, UNIQUE, FOREIGN KEY, CHECK)",
+            $this->sql,
+            $token['pos']
+        );
+    }
+
+    /**
+     * Parse (col1, col2, ...) list for constraints
+     */
+    private function parseConstraintColumnList(): array
+    {
+        $this->expect(SqlLexer::T_LPAREN);
+        $columns = [];
+        do {
+            $columns[] = $this->expectIdentifierName();
+        } while ($this->match(SqlLexer::T_COMMA));
+        $this->expect(SqlLexer::T_RPAREN);
+        return $columns;
+    }
+
+    /**
+     * Parse referential action (CASCADE, RESTRICT, SET NULL, etc.)
+     */
+    private function parseReferentialAction(): string
+    {
+        if ($this->match(SqlLexer::T_CASCADE)) return 'CASCADE';
+        if ($this->match(SqlLexer::T_RESTRICT)) return 'RESTRICT';
+        if ($this->match(SqlLexer::T_NO)) {
+            $this->expect(SqlLexer::T_ACTION);
+            return 'NO ACTION';
+        }
+        if ($this->match(SqlLexer::T_SET)) {
+            if ($this->match(SqlLexer::T_NULL)) return 'SET NULL';
+            if ($this->match(SqlLexer::T_DEFAULT)) return 'SET DEFAULT';
+        }
+
+        throw new SqlSyntaxException(
+            "Expected referential action",
+            $this->sql,
+            $this->current()['pos']
+        );
+    }
+
+    /**
+     * Parse CREATE INDEX statement
+     */
+    private function parseCreateIndex(bool $unique): CreateIndexStatement
+    {
+        $stmt = new CreateIndexStatement();
+        $stmt->unique = $unique;
+
+        // IF NOT EXISTS
+        if ($this->match(SqlLexer::T_IF)) {
+            $this->expect(SqlLexer::T_NOT);
+            $this->expectKeyword('EXISTS');
+            $stmt->ifNotExists = true;
+        }
+
+        // Index name
+        $stmt->name = $this->expectIdentifierName();
+
+        // ON table
+        $this->expect(SqlLexer::T_ON);
+        $stmt->table = $this->parseIdentifier();
+
+        // (col1 [ASC|DESC], col2 [ASC|DESC], ...)
+        $this->expect(SqlLexer::T_LPAREN);
+        do {
+            $col = new IndexColumn();
+            $col->name = $this->expectIdentifierName();
+
+            if ($this->match(SqlLexer::T_ASC)) {
+                $col->order = 'ASC';
+            } elseif ($this->match(SqlLexer::T_DESC)) {
+                $col->order = 'DESC';
+            }
+
+            $stmt->columns[] = $col;
+        } while ($this->match(SqlLexer::T_COMMA));
+        $this->expect(SqlLexer::T_RPAREN);
+
+        return $stmt;
+    }
+
+    /**
+     * Parse DROP statement (TABLE, INDEX)
+     */
+    private function parseDropStatement(): ASTNode
+    {
+        $this->expect(SqlLexer::T_DROP);
+        $token = $this->current();
+
+        if ($token['type'] === SqlLexer::T_TABLE) {
+            return $this->parseDropTable();
+        }
+
+        if ($token['type'] === SqlLexer::T_INDEX) {
+            $this->pos++; // consume INDEX
+            return $this->parseDropIndex();
+        }
+
+        throw new SqlSyntaxException(
+            "Expected TABLE or INDEX after DROP",
+            $this->sql,
+            $token['pos']
+        );
+    }
+
+    /**
+     * Parse DROP TABLE statement
+     */
+    private function parseDropTable(): DropTableStatement
+    {
+        $this->expect(SqlLexer::T_TABLE);
+        $stmt = new DropTableStatement();
+
+        // IF EXISTS
+        if ($this->match(SqlLexer::T_IF)) {
+            $this->expectKeyword('EXISTS');
+            $stmt->ifExists = true;
+        }
+
+        $stmt->table = $this->parseIdentifier();
+        return $stmt;
+    }
+
+    /**
+     * Parse DROP INDEX statement
+     */
+    private function parseDropIndex(): DropIndexStatement
+    {
+        // INDEX token already consumed by parseDropStatement
+        $stmt = new DropIndexStatement();
+
+        // IF EXISTS
+        if ($this->match(SqlLexer::T_IF)) {
+            $this->expectKeyword('EXISTS');
+            $stmt->ifExists = true;
+        }
+
+        $stmt->name = $this->expectIdentifierName();
+
+        // ON table (optional, for MySQL compatibility)
+        if ($this->match(SqlLexer::T_ON)) {
+            $stmt->table = $this->parseIdentifier();
+        }
+
+        return $stmt;
+    }
+
+    /**
+     * Expect a specific keyword (may be token or identifier)
+     */
+    private function expectKeyword(string $keyword): void
+    {
+        $token = $this->current();
+        $upper = strtoupper($keyword);
+
+        // Check if it matches as a token type
+        if ($token['type'] === $upper) {
+            $this->pos++;
+            return;
+        }
+
+        // Check if it's an identifier with the keyword name
+        if ($token['type'] === SqlLexer::T_IDENTIFIER && strtoupper($token['value']) === $upper) {
+            $this->pos++;
+            return;
+        }
+
+        throw new SqlSyntaxException(
+            "Expected $keyword",
+            $this->sql,
+            $token['pos']
+        );
+    }
+
+    /**
+     * Expect an identifier token and return its name
+     */
+    private function expectIdentifierName(): string
+    {
+        $token = $this->current();
+        if ($token['type'] !== SqlLexer::T_IDENTIFIER) {
+            throw new SqlSyntaxException(
+                "Expected identifier",
+                $this->sql,
+                $token['pos']
+            );
+        }
+        $this->pos++;
+        return $token['value'];
+    }
+
+    /**
+     * Bind parameter values to PlaceholderNodes in an AST
+     *
+     * Supports both positional (?) and named (:name) placeholders.
+     * For positional, params are consumed in order.
+     * For named, params are looked up by name (without the colon).
+     *
+     * @param ASTNode $node The AST to bind params to
+     * @param array $params Values to bind (modified by reference for positional)
+     * @return int Number of params bound
+     */
+    public static function bindParams(ASTNode $node, array &$params): int
+    {
+        $bound = 0;
+
+        if ($node instanceof PlaceholderNode) {
+            if (str_starts_with($node->token, ':')) {
+                $name = substr($node->token, 1);
+                if (!array_key_exists($name, $params)) {
+                    throw new \RuntimeException("Missing parameter for placeholder :$name");
+                }
+                $node->bind($params[$name]);
+            } else {
+                if (empty($params)) {
+                    throw new \RuntimeException('Not enough parameters for placeholders in query');
+                }
+                $node->bind(array_shift($params));
+            }
+            return 1;
+        }
+
+        foreach (get_object_vars($node) as $value) {
+            if ($value instanceof ASTNode) {
+                $bound += self::bindParams($value, $params);
+            } elseif (is_array($value)) {
+                foreach ($value as $item) {
+                    if ($item instanceof ASTNode) {
+                        $bound += self::bindParams($item, $params);
+                    } elseif (is_array($item)) {
+                        foreach ($item as $subItem) {
+                            if ($subItem instanceof ASTNode) {
+                                $bound += self::bindParams($subItem, $params);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return $bound;
     }
 }

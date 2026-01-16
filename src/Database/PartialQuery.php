@@ -5,9 +5,12 @@ namespace mini\Database;
 use Closure;
 use mini\Collection;
 use mini\Contracts\CollectionInterface;
+use mini\Table\ColumnDef;
+use mini\Table\Contracts\MutableTableInterface;
 use mini\Table\Contracts\SetInterface;
 use mini\Table\Contracts\TableInterface;
 use mini\Table\Predicate;
+use mini\Table\Types\ColumnType;
 use mini\Table\Utility\TablePropertiesTrait;
 use mini\Table\Wrappers\AliasTable;
 use mini\Table\Wrappers\DistinctTable;
@@ -25,6 +28,7 @@ use mini\Parsing\SQL\AST\BinaryOperation;
 use mini\Parsing\SQL\AST\LiteralNode;
 use mini\Parsing\SQL\AST\PlaceholderNode;
 use mini\Parsing\SQL\AST\InOperation;
+use mini\Parsing\SQL\AST\IsNullOperation;
 use mini\Parsing\SQL\AST\LikeOperation;
 use mini\Parsing\SQL\AST\FunctionCallNode;
 use mini\Parsing\SQL\AST\UnaryOperation;
@@ -38,7 +42,7 @@ use stdClass;
  * @template T of array|object
  * @implements ResultSetInterface<T>
  */
-final class PartialQuery implements ResultSetInterface, TableInterface
+final class PartialQuery implements ResultSetInterface, MutableTableInterface
 {
     use TablePropertiesTrait;
 
@@ -233,14 +237,20 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             if ($this->ast->query instanceof SelectStatement) {
                 return $this->ast->query;
             }
-            // Inner query is UnionNode - wrap it
-            $this->ast->query = $this->wrapInSelect($this->ast->query);
+            // Inner query is UnionNode - wrap it (won't have CTEs to bubble)
+            $wrapped = $this->wrapInSelect($this->ast->query);
+            $this->ast->query = $wrapped instanceof WithStatement ? $wrapped->query : $wrapped;
             return $this->ast->query;
         }
 
-        // UnionNode - wrap in subquery
-        $this->ast = $this->wrapInSelect($this->ast);
-        return $this->ast;
+        // UnionNode - wrap in subquery (won't have CTEs to bubble)
+        $wrapped = $this->wrapInSelect($this->ast);
+        if ($wrapped instanceof WithStatement) {
+            $this->ast = $wrapped;
+            return $wrapped->query;
+        }
+        $this->ast = $wrapped;
+        return $wrapped;
     }
 
     /**
@@ -248,19 +258,31 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      *
      * Uses the source table name as alias if the inner query is a simple
      * single-table SELECT, otherwise falls back to '_q'.
+     *
+     * CTEs are "bubbled up" - if the inner node is a WithStatement, the CTEs
+     * are extracted and wrapped around the outer SELECT, since WITH clauses
+     * cannot appear inside subqueries in SQL.
      */
-    private function wrapInSelect(ASTNode $node): SelectStatement
+    private function wrapInSelect(ASTNode $node): SelectStatement|WithStatement
     {
+        $ctes = [];
+        $innerNode = $node;
+
+        // Extract CTEs - they must bubble up to the outer level
+        // SQL doesn't allow WITH inside a subquery
+        if ($node instanceof WithStatement) {
+            $ctes = $node->ctes;
+            $innerNode = $node->query;
+        }
+
         $wrapper = new SelectStatement();
         $wrapper->columns = [new ColumnNode(new IdentifierNode(['*']))];
-        $wrapper->from = new SubqueryNode($node);
+        $wrapper->from = new SubqueryNode($innerNode);
 
         // Try to use a meaningful alias based on the inner query's FROM table
         $innerSelect = null;
-        if ($node instanceof SelectStatement) {
-            $innerSelect = $node;
-        } elseif ($node instanceof WithStatement && $node->query instanceof SelectStatement) {
-            $innerSelect = $node->query;
+        if ($innerNode instanceof SelectStatement) {
+            $innerSelect = $innerNode;
         }
 
         $alias = '_q';
@@ -271,6 +293,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         }
 
         $wrapper->fromAlias = $alias;
+
+        // Re-apply CTEs to the outside of the wrapper
+        if (!empty($ctes)) {
+            return new WithStatement($ctes, false, $wrapper);
+        }
+
         return $wrapper;
     }
 
@@ -280,6 +308,20 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     public function __clone()
     {
         $this->astIsPrivate = false;
+        $this->columnCache = null; // Clear cache - modifications may change columns
+    }
+
+    /**
+     * Borrow AST for embedding into another query
+     *
+     * Marks this instance as shared so any later mutation clones first.
+     * Use this when embedding this query's AST into another query.
+     */
+    private function borrowAstForEmbedding(): ASTNode
+    {
+        $this->ensureAST();
+        $this->astIsPrivate = false;
+        return $this->ast;
     }
 
     /**
@@ -319,7 +361,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         }
 
         // Slow path: render AST to SQL
-        $renderer = SqlRenderer::get($dialect);
+        $renderer = SqlRenderer::forDialect($dialect);
         return $renderer->renderWithParams($this->ast);
     }
 
@@ -351,70 +393,28 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     }
 
     /**
-     * Parse SQL and bind parameters, returning the AST
+     * Create a PartialQuery from any TableInterface
      *
-     * This is a utility for when you need a parsed AST with bound params
-     * but don't need a full PartialQuery (e.g., for INSERT/UPDATE/DELETE).
+     * Wraps the table in a VirtualDatabase, enabling full SQL query power
+     * on any table implementation (generators, arrays, CSV files, etc.).
      *
-     * @param string $sql SQL to parse
-     * @param array $params Parameters to bind
-     * @return ASTNode Parsed AST with bound PlaceholderNodes
+     * ```php
+     * $users = PartialQuery::fromTable($generatorTable)
+     *     ->eq('status', 'active')
+     *     ->where('age BETWEEN ? AND ?', [18, 65])
+     *     ->order('name')
+     *     ->limit(10);
+     * ```
      */
-    public static function parseWithParams(string $sql, array $params = []): ASTNode
+    public static function fromTable(TableInterface $table): self
     {
-        $parser = new SqlParser();
-        $ast = $parser->parse($sql);
+        $vdb = new VirtualDatabase();
+        $vdb->registerTable('_', $table);
+        $query = $vdb->query('SELECT * FROM _');
 
-        if (!empty($params)) {
-            $paramsCopy = $params;
-            self::bindParamsToASTStatic($ast, $paramsCopy);
-        }
-
-        return $ast;
-    }
-
-    /**
-     * Static version of bindParamsToAST for use by parseWithParams
-     */
-    private static function bindParamsToASTStatic(ASTNode $node, array &$params): int
-    {
-        $bound = 0;
-
-        if ($node instanceof PlaceholderNode) {
-            if (str_starts_with($node->token, ':')) {
-                $name = substr($node->token, 1);
-                if (!array_key_exists($name, $params)) {
-                    throw new \RuntimeException("Missing parameter for placeholder :$name");
-                }
-                $node->bind($params[$name]);
-            } else {
-                if (empty($params)) {
-                    throw new \RuntimeException('Not enough parameters for placeholders in query');
-                }
-                $node->bind(array_shift($params));
-            }
-            return 1;
-        }
-
-        foreach (get_object_vars($node) as $value) {
-            if ($value instanceof ASTNode) {
-                $bound += self::bindParamsToASTStatic($value, $params);
-            } elseif (is_array($value)) {
-                foreach ($value as $item) {
-                    if ($item instanceof ASTNode) {
-                        $bound += self::bindParamsToASTStatic($item, $params);
-                    } elseif (is_array($item)) {
-                        foreach ($item as $subItem) {
-                            if ($subItem instanceof ASTNode) {
-                                $bound += self::bindParamsToASTStatic($subItem, $params);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        return $bound;
+        // Extract internal PartialQuery via reflection
+        $ref = new \ReflectionProperty(Query::class, 'pq');
+        return $ref->getValue($query);
     }
 
     /**
@@ -581,39 +581,110 @@ final class PartialQuery implements ResultSetInterface, TableInterface
     }
 
     /**
+     * AND a predicate to the WHERE clause (internal helper)
+     *
+     * Handles pagination barrier automatically.
+     */
+    private function andPredicate(ASTNode $predicate): self
+    {
+        if ($this->hasPagination()) {
+            return $this->barrier()->andPredicate($predicate);
+        }
+
+        $new = clone $this;
+        $select = $new->getModifiableSelect();
+
+        if ($select->where === null) {
+            $select->where = $predicate;
+        } else {
+            $select->where = new BinaryOperation($select->where, 'AND', $predicate);
+        }
+
+        return $new;
+    }
+
+    /**
+     * Return a query that matches no rows (WHERE 1=0)
+     */
+    private function matchNone(): self
+    {
+        $new = clone $this;
+        $select = $new->getModifiableSelect();
+        $select->where = new BinaryOperation(
+            new LiteralNode(1, 'number'),
+            '=',
+            new LiteralNode(0, 'number')
+        );
+        return $new;
+    }
+
+    /**
+     * Create column identifier from name (handles table.column)
+     */
+    private function columnNode(string $column): IdentifierNode
+    {
+        return new IdentifierNode(explode('.', $column));
+    }
+
+    /**
+     * Create a placeholder with value pre-bound
+     */
+    private function boundPlaceholder(mixed $value): PlaceholderNode
+    {
+        $node = new PlaceholderNode('?');
+        $node->bind($value);
+        return $node;
+    }
+
+    /**
      * Add WHERE column = value clause (NULL -> IS NULL)
      */
     public function eq(string $column, mixed $value): self
     {
-        $col = $this->db->quoteIdentifier($column);
         if ($value === null) {
-            return $this->where("$col IS NULL");
+            return $this->andPredicate(new IsNullOperation($this->columnNode($column), false));
         }
-        return $this->where("$col = ?", [$value]);
+        return $this->andPredicate(new BinaryOperation(
+            $this->columnNode($column),
+            '=',
+            $this->boundPlaceholder($value)
+        ));
     }
 
     public function lt(string $column, mixed $value): self
     {
-        $col = $this->db->quoteIdentifier($column);
-        return $this->where("$col < ?", [$value]);
+        return $this->andPredicate(new BinaryOperation(
+            $this->columnNode($column),
+            '<',
+            $this->boundPlaceholder($value)
+        ));
     }
 
     public function lte(string $column, mixed $value): self
     {
-        $col = $this->db->quoteIdentifier($column);
-        return $this->where("$col <= ?", [$value]);
+        return $this->andPredicate(new BinaryOperation(
+            $this->columnNode($column),
+            '<=',
+            $this->boundPlaceholder($value)
+        ));
     }
 
     public function gt(string $column, mixed $value): self
     {
-        $col = $this->db->quoteIdentifier($column);
-        return $this->where("$col > ?", [$value]);
+        return $this->andPredicate(new BinaryOperation(
+            $this->columnNode($column),
+            '>',
+            $this->boundPlaceholder($value)
+        ));
     }
 
     public function gte(string $column, mixed $value): self
     {
-        $col = $this->db->quoteIdentifier($column);
-        return $this->where("$col >= ?", [$value]);
+        return $this->andPredicate(new BinaryOperation(
+            $this->columnNode($column),
+            '>=',
+            $this->boundPlaceholder($value)
+        ));
     }
 
     /**
@@ -626,15 +697,13 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function in(string $column, array|SetInterface $values): self
     {
-        $col = $this->db->quoteIdentifier($column);
-
         // Plain array - most common case
         if (is_array($values)) {
             if ($values === []) {
-                return $this->where('1 = 0');
+                return $this->matchNone();
             }
-            $placeholders = implode(', ', array_fill(0, count($values), '?'));
-            return $this->where("$col IN ($placeholders)", array_values($values));
+            $literals = array_map(fn($v) => $this->boundPlaceholder($v), array_values($values));
+            return $this->andPredicate(new InOperation($this->columnNode($column), $literals, false));
         }
 
         // PartialQuery subquery case - use real SQL subquery
@@ -646,15 +715,10 @@ final class PartialQuery implements ResultSetInterface, TableInterface
                     $vars = get_object_vars($row);
                     $list[] = reset($vars);
                 }
-                if ($list === []) {
-                    return $this->where('1 = 0');
-                }
-                $placeholders = implode(', ', array_fill(0, count($list), '?'));
-                return $this->where("$col IN ($placeholders)", $list);
+                return $this->in($column, $list);
             }
 
             // Same database: use real SQL subquery via AST (no materialization)
-            // If pagination exists, wrap in barrier first to preserve window semantics
             if ($this->hasPagination()) {
                 return $this->barrier()->in($column, $values);
             }
@@ -662,24 +726,20 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             $new = clone $this;
             $new->mergeCTEsFrom($values);
 
-            // Parse column name to identifier parts
-            $columnParts = explode('.', $column);
-            $columnNode = new IdentifierNode($columnParts);
+            // Borrow AST - marks $values as shared so it clones on mutation
+            $inCondition = new InOperation(
+                $this->columnNode($column),
+                new SubqueryNode($values->borrowAstForEmbedding()),
+                false
+            );
 
-            // Create InOperation with SubqueryNode - share the subquery's AST directly
-            // (copy-on-write: we mark as not private, clone happens only if we mutate later)
-            $subqueryNode = new SubqueryNode($values->ast);
-            $inCondition = new InOperation($columnNode, $subqueryNode, false);
-
-            // Add to WHERE clause - this triggers copy-on-write if needed
+            // Add to WHERE clause - mark $new as shared since we reference external AST
             $select = $new->getModifiableSelect();
             if ($select->where === null) {
                 $select->where = $inCondition;
             } else {
                 $select->where = new BinaryOperation($select->where, 'AND', $inCondition);
             }
-
-            // Mark AST as shared since we're referencing external nodes
             $new->astIsPrivate = false;
 
             return $new;
@@ -698,12 +758,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             }
         }
 
-        if ($list === []) {
-            return $this->where('1 = 0');
-        }
-
-        $placeholders = implode(', ', array_fill(0, count($list), '?'));
-        return $this->where("$col IN ($placeholders)", $list);
+        return $this->in($column, $list);
     }
 
     /**
@@ -711,8 +766,11 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function like(string $column, string $pattern): self
     {
-        $col = $this->db->quoteIdentifier($column);
-        return $this->where("$col LIKE ?", [$pattern]);
+        return $this->andPredicate(new LikeOperation(
+            $this->columnNode($column),
+            $this->boundPlaceholder($pattern),
+            false
+        ));
     }
 
     /**
@@ -730,13 +788,13 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             throw new \InvalidArgumentException("Cannot union PartialQueries from different databases");
         }
 
-        $this->ensureAST();
         $new = clone $this;
+        $new->ensureMutableAST();  // Ensure we own our AST before mutating
 
         // Create UnionNode from inner queries (without CTE wrappers)
         // CTEs will be merged at the outer level
         $leftInner = $new->getInnerQuery();
-        $rightInner = $other->getAST();
+        $rightInner = $other->getAST();  // Deep-clones $other's AST
         if ($rightInner instanceof WithStatement) {
             $rightInner = $rightInner->query;
         }
@@ -752,9 +810,6 @@ final class PartialQuery implements ResultSetInterface, TableInterface
 
         // Merge CTEs from other query
         $new->mergeCTEsFrom($other);
-
-        // Note: other query's params are already bound in its AST.
-        // When we render the union, params are collected in order (left then right).
 
         return $new;
     }
@@ -775,12 +830,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             throw new \InvalidArgumentException("Cannot except PartialQueries from different databases");
         }
 
-        $this->ensureAST();
         $new = clone $this;
+        $new->ensureMutableAST();  // Ensure we own our AST before mutating
 
         // Create EXCEPT node from inner queries (without CTE wrappers)
         $leftInner = $new->getInnerQuery();
-        $rightInner = $other->getAST();
+        $rightInner = $other->getAST();  // Deep-clones $other's AST
         if ($rightInner instanceof WithStatement) {
             $rightInner = $rightInner->query;
         }
@@ -804,20 +859,20 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      * Merge CTEs from another query into this one
      *
      * Used by union/except to combine CTEs from both queries.
-     * Duplicate CTEs with identical definitions are silently deduplicated.
+     * CTEs with same name and same AST object are deduplicated.
      *
      * @throws \LogicException If conflicting CTE definitions are detected
      */
     private function mergeCTEsFrom(self $other): void
     {
-        $otherAst = $other->getAST();
-        if (!$otherAst instanceof WithStatement) {
+        $other->ensureAST();
+        if (!$other->ast instanceof WithStatement) {
             return; // No CTEs to merge
         }
 
         $with = $this->ensureWithStatement();
 
-        foreach ($otherAst->ctes as $foreignCte) {
+        foreach ($other->ast->ctes as $foreignCte) {
             $existingIdx = $this->findCTEIndex($foreignCte['name']);
             if ($existingIdx !== null) {
                 // Same name - only skip if it's literally the same AST node
@@ -828,9 +883,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
                     "Conflicting CTE definition for '{$foreignCte['name']}' between combined PartialQueries."
                 );
             }
-            // Bring in the foreign CTE - mark AST as shared since we're referencing external nodes
-            $with->ctes[] = $foreignCte;
-            $this->astIsPrivate = false;
+            // Deep-clone the foreign CTE query to avoid aliasing
+            $with->ctes[] = [
+                'name' => $foreignCte['name'],
+                'columns' => $foreignCte['columns'],
+                'query' => $foreignCte['query']->deepClone(),
+            ];
         }
     }
 
@@ -953,7 +1011,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             );
         }
 
-        // Merge source CTEs into our WithStatement
+        // Merge source CTEs into our WithStatement (already deep-cloned via getAST())
         foreach ($sourceCtes as $foreignCte) {
             $existingIdx = $new->findCTEIndex($foreignCte['name']);
             if ($existingIdx !== null) {
@@ -966,7 +1024,6 @@ final class PartialQuery implements ResultSetInterface, TableInterface
                 );
             }
             $with->ctes[] = $foreignCte;
-            $this->astIsPrivate = false;
         }
 
         // Add the new CTE
@@ -1052,6 +1109,14 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         $new->ensureMutableAST();
         $new->selectCalled = true;
 
+        // Extract CTEs - they must bubble up (can't be inside subquery)
+        $ctes = [];
+        $innerAst = $new->ast;
+        if ($new->ast instanceof WithStatement) {
+            $ctes = $new->ast->ctes;
+            $innerAst = $new->ast->query;
+        }
+
         $wrapper = new SelectStatement();
 
         $parser = new SqlParser();
@@ -1065,10 +1130,15 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             $wrapper->columns = [new ColumnNode(new IdentifierNode([$selectPart]))];
         }
 
-        $wrapper->from = new SubqueryNode($new->ast);
+        $wrapper->from = new SubqueryNode($innerAst);
         $wrapper->fromAlias = '_q';
 
-        $new->ast = $wrapper;
+        // Re-apply CTEs to the outside
+        if (!empty($ctes)) {
+            $new->ast = new WithStatement($ctes, false, $wrapper);
+        } else {
+            $new->ast = $wrapper;
+        }
         return $new;
     }
 
@@ -1179,6 +1249,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function order(?string $orderSpec): TableInterface
     {
+        // If pagination exists, barrier first to preserve row membership
+        // Without barrier, ORDER BY could change which rows are selected
+        if ($this->hasPagination()) {
+            return $this->barrier()->order($orderSpec);
+        }
+
         $new = clone $this;
         $select = $new->getModifiableSelect();
 
@@ -1270,11 +1346,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     protected function barrier(): self
     {
-        $this->ensureAST();
+        // Borrow AST - marks $this as shared so it clones on mutation
+        $ast = $this->borrowAstForEmbedding();
         $new = clone $this;
 
         // Wrap the entire AST (including any CTEs) in a subquery
-        $new->ast = $new->wrapInSelect($this->ast);
+        $new->ast = $new->wrapInSelect($ast);
 
         return $new;
     }
@@ -1284,6 +1361,12 @@ final class PartialQuery implements ResultSetInterface, TableInterface
      */
     public function distinct(): TableInterface
     {
+        // If pagination exists, barrier first to preserve row membership
+        // Without barrier, DISTINCT could change which rows are selected
+        if ($this->hasPagination()) {
+            return $this->barrier()->distinct();
+        }
+
         return new DistinctTable($this);
     }
 
@@ -1600,7 +1683,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         }
 
         // Derive SQL and params from the WHERE clause (params are bound in PlaceholderNodes)
-        $renderer = SqlRenderer::get($this->db->getDialect());
+        $renderer = SqlRenderer::forDialect($this->db->getDialect());
         [$sql, $params] = $renderer->renderWithParams($select->where);
 
         return [
@@ -1684,25 +1767,186 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         return $this->limit(1)->one() !== null;
     }
 
+    /** @var array<string, ColumnDef>|null Cached column definitions */
+    private ?array $columnCache = null;
+
     /**
      * Get column definitions
      *
-     * PartialQuery doesn't track column metadata - returns empty array.
-     * Use columns() to specify projection.
+     * Returns columns from the database schema for single-table SELECT * queries,
+     * or extracts column names from the AST for explicit column lists.
+     * Returns empty array for complex queries (JOINs, UNIONs, subqueries).
+     *
+     * @return array<string, ColumnDef>
      */
     public function getColumns(): array
     {
-        return [];
+        return $this->getAllColumns();
     }
 
     /**
      * Get all column definitions (including hidden columns)
      *
-     * PartialQuery doesn't track column metadata - returns empty array.
+     * Fetches column information from:
+     * - Database schema for single-table SELECT * queries
+     * - AST column list for explicit projections
+     * - Returns empty array for complex queries
+     *
+     * @return array<string, ColumnDef>
      */
     public function getAllColumns(): array
     {
-        return [];
+        if ($this->columnCache !== null) {
+            return $this->columnCache;
+        }
+
+        $this->columnCache = $this->fetchColumnDefinitions();
+        return $this->columnCache;
+    }
+
+    /**
+     * Fetch column definitions from schema or AST
+     *
+     * @return array<string, ColumnDef>
+     */
+    private function fetchColumnDefinitions(): array
+    {
+        $this->ensureAST();
+
+        // Get the inner SELECT (skip WithStatement wrapper if present)
+        $ast = $this->ast;
+        if ($ast instanceof WithStatement) {
+            $ast = $ast->query;
+        }
+
+        // Complex queries (UNION, etc.) - can't determine columns
+        if (!$ast instanceof SelectStatement) {
+            return [];
+        }
+
+        // JOINs - complex, skip for now
+        if (!empty($ast->joins)) {
+            return [];
+        }
+
+        // Check if SELECT * from single table
+        $columns = $ast->columns;
+        if (count($columns) === 1
+            && $columns[0] instanceof ColumnNode
+            && $columns[0]->expression instanceof IdentifierNode
+            && $columns[0]->expression->isWildcard()
+        ) {
+            // SELECT * - fetch from schema
+            return $this->fetchSchemaColumns($ast);
+        }
+
+        // Explicit column list - extract from AST
+        return $this->extractColumnsFromAST($columns);
+    }
+
+    /**
+     * Fetch column definitions from database schema
+     *
+     * @return array<string, ColumnDef>
+     */
+    private function fetchSchemaColumns(SelectStatement $ast): array
+    {
+        // Need a simple table reference
+        if (!$ast->from instanceof IdentifierNode) {
+            return [];
+        }
+
+        $tableName = $ast->from->getFullName();
+        $result = [];
+
+        foreach ($this->db->getSchema()->eq('table_name', $tableName)->eq('type', 'column') as $col) {
+            $type = $this->mapSqlTypeToColumnType($col->data_type ?? 'TEXT');
+            $result[$col->name] = new ColumnDef($col->name, $type);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Extract column definitions from explicit SELECT list
+     *
+     * @param ColumnNode[] $columns
+     * @return array<string, ColumnDef>
+     */
+    private function extractColumnsFromAST(array $columns): array
+    {
+        $result = [];
+
+        foreach ($columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                continue;
+            }
+
+            // Use alias if present, otherwise try to get column name from expression
+            $name = $col->alias;
+            if ($name === null) {
+                if ($col->expression instanceof IdentifierNode) {
+                    $name = $col->expression->getName();
+                } elseif ($col->expression instanceof FunctionCallNode) {
+                    // For functions like COUNT(*), use the function name as fallback
+                    $name = strtolower($col->expression->name);
+                } else {
+                    // Skip columns we can't name
+                    continue;
+                }
+            }
+
+            // Default to Text type - we don't know the actual type without schema
+            $result[$name] = new ColumnDef($name, ColumnType::Text);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Map SQL data type string to ColumnType
+     */
+    private function mapSqlTypeToColumnType(?string $sqlType): ColumnType
+    {
+        if ($sqlType === null) {
+            return ColumnType::Text;
+        }
+
+        $sqlType = strtoupper($sqlType);
+
+        // Integer types
+        if (str_contains($sqlType, 'INT')) {
+            return ColumnType::Int;
+        }
+
+        // Float types
+        if (str_contains($sqlType, 'REAL') || str_contains($sqlType, 'FLOAT') || str_contains($sqlType, 'DOUBLE')) {
+            return ColumnType::Float;
+        }
+
+        // Decimal types
+        if (str_contains($sqlType, 'DECIMAL') || str_contains($sqlType, 'NUMERIC')) {
+            return ColumnType::Decimal;
+        }
+
+        // Date/time types
+        if ($sqlType === 'DATE') {
+            return ColumnType::Date;
+        }
+        if ($sqlType === 'TIME') {
+            return ColumnType::Time;
+        }
+        if (str_contains($sqlType, 'DATETIME') || str_contains($sqlType, 'TIMESTAMP')) {
+            return ColumnType::DateTime;
+        }
+
+        // Binary types
+        if (str_contains($sqlType, 'BLOB') || str_contains($sqlType, 'BINARY')) {
+            return ColumnType::Binary;
+        }
+
+        // Default to Text
+        return ColumnType::Text;
     }
 
     /**
@@ -1879,7 +2123,7 @@ final class PartialQuery implements ResultSetInterface, TableInterface
             return ['sql' => '', 'params' => []];
         }
 
-        $renderer = SqlRenderer::get($this->db->getDialect());
+        $renderer = SqlRenderer::forDialect($this->db->getDialect());
         $withParts = [];
         foreach ($this->ast->ctes as $cte) {
             $withParts[] = $cte['name'] . ' AS (' . $renderer->render($cte['query']) . ')';
@@ -1927,5 +2171,112 @@ final class PartialQuery implements ResultSetInterface, TableInterface
         });
 
         return (string) $tree;
+    }
+
+    // =========================================================================
+    // MutableTableInterface implementation
+    // =========================================================================
+
+    /**
+     * Insert a new row into the underlying table
+     *
+     * The row must match ALL query constraints (WHERE clause conditions).
+     * This ensures you can only insert rows that would be visible in this query.
+     *
+     * ```php
+     * $users = db()->query('SELECT * FROM users WHERE org_id = ?', [5]);
+     * $users->insert(['org_id' => 5, 'name' => 'John']);  // OK
+     * $users->insert(['org_id' => 6, 'name' => 'Jane']);  // Throws - wrong org_id
+     * ```
+     *
+     * @throws \RuntimeException If row doesn't match query constraints
+     * @throws \RuntimeException If query is not single-table
+     */
+    public function insert(array $row): int|string
+    {
+        if (!$this->isSingleTable()) {
+            throw new \RuntimeException("Cannot insert: query has JOINs, UNIONs, or complex FROM");
+        }
+
+        // Check row matches ALL query constraints
+        if (!$this->matches((object) $row)) {
+            throw new \RuntimeException("Cannot insert: row violates query constraints");
+        }
+
+        return $this->db->insert($this->getSourceTable(), $row);
+    }
+
+    /**
+     * Update rows matching this query
+     *
+     * Updates are scoped to rows matching this query's WHERE clause.
+     * The $query parameter allows additional filtering within that scope.
+     *
+     * ```php
+     * $users = db()->query('SELECT * FROM users WHERE org_id = ?', [5]);
+     * $users->update($users->eq('active', false), ['status' => 'inactive']);
+     * // Only updates inactive users within org_id = 5
+     * ```
+     *
+     * @param TableInterface $query Query defining which rows to update (must be derived from this query)
+     * @param array $changes Column => value pairs to update
+     * @throws \RuntimeException If query is not single-table
+     */
+    public function update(TableInterface $query, array $changes): int
+    {
+        if (!$this->isSingleTable()) {
+            throw new \RuntimeException("Cannot update: query has JOINs, UNIONs, or complex FROM");
+        }
+
+        // Get the filtering query
+        $filterQuery = $query instanceof self ? $query : $this;
+
+        // Combine base constraints with filter query
+        $combinedQuery = $this->combineWithFilter($filterQuery);
+
+        return $this->db->update($combinedQuery, $changes);
+    }
+
+    /**
+     * Delete rows matching this query
+     *
+     * Deletes are scoped to rows matching this query's WHERE clause.
+     * The $query parameter allows additional filtering within that scope.
+     *
+     * ```php
+     * $users = db()->query('SELECT * FROM users WHERE org_id = ?', [5]);
+     * $users->delete($users->eq('status', 'deleted'));
+     * // Only deletes users with status='deleted' within org_id = 5
+     * ```
+     *
+     * @param TableInterface $query Query defining which rows to delete (must be derived from this query)
+     * @throws \RuntimeException If query is not single-table
+     */
+    public function delete(TableInterface $query): int
+    {
+        if (!$this->isSingleTable()) {
+            throw new \RuntimeException("Cannot delete: query has JOINs, UNIONs, or complex FROM");
+        }
+
+        // Get the filtering query
+        $filterQuery = $query instanceof self ? $query : $this;
+
+        // Combine base constraints with filter query
+        $combinedQuery = $this->combineWithFilter($filterQuery);
+
+        return $this->db->delete($combinedQuery);
+    }
+
+    /**
+     * Combine this query's constraints with a filter query
+     */
+    private function combineWithFilter(self $filterQuery): self
+    {
+        // If filter query has additional WHERE conditions, apply them
+        $where = $filterQuery->getWhere();
+        if ($where['sql'] !== '') {
+            return $this->where($where['sql'], $where['params']);
+        }
+        return $this;
     }
 }

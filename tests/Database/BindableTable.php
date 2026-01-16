@@ -1,12 +1,14 @@
 <?php
 /**
- * Test Table wrapper with parameter binding
+ * Test BindableTable wrapper with parameter binding
+ *
+ * @internal This tests internal implementation used by VirtualDatabase
  */
 
 require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
-use mini\Table\Table;
+use mini\Database\BindableTable;
 use mini\Table\InMemoryTable;
 use mini\Table\ColumnDef;
 use mini\Table\Types\ColumnType;
@@ -37,7 +39,7 @@ $test = new class extends Test {
     public function testFromWrapsTable(): void
     {
         $source = $this->createUsersTable();
-        $table = Table::from($source);
+        $table = BindableTable::from($source);
 
         $rows = iterator_to_array($table);
         $this->assertCount(3, $rows);
@@ -46,15 +48,15 @@ $test = new class extends Test {
     public function testFromReturnsExistingTable(): void
     {
         $source = $this->createUsersTable();
-        $table = Table::from($source);
-        $table2 = Table::from($table);
+        $table = BindableTable::from($source);
+        $table2 = BindableTable::from($table);
 
         $this->assertSame($table, $table2);
     }
 
     public function testDelegatesEq(): void
     {
-        $table = Table::from($this->createUsersTable());
+        $table = BindableTable::from($this->createUsersTable());
         $filtered = $table->eq('status', 'active');
 
         $rows = iterator_to_array($filtered);
@@ -63,7 +65,7 @@ $test = new class extends Test {
 
     public function testDelegatesColumns(): void
     {
-        $table = Table::from($this->createUsersTable());
+        $table = BindableTable::from($this->createUsersTable());
         $projected = $table->columns('name');
 
         $rows = array_values(iterator_to_array($projected));
@@ -74,7 +76,7 @@ $test = new class extends Test {
 
     public function testDelegatesLimit(): void
     {
-        $table = Table::from($this->createUsersTable());
+        $table = BindableTable::from($this->createUsersTable());
         $limited = $table->limit(2);
 
         $rows = iterator_to_array($limited);
@@ -83,7 +85,7 @@ $test = new class extends Test {
 
     public function testDelegatesOrder(): void
     {
-        $table = Table::from($this->createUsersTable());
+        $table = BindableTable::from($this->createUsersTable());
         $ordered = $table->order('age DESC');
 
         $rows = array_values(iterator_to_array($ordered));
@@ -96,7 +98,7 @@ $test = new class extends Test {
 
     public function testEqBindAndBind(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->eqBind('status', ':status');
 
         // Before binding - should have unbound param
@@ -113,7 +115,7 @@ $test = new class extends Test {
 
     public function testPositionalBinding(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->eqBind('status', 0)
             ->eqBind('age', 1);
 
@@ -126,7 +128,7 @@ $test = new class extends Test {
 
     public function testPartialBinding(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->eqBind('status', ':status')
             ->gtBind('age', ':min_age');
 
@@ -147,7 +149,7 @@ $test = new class extends Test {
     public function testRebindableQuery(): void
     {
         // Create reusable query template
-        $template = Table::from($this->createUsersTable())
+        $template = BindableTable::from($this->createUsersTable())
             ->eqBind('status', ':status')
             ->columns('name');
 
@@ -167,7 +169,7 @@ $test = new class extends Test {
     {
         // WHERE age > :val AND age < :val (range with same param)
         // Using age > 25 AND age < 35 should give Alice (30)
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->gtBind('age', ':val')
             ->ltBind('age', ':val2');
 
@@ -175,7 +177,7 @@ $test = new class extends Test {
         // Simulating with: age > :bound AND id < :bound
         // age > 2 AND id < 2 = nobody
         // age > 1 AND id < 3 = Alice (age 30 > 1, id 1 < 3), Bob (age 25 > 1, id 2 < 3)
-        $table2 = Table::from($this->createUsersTable())
+        $table2 = BindableTable::from($this->createUsersTable())
             ->gtBind('age', ':bound')
             ->ltBind('id', ':bound');
 
@@ -186,7 +188,7 @@ $test = new class extends Test {
 
     public function testAllBindOperators(): void
     {
-        $table = Table::from($this->createUsersTable());
+        $table = BindableTable::from($this->createUsersTable());
 
         // ltBind
         $lt = $table->ltBind('age', ':max')->bind([':max' => 30]);
@@ -215,7 +217,7 @@ $test = new class extends Test {
 
     public function testIteratingUnboundThrows(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->eqBind('status', ':status');
 
         $this->expectException(RuntimeException::class);
@@ -224,7 +226,7 @@ $test = new class extends Test {
 
     public function testCountUnboundThrows(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->eqBind('status', ':status');
 
         $this->expectException(RuntimeException::class);
@@ -233,7 +235,7 @@ $test = new class extends Test {
 
     public function testExistsUnboundThrows(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->eqBind('status', ':status');
 
         $this->expectException(RuntimeException::class);
@@ -242,7 +244,7 @@ $test = new class extends Test {
 
     public function testBindUnknownParamThrows(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->eqBind('status', ':status');
 
         $this->expectException(InvalidArgumentException::class);
@@ -255,7 +257,7 @@ $test = new class extends Test {
 
     public function testBindIsImmutable(): void
     {
-        $template = Table::from($this->createUsersTable())
+        $template = BindableTable::from($this->createUsersTable())
             ->eqBind('status', ':status');
 
         $bound = $template->bind([':status' => 'active']);
@@ -267,7 +269,7 @@ $test = new class extends Test {
 
     public function testEqBindIsImmutable(): void
     {
-        $table = Table::from($this->createUsersTable());
+        $table = BindableTable::from($this->createUsersTable());
         $withBind = $table->eqBind('status', ':status');
 
         // Original should have no binds
@@ -277,7 +279,7 @@ $test = new class extends Test {
 
     public function testDelegatedMethodsAreImmutable(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->eqBind('status', ':status');
 
         $filtered = $table->eq('age', 30);
@@ -295,7 +297,7 @@ $test = new class extends Test {
     {
         // This is the key test: columns() before eqBind() should still allow
         // filtering on the projected-away column
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->columns('id', 'name')           // Project away 'status'
             ->eqBind('status', ':status')     // But we still want to filter on it
             ->bind([':status' => 'active']);
@@ -310,7 +312,7 @@ $test = new class extends Test {
     public function testColumnsAfterBindAlsoWorks(): void
     {
         // The "normal" order should also work
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->eqBind('status', ':status')
             ->columns('id', 'name')
             ->bind([':status' => 'active']);
@@ -322,7 +324,7 @@ $test = new class extends Test {
 
     public function testGetColumnsReflectsDeferredProjection(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->columns('id', 'name');
 
         $cols = array_keys($table->getColumns());
@@ -331,7 +333,7 @@ $test = new class extends Test {
 
     public function testMultipleColumnsCallsNarrow(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->columns('id', 'name', 'age')
             ->columns('id', 'name');  // Narrows to intersection
 
@@ -342,7 +344,7 @@ $test = new class extends Test {
     public function testColumnsCannotExpand(): void
     {
         // Security: once projected, cannot re-add removed columns
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->columns('id', 'name');  // Hides 'status' and 'age'
 
         $attempted = $table->columns('id', 'name', 'status');  // Try to add 'status' back
@@ -354,7 +356,7 @@ $test = new class extends Test {
 
     public function testColumnsCanNarrowToEmpty(): void
     {
-        $table = Table::from($this->createUsersTable())
+        $table = BindableTable::from($this->createUsersTable())
             ->columns('id', 'name')
             ->columns('status');  // Not in previous projection
 

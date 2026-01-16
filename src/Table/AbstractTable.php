@@ -467,7 +467,10 @@ abstract class AbstractTable implements TableInterface
         $count = 0;
 
         foreach ($this->materialize() as $id => $row) {
-            $projected = (object) array_intersect_key((array) $row, $visibleCols);
+            // Project to visible columns only, unless columns are unknown (empty = pass through)
+            $projected = empty($visibleCols)
+                ? $row
+                : (object) array_intersect_key((array) $row, $visibleCols);
 
             // Buffer if under limit
             if ($buffer !== null) {

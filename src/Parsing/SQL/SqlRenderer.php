@@ -36,21 +36,18 @@ use mini\Parsing\SQL\AST\{
  *
  * Usage:
  * ```php
- * $renderer = new SqlRenderer();
+ * $renderer = SqlRenderer::forDialect(SqlDialect::MySQL);
  * $sql = $renderer->render($ast);
  *
  * // Or with params collection (for prepared statements):
  * [$sql, $params] = $renderer->renderWithParams($ast);
- *
- * // For dialect-specific SQL:
- * $renderer = SqlRenderer::forDialect(SqlDialect::MySQL);
  * ```
  */
 class SqlRenderer
 {
     private SqlDialect $dialect;
 
-    public function __construct(SqlDialect $dialect = SqlDialect::Generic)
+    private function __construct(SqlDialect $dialect)
     {
         $this->dialect = $dialect;
     }
@@ -58,21 +55,9 @@ class SqlRenderer
     /**
      * Create a renderer for a specific SQL dialect
      */
-    public static function forDialect(SqlDialect $dialect): self
+    public static function forDialect(SqlDialect $dialect = SqlDialect::Generic): self
     {
         return new self($dialect);
-    }
-
-    /**
-     * Get a cached renderer for the specified dialect
-     *
-     * Reuses renderer instances per dialect for efficiency.
-     */
-    public static function get(SqlDialect $dialect = SqlDialect::Generic): self
-    {
-        static $renderers = [];
-        $key = $dialect->name;
-        return $renderers[$key] ??= new self($dialect);
     }
 
     /**
@@ -362,7 +347,8 @@ class SqlRenderer
                 $parts[] = $part;
             } elseif (preg_match('/[^a-zA-Z0-9_]/', $part)) {
                 // Quote if contains special characters (spaces, etc.)
-                $parts[] = '"' . str_replace('"', '""', $part) . '"';
+                // Use dialect-specific quoting (backticks for MySQL, brackets for SQL Server, etc.)
+                $parts[] = $this->dialect->quoteIdentifier($part);
             } else {
                 $parts[] = $part;
             }
@@ -556,201 +542,6 @@ class SqlRenderer
     }
 
     /**
-     * Deep clone an AST node and all its children
-     *
-     * Creates a completely independent copy of the AST tree.
-     * Used when adopting AST from another PartialQuery to ensure
-     * mutations don't leak across query instances.
-     *
-     * @param ASTNode $node The node to clone
-     * @return ASTNode The cloned node
-     */
-    public function deepClone(ASTNode $node): ASTNode
-    {
-        return match (true) {
-            $node instanceof WithStatement => $this->cloneWith($node),
-            $node instanceof SelectStatement => $this->cloneSelect($node),
-            $node instanceof UnionNode => $this->cloneUnion($node),
-            $node instanceof SubqueryNode => new SubqueryNode($this->deepClone($node->query)),
-            $node instanceof ColumnNode => new ColumnNode($this->deepClone($node->expression), $node->alias),
-            $node instanceof JoinNode => $this->cloneJoin($node),
-            $node instanceof IdentifierNode => new IdentifierNode($node->parts),
-            $node instanceof LiteralNode => new LiteralNode($node->value, $node->valueType),
-            $node instanceof PlaceholderNode => $this->clonePlaceholder($node),
-            $node instanceof BinaryOperation => new BinaryOperation(
-                $this->deepClone($node->left),
-                $node->operator,
-                $this->deepClone($node->right)
-            ),
-            $node instanceof UnaryOperation => new UnaryOperation(
-                $node->operator,
-                $this->deepClone($node->expression)
-            ),
-            $node instanceof InOperation => $this->cloneIn($node),
-            $node instanceof IsNullOperation => new IsNullOperation(
-                $this->deepClone($node->expression),
-                $node->negated
-            ),
-            $node instanceof LikeOperation => new LikeOperation(
-                $this->deepClone($node->left),
-                $this->deepClone($node->pattern),
-                $node->negated
-            ),
-            $node instanceof BetweenOperation => new BetweenOperation(
-                $this->deepClone($node->expression),
-                $this->deepClone($node->low),
-                $this->deepClone($node->high),
-                $node->negated
-            ),
-            $node instanceof ExistsOperation => new ExistsOperation(
-                new SubqueryNode($this->deepClone($node->subquery->query)),
-                $node->negated
-            ),
-            $node instanceof FunctionCallNode => new FunctionCallNode(
-                $node->name,
-                array_map(fn($a) => $this->deepClone($a), $node->arguments),
-                $node->distinct
-            ),
-            $node instanceof CaseWhenNode => $this->cloneCase($node),
-            $node instanceof WindowFunctionNode => $this->cloneWindow($node),
-            $node instanceof NiladicFunctionNode => new NiladicFunctionNode($node->name),
-            $node instanceof QuantifiedComparisonNode => new QuantifiedComparisonNode(
-                $this->deepClone($node->left),
-                $node->operator,
-                $node->quantifier,
-                new SubqueryNode($this->deepClone($node->subquery->query))
-            ),
-            default => throw new \RuntimeException('Cannot clone unknown AST node type: ' . get_class($node)),
-        };
-    }
-
-    private function cloneWith(WithStatement $node): WithStatement
-    {
-        $ctes = [];
-        foreach ($node->ctes as $cte) {
-            $ctes[] = [
-                'name' => $cte['name'],
-                'columns' => $cte['columns'] ?? null,
-                'query' => $this->deepClone($cte['query']),
-            ];
-        }
-        return new WithStatement($ctes, $node->recursive, $this->deepClone($node->query));
-    }
-
-    private function cloneSelect(SelectStatement $node): SelectStatement
-    {
-        $new = new SelectStatement();
-        $new->distinct = $node->distinct;
-        $new->columns = array_map(fn($c) => $this->deepClone($c), $node->columns);
-
-        if ($node->from instanceof SubqueryNode) {
-            $new->from = new SubqueryNode($this->deepClone($node->from->query));
-        } elseif ($node->from !== null) {
-            $new->from = $this->deepClone($node->from);
-        }
-
-        $new->fromAlias = $node->fromAlias;
-        $new->joins = array_map(fn($j) => $this->deepClone($j), $node->joins);
-        $new->where = $node->where !== null ? $this->deepClone($node->where) : null;
-
-        if ($node->groupBy !== null) {
-            $new->groupBy = array_map(fn($g) => $this->deepClone($g), $node->groupBy);
-        }
-
-        $new->having = $node->having !== null ? $this->deepClone($node->having) : null;
-
-        if ($node->orderBy !== null) {
-            $new->orderBy = array_map(fn($o) => [
-                'column' => $this->deepClone($o['column']),
-                'direction' => $o['direction'] ?? 'ASC',
-            ], $node->orderBy);
-        }
-
-        $new->limit = $node->limit !== null ? $this->deepClone($node->limit) : null;
-        $new->offset = $node->offset !== null ? $this->deepClone($node->offset) : null;
-
-        return $new;
-    }
-
-    private function cloneUnion(UnionNode $node): UnionNode
-    {
-        return new UnionNode(
-            $this->deepClone($node->left),
-            $this->deepClone($node->right),
-            $node->all,
-            $node->operator
-        );
-    }
-
-    private function cloneJoin(JoinNode $node): JoinNode
-    {
-        $table = $node->table instanceof SubqueryNode
-            ? new SubqueryNode($this->deepClone($node->table->query))
-            : $this->deepClone($node->table);
-
-        return new JoinNode(
-            $node->joinType,
-            $table,
-            $node->condition !== null ? $this->deepClone($node->condition) : null,
-            $node->alias
-        );
-    }
-
-    private function clonePlaceholder(PlaceholderNode $node): PlaceholderNode
-    {
-        $new = new PlaceholderNode($node->token);
-        if ($node->isBound) {
-            $new->bind($node->boundValue);
-        }
-        return $new;
-    }
-
-    private function cloneIn(InOperation $node): InOperation
-    {
-        if ($node->isSubquery()) {
-            return new InOperation(
-                $this->deepClone($node->left),
-                new SubqueryNode($this->deepClone($node->values->query)),
-                $node->negated
-            );
-        }
-
-        return new InOperation(
-            $this->deepClone($node->left),
-            array_map(fn($v) => $this->deepClone($v), $node->values),
-            $node->negated
-        );
-    }
-
-    private function cloneCase(CaseWhenNode $node): CaseWhenNode
-    {
-        $whenClauses = array_map(fn($w) => [
-            'when' => $this->deepClone($w['when']),
-            'then' => $this->deepClone($w['then']),
-        ], $node->whenClauses);
-
-        return new CaseWhenNode(
-            $node->operand !== null ? $this->deepClone($node->operand) : null,
-            $whenClauses,
-            $node->elseResult !== null ? $this->deepClone($node->elseResult) : null
-        );
-    }
-
-    private function cloneWindow(WindowFunctionNode $node): WindowFunctionNode
-    {
-        $orderBy = array_map(fn($o) => [
-            'expr' => $this->deepClone($o['expr']),
-            'direction' => $o['direction'] ?? 'ASC',
-        ], $node->orderBy);
-
-        return new WindowFunctionNode(
-            $this->deepClone($node->function),
-            array_map(fn($p) => $this->deepClone($p), $node->partitionBy),
-            $orderBy
-        );
-    }
-
-    /**
      * Rename an identifier throughout an AST
      *
      * Creates a new AST with all occurrences of $oldName replaced with $newName.
@@ -796,7 +587,7 @@ class SqlRenderer
             ),
             $node instanceof JoinNode => $this->renameInJoin($node, $oldName, $newName),
             $node instanceof LiteralNode => new LiteralNode($node->value, $node->valueType),
-            $node instanceof PlaceholderNode => $this->clonePlaceholder($node),
+            $node instanceof PlaceholderNode => $node->deepClone(),
             $node instanceof BinaryOperation => new BinaryOperation(
                 $this->renameIdentifier($node->left, $oldName, $newName),
                 $node->operator,

@@ -9,6 +9,7 @@ require __DIR__ . '/../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Database\PartialQuery;
+use mini\Database\Query;
 use mini\Database\ResultSetInterface;
 
 class TestEntity {
@@ -18,6 +19,19 @@ class TestEntity {
 
 $test = new class extends Test {
 
+    private static ?\ReflectionProperty $pqRef = null;
+
+    /**
+     * Extract the internal PartialQuery from a Query via reflection
+     */
+    private function pq(Query $query): PartialQuery
+    {
+        if (self::$pqRef === null) {
+            self::$pqRef = new \ReflectionProperty(Query::class, 'pq');
+        }
+        return self::$pqRef->getValue($query);
+    }
+
     protected function setUp(): void
     {
         // Bootstrap to get db() available
@@ -26,7 +40,7 @@ $test = new class extends Test {
 
     public function testImplementsResultSetInterface(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users');
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users'));
         $this->assertInstanceOf(ResultSetInterface::class, $pq);
     }
 
@@ -167,7 +181,7 @@ $test = new class extends Test {
 
     public function testSelectOverridesColumns(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')->select('id, name');
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users'))->select('id, name');
         $sql = (string) $pq;
 
         // When composing, base query is wrapped as subquery
@@ -205,7 +219,7 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_entities');
         \mini\db()->exec("INSERT INTO test_entities (id, name) VALUES (1, 'Test')");
 
-        $query = \mini\db()->query('SELECT * FROM test_entities')
+        $query = $this->pq(\mini\db()->query('SELECT * FROM test_entities'))
             ->withEntityClass(TestEntity::class);
 
         $this->assertSame(1, $query->count());
@@ -252,7 +266,7 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_column');
         \mini\db()->exec("INSERT INTO test_column (id, name) VALUES (1, 'A'), (2, 'B'), (3, 'C')");
 
-        $ids = \mini\db()->query('SELECT * FROM test_column')->order('id')->column();
+        $ids = $this->pq(\mini\db()->query('SELECT * FROM test_column')->order('id'))->column();
 
         $this->assertCount(3, $ids);
         $this->assertEquals([1, 2, 3], $ids); // Use assertEquals for loose comparison
@@ -266,7 +280,7 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_field');
         \mini\db()->exec("INSERT INTO test_field (id, name) VALUES (1, 'Test')");
 
-        $id = \mini\db()->query('SELECT * FROM test_field')->field();
+        $id = $this->pq(\mini\db()->query('SELECT * FROM test_field'))->field();
 
         $this->assertEquals(1, $id); // Use assertEquals for loose comparison
 
@@ -296,7 +310,7 @@ $test = new class extends Test {
         \mini\db()->exec('DELETE FROM test_json');
         \mini\db()->exec("INSERT INTO test_json (id, name) VALUES (1, 'Test')");
 
-        $json = json_encode(\mini\db()->query('SELECT * FROM test_json'));
+        $json = json_encode($this->pq(\mini\db()->query('SELECT * FROM test_json')));
 
         $this->assertContains('"id":', $json);
         $this->assertContains('"name":"Test"', $json);
@@ -330,7 +344,7 @@ $test = new class extends Test {
 
     public function testMatchesWithNoConditions(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users');
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users'));
         $row = (object)['id' => 1, 'name' => 'Test'];
 
         // No conditions = matches everything
@@ -339,7 +353,7 @@ $test = new class extends Test {
 
     public function testMatchesWithEq(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')->eq('id', 1);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')->eq('id', 1));
 
         $this->assertTrue($pq->matches((object)['id' => 1, 'name' => 'Test']));
         $this->assertFalse($pq->matches((object)['id' => 2, 'name' => 'Other']));
@@ -347,7 +361,7 @@ $test = new class extends Test {
 
     public function testMatchesWithEqNull(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')->eq('deleted_at', null);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')->eq('deleted_at', null));
 
         $this->assertTrue($pq->matches((object)['id' => 1, 'deleted_at' => null]));
         $this->assertFalse($pq->matches((object)['id' => 2, 'deleted_at' => '2024-01-01']));
@@ -355,7 +369,7 @@ $test = new class extends Test {
 
     public function testMatchesWithLt(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')->lt('age', 18);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')->lt('age', 18));
 
         $this->assertTrue($pq->matches((object)['id' => 1, 'age' => 15]));
         $this->assertFalse($pq->matches((object)['id' => 2, 'age' => 18]));
@@ -364,7 +378,7 @@ $test = new class extends Test {
 
     public function testMatchesWithLte(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')->lte('age', 18);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')->lte('age', 18));
 
         $this->assertTrue($pq->matches((object)['id' => 1, 'age' => 15]));
         $this->assertTrue($pq->matches((object)['id' => 2, 'age' => 18]));
@@ -373,7 +387,7 @@ $test = new class extends Test {
 
     public function testMatchesWithGt(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')->gt('age', 18);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')->gt('age', 18));
 
         $this->assertFalse($pq->matches((object)['id' => 1, 'age' => 15]));
         $this->assertFalse($pq->matches((object)['id' => 2, 'age' => 18]));
@@ -382,7 +396,7 @@ $test = new class extends Test {
 
     public function testMatchesWithGte(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')->gte('age', 18);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')->gte('age', 18));
 
         $this->assertFalse($pq->matches((object)['id' => 1, 'age' => 15]));
         $this->assertTrue($pq->matches((object)['id' => 2, 'age' => 18]));
@@ -391,7 +405,7 @@ $test = new class extends Test {
 
     public function testMatchesWithLike(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')->like('name', 'A%');
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')->like('name', 'A%'));
 
         $this->assertTrue($pq->matches((object)['id' => 1, 'name' => 'Alice']));
         $this->assertTrue($pq->matches((object)['id' => 2, 'name' => 'Andrew']));
@@ -400,10 +414,10 @@ $test = new class extends Test {
 
     public function testMatchesWithMultipleConditions(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')
             ->eq('org_id', 123)
             ->eq('active', 1)
-            ->gt('age', 18);
+            ->gt('age', 18));
 
         $this->assertTrue($pq->matches((object)['id' => 1, 'org_id' => 123, 'active' => 1, 'age' => 25]));
         $this->assertFalse($pq->matches((object)['id' => 2, 'org_id' => 123, 'active' => 0, 'age' => 25]));
@@ -413,9 +427,9 @@ $test = new class extends Test {
 
     public function testQueryImmutability(): void
     {
-        $pq1 = \mini\db()->query('SELECT * FROM users');
-        $pq2 = $pq1->eq('id', 1);
-        $pq3 = $pq1->eq('id', 2);
+        $pq1 = $this->pq(\mini\db()->query('SELECT * FROM users'));
+        $pq2 = $this->pq(\mini\db()->query('SELECT * FROM users')->eq('id', 1));
+        $pq3 = $this->pq(\mini\db()->query('SELECT * FROM users')->eq('id', 2));
 
         $row1 = (object)['id' => 1];
         $row2 = (object)['id' => 2];
@@ -435,7 +449,7 @@ $test = new class extends Test {
 
     public function testMatchesWithMissingColumnThrows(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')->eq('status', 'active');
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')->eq('status', 'active'));
 
         // AST-based evaluation is strict - missing columns throw
         $this->assertThrows(
@@ -451,7 +465,7 @@ $test = new class extends Test {
     public function testMatchesWithBaseSqlWhere(): void
     {
         // Query with WHERE in base SQL
-        $pq = \mini\db()->query('SELECT * FROM users WHERE status = ?', ['active']);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users WHERE status = ?', ['active']));
 
         // Row matches base SQL WHERE
         $this->assertTrue($pq->matches((object)['id' => 1, 'status' => 'active']));
@@ -463,8 +477,8 @@ $test = new class extends Test {
     public function testMatchesWithBaseSqlWhereAndPredicateCondition(): void
     {
         // Query with WHERE in base SQL AND chained condition
-        $pq = \mini\db()->query('SELECT * FROM users WHERE gender = ?', ['male'])
-            ->gte('age', 18);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users WHERE gender = ?', ['male'])
+            ->gte('age', 18));
 
         // Matches both base SQL and predicate
         $this->assertTrue($pq->matches((object)['gender' => 'male', 'age' => 25]));
@@ -479,7 +493,7 @@ $test = new class extends Test {
     public function testMatchesWithComplexBaseSqlWhere(): void
     {
         // Query with complex WHERE in base SQL
-        $pq = \mini\db()->query('SELECT * FROM users WHERE org_id = ? AND active = 1', [100]);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users WHERE org_id = ? AND active = 1', [100]));
 
         // Matches both conditions
         $this->assertTrue($pq->matches((object)['org_id' => 100, 'active' => 1]));
@@ -494,7 +508,7 @@ $test = new class extends Test {
     public function testMatchesWithBaseSqlWhereOrCondition(): void
     {
         // Query with OR in base SQL WHERE
-        $pq = \mini\db()->query('SELECT * FROM users WHERE role = ? OR role = ?', ['admin', 'moderator']);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users WHERE role = ? OR role = ?', ['admin', 'moderator']));
 
         $this->assertTrue($pq->matches((object)['role' => 'admin']));
         $this->assertTrue($pq->matches((object)['role' => 'moderator']));
@@ -504,7 +518,7 @@ $test = new class extends Test {
     public function testMatchesWithBaseSqlWhereLike(): void
     {
         // Query with LIKE in base SQL WHERE
-        $pq = \mini\db()->query("SELECT * FROM users WHERE name LIKE 'A%'");
+        $pq = $this->pq(\mini\db()->query("SELECT * FROM users WHERE name LIKE 'A%'"));
 
         $this->assertTrue($pq->matches((object)['name' => 'Alice']));
         $this->assertTrue($pq->matches((object)['name' => 'Andrew']));
@@ -589,7 +603,7 @@ $test = new class extends Test {
     public function testSelectWithUnaryOperationValidatesColumns(): void
     {
         // This test catches the UnaryOperation->operand vs ->expression bug
-        $pq = \mini\db()->query('SELECT * FROM users')->columns('a', 'b');
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')->columns('a', 'b'));
 
         // Unary expression referencing available column should work
         $pq2 = $pq->select('-a as neg_a');
@@ -609,8 +623,8 @@ $test = new class extends Test {
 
     public function testSelectWithComputedColumnUpdatesAvailable(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')
-            ->columns('a', 'b')
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')
+            ->columns('a', 'b'))
             ->select('a + b as sum');
 
         // After select, only 'sum' should be available
@@ -698,7 +712,7 @@ $test = new class extends Test {
     public function testGetSqlFastPathUnmodifiedQuery(): void
     {
         $originalSql = 'SELECT * FROM users WHERE id = ?';
-        $pq = \mini\db()->query($originalSql, [42]);
+        $pq = $this->pq(\mini\db()->query($originalSql, [42]));
 
         // Fast path: AST not parsed, returns original SQL
         [$sql, $params] = $pq->getSql();
@@ -708,8 +722,8 @@ $test = new class extends Test {
 
     public function testGetSqlSlowPathModifiedQuery(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')
-            ->eq('id', 42);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')
+            ->eq('id', 42));
 
         // Slow path: AST was modified, SQL is rendered
         [$sql, $params] = $pq->getSql();
@@ -719,8 +733,8 @@ $test = new class extends Test {
 
     public function testGetSqlAfterLimitStillReturnsValidSql(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')
-            ->limit(10);
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')
+            ->limit(10));
 
         [$sql, $params] = $pq->getSql();
         $this->assertContains('LIMIT', $sql);
@@ -793,8 +807,8 @@ $test = new class extends Test {
 
     public function testSelectValidatesColumnReferences(): void
     {
-        $pq = \mini\db()->query('SELECT * FROM users')
-            ->columns('a', 'b');
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM users')
+            ->columns('a', 'b'));
 
         // Can use available columns in expressions
         $valid = $pq->select('a, b, a + b as sum');
@@ -836,6 +850,238 @@ $test = new class extends Test {
         $sql3 = (string) $pq3;
         $this->assertContains('id', $sql3);
         $this->assertContains('email', $sql3);
+    }
+
+    // === fromTable() tests ===
+
+    public function testFromTableCreatesQueryablePartialQuery(): void
+    {
+        $table = new \mini\Table\GeneratorTable(
+            fn() => yield from [
+                1 => (object)['id' => 1, 'name' => 'Alice', 'status' => 'active'],
+                2 => (object)['id' => 2, 'name' => 'Bob', 'status' => 'inactive'],
+                3 => (object)['id' => 3, 'name' => 'Carol', 'status' => 'active'],
+            ],
+            new \mini\Table\ColumnDef('id', \mini\Table\Types\ColumnType::Int, \mini\Table\Types\IndexType::Primary),
+            new \mini\Table\ColumnDef('name', \mini\Table\Types\ColumnType::Text),
+            new \mini\Table\ColumnDef('status', \mini\Table\Types\ColumnType::Text),
+        );
+
+        $pq = PartialQuery::fromTable($table);
+
+        // Should be iterable
+        $rows = iterator_to_array($pq);
+        $this->assertCount(3, $rows);
+    }
+
+    public function testFromTableSupportsFiltering(): void
+    {
+        $table = new \mini\Table\GeneratorTable(
+            fn() => yield from [
+                1 => (object)['id' => 1, 'name' => 'Alice', 'status' => 'active'],
+                2 => (object)['id' => 2, 'name' => 'Bob', 'status' => 'inactive'],
+                3 => (object)['id' => 3, 'name' => 'Carol', 'status' => 'active'],
+            ],
+            new \mini\Table\ColumnDef('id', \mini\Table\Types\ColumnType::Int, \mini\Table\Types\IndexType::Primary),
+            new \mini\Table\ColumnDef('name', \mini\Table\Types\ColumnType::Text),
+            new \mini\Table\ColumnDef('status', \mini\Table\Types\ColumnType::Text),
+        );
+
+        $pq = PartialQuery::fromTable($table)
+            ->eq('status', 'active');
+
+        $rows = iterator_to_array($pq);
+        $this->assertCount(2, $rows);
+    }
+
+    public function testFromTableSupportsSqlWhere(): void
+    {
+        $table = new \mini\Table\GeneratorTable(
+            fn() => yield from [
+                1 => (object)['id' => 1, 'name' => 'Alice', 'age' => 30],
+                2 => (object)['id' => 2, 'name' => 'Bob', 'age' => 25],
+                3 => (object)['id' => 3, 'name' => 'Carol', 'age' => 35],
+            ],
+            new \mini\Table\ColumnDef('id', \mini\Table\Types\ColumnType::Int, \mini\Table\Types\IndexType::Primary),
+            new \mini\Table\ColumnDef('name', \mini\Table\Types\ColumnType::Text),
+            new \mini\Table\ColumnDef('age', \mini\Table\Types\ColumnType::Int),
+        );
+
+        $pq = PartialQuery::fromTable($table)
+            ->where('age >= ?', [30]);
+
+        $rows = iterator_to_array($pq);
+        $this->assertCount(2, $rows);
+    }
+
+    public function testFromTableSupportsOrderAndLimit(): void
+    {
+        $table = new \mini\Table\GeneratorTable(
+            fn() => yield from [
+                1 => (object)['id' => 1, 'name' => 'Alice'],
+                2 => (object)['id' => 2, 'name' => 'Bob'],
+                3 => (object)['id' => 3, 'name' => 'Carol'],
+            ],
+            new \mini\Table\ColumnDef('id', \mini\Table\Types\ColumnType::Int, \mini\Table\Types\IndexType::Primary),
+            new \mini\Table\ColumnDef('name', \mini\Table\Types\ColumnType::Text),
+        );
+
+        $pq = PartialQuery::fromTable($table)
+            ->order('name DESC')
+            ->limit(2);
+
+        $rows = iterator_to_array($pq);
+        $this->assertCount(2, $rows);
+        $names = array_map(fn($r) => $r->name, $rows);
+        $this->assertSame(['Carol', 'Bob'], $names);
+    }
+
+    // =========================================================================
+    // Mutation tests (MutableTableInterface)
+    // =========================================================================
+
+    private function createMutationTestTable(): void
+    {
+        \mini\db()->exec('DROP TABLE IF EXISTS pq_mutation_test');
+        \mini\db()->exec('CREATE TABLE pq_mutation_test (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            role TEXT DEFAULT "user"
+        )');
+    }
+
+    private function dropMutationTestTable(): void
+    {
+        \mini\db()->exec('DROP TABLE IF EXISTS pq_mutation_test');
+    }
+
+    public function testImplementsMutableTableInterface(): void
+    {
+        $this->createMutationTestTable();
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM pq_mutation_test'));
+        $this->assertInstanceOf(\mini\Table\Contracts\MutableTableInterface::class, $pq);
+        $this->dropMutationTestTable();
+    }
+
+    public function testInsertBasic(): void
+    {
+        $this->createMutationTestTable();
+
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM pq_mutation_test'));
+        $id = $pq->insert(['name' => 'Test User']);
+
+        $this->assertNotEmpty($id);
+        $this->assertCount(1, iterator_to_array($pq));
+        $this->dropMutationTestTable();
+    }
+
+    public function testInsertEnforcesQueryConstraints(): void
+    {
+        $this->createMutationTestTable();
+        \mini\db()->exec("INSERT INTO pq_mutation_test (name, role) VALUES ('Admin', 'admin')");
+
+        // Query scoped to role='user'
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM pq_mutation_test WHERE role = ?', ['user']));
+
+        // Insert matching row - should work
+        $pq->insert(['name' => 'User', 'role' => 'user']);
+        $this->assertCount(1, iterator_to_array($pq));
+
+        // Insert non-matching row - should throw
+        $threw = false;
+        try {
+            $pq->insert(['name' => 'Admin2', 'role' => 'admin']);
+        } catch (\RuntimeException $e) {
+            $threw = true;
+            $this->assertContains('violates query constraints', $e->getMessage());
+        }
+        $this->assertTrue($threw, 'Expected exception for constraint violation');
+        $this->dropMutationTestTable();
+    }
+
+    public function testUpdateBasic(): void
+    {
+        $this->createMutationTestTable();
+        \mini\db()->exec("INSERT INTO pq_mutation_test (name) VALUES ('Original')");
+
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM pq_mutation_test'));
+        $affected = $pq->update($pq->eq('name', 'Original'), ['name' => 'Updated']);
+
+        $this->assertSame(1, $affected);
+        $row = $pq->one();
+        $this->assertSame('Updated', $row->name);
+        $this->dropMutationTestTable();
+    }
+
+    public function testUpdateRespectsBaseScope(): void
+    {
+        $this->createMutationTestTable();
+        \mini\db()->exec("INSERT INTO pq_mutation_test (name, role) VALUES ('Admin', 'admin')");
+        \mini\db()->exec("INSERT INTO pq_mutation_test (name, role) VALUES ('User', 'user')");
+
+        // Scoped to role='user' only
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM pq_mutation_test WHERE role = ?', ['user']));
+
+        // Try to update all - should only affect the user, not admin
+        $affected = $pq->update($pq, ['name' => 'Modified']);
+        $this->assertSame(1, $affected);
+
+        // Verify admin unchanged
+        $admin = \mini\db()->query('SELECT * FROM pq_mutation_test WHERE role = ?', ['admin'])->one();
+        $this->assertSame('Admin', $admin->name);
+        $this->dropMutationTestTable();
+    }
+
+    public function testDeleteBasic(): void
+    {
+        $this->createMutationTestTable();
+        \mini\db()->exec("INSERT INTO pq_mutation_test (name) VALUES ('ToDelete')");
+
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM pq_mutation_test'));
+        $affected = $pq->delete($pq->eq('name', 'ToDelete'));
+
+        $this->assertSame(1, $affected);
+        $this->assertCount(0, iterator_to_array($pq));
+        $this->dropMutationTestTable();
+    }
+
+    public function testDeleteRespectsBaseScope(): void
+    {
+        $this->createMutationTestTable();
+        \mini\db()->exec("INSERT INTO pq_mutation_test (name, role) VALUES ('Admin', 'admin')");
+        \mini\db()->exec("INSERT INTO pq_mutation_test (name, role) VALUES ('User', 'user')");
+
+        // Scoped to role='user' only
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM pq_mutation_test WHERE role = ?', ['user']));
+
+        // Delete all in scope - should only delete the user
+        $affected = $pq->delete($pq);
+        $this->assertSame(1, $affected);
+
+        // Verify admin still exists
+        $all = \mini\db()->query('SELECT * FROM pq_mutation_test');
+        $this->assertCount(1, iterator_to_array($all));
+        $this->dropMutationTestTable();
+    }
+
+    public function testInsertOnMultiTableQueryThrows(): void
+    {
+        $this->createMutationTestTable();
+        \mini\db()->exec('DROP TABLE IF EXISTS pq_mutation_test2');
+        \mini\db()->exec('CREATE TABLE pq_mutation_test2 (id INTEGER PRIMARY KEY, ref_id INTEGER)');
+
+        $pq = $this->pq(\mini\db()->query('SELECT * FROM pq_mutation_test t1 JOIN pq_mutation_test2 t2 ON t1.id = t2.ref_id'));
+
+        $threw = false;
+        try {
+            $pq->insert(['name' => 'Test']);
+        } catch (\RuntimeException $e) {
+            $threw = true;
+            $this->assertContains('JOINs', $e->getMessage());
+        }
+        $this->assertTrue($threw, 'Expected exception for multi-table query');
+        $this->dropMutationTestTable();
+        \mini\db()->exec('DROP TABLE IF EXISTS pq_mutation_test2');
     }
 };
 

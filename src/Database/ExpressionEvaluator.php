@@ -236,7 +236,7 @@ class ExpressionEvaluator
             '+' => $left + $right,
             '-' => $left - $right,
             '*' => $left * $right,
-            '/' => $right != 0 ? $left / $right : null,
+            '/' => $right != 0 ? (is_int($left) && is_int($right) ? intdiv($left, $right) : $left / $right) : null,
             '%' => $right != 0 ? $left % $right : null,
 
             // String concatenation (|| in standard SQL)
@@ -407,10 +407,14 @@ class ExpressionEvaluator
         if ($node->operand !== null) {
             $operandValue = $this->evaluate($node->operand, $row, $context);
 
-            foreach ($node->whenClauses as $clause) {
-                $whenValue = $this->evaluate($clause['when'], $row, $context);
-                if ($operandValue == $whenValue) {
-                    return $this->evaluate($clause['then'], $row, $context);
+            // SQL: CASE NULL WHEN x never matches (NULL = x is UNKNOWN)
+            if ($operandValue !== null) {
+                foreach ($node->whenClauses as $clause) {
+                    $whenValue = $this->evaluate($clause['when'], $row, $context);
+                    // Also skip if WHEN value is NULL (x = NULL is UNKNOWN)
+                    if ($whenValue !== null && $operandValue == $whenValue) {
+                        return $this->evaluate($clause['then'], $row, $context);
+                    }
                 }
             }
         } else {

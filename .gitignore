@@ -21,6 +21,9 @@ Desktop.ini
 /tests/cache/
 /tests/tmp/
 
+# SQLLogicTest data (clone from github.com/dolthub/sqllogictest)
+/tests/sqllogictest-data/
+
 # Default SQLite database (created by bootstrap when no DATABASE_URL set)
 _database.sqlite3
 

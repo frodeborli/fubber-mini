@@ -1,39 +1,23 @@
 <?php
 
-namespace mini\Table;
+namespace mini\Database;
 
 use Countable;
 use IteratorAggregate;
 use mini\Table\Contracts\MutableTableInterface;
 use mini\Table\Contracts\TableInterface;
+use mini\Table\Predicate;
 use Traversable;
 
 /**
- * User-facing table wrapper with parameter binding support
+ * Internal table wrapper with parameter binding support
  *
- * Table wraps a TableInterface and provides a minimal, predictable API
- * for end users. All methods return Table for consistent chaining.
+ * Used by VirtualDatabase for JOIN execution and correlated subqueries.
+ * Provides deferred filter binding for dynamic row-by-row evaluation.
  *
- * ```php
- * $users = Table::from($usersTable);
- *
- * // Filtering and iteration
- * foreach ($users->eq('status', 'active')->order('name')->limit(10) as $user) {
- *     echo $user->name;
- * }
- *
- * // Bindable parameters for reusable queries
- * $byStatus = $users->eqBind('status', ':status');
- * $active = $byStatus->bind([':status' => 'active']);
- * $pending = $byStatus->bind([':status' => 'pending']);
- *
- * // Mutations (if table is mutable)
- * $users->insert(['name' => 'Alice', 'status' => 'active']);
- * $users->eq('status', 'inactive')->delete();
- * $users->eq('id', 123)->update(['status' => 'active']);
- * ```
+ * @internal This is an implementation detail - use PartialQuery::fromTable() for user code
  */
-final class Table implements IteratorAggregate, Countable
+final class BindableTable implements IteratorAggregate, Countable
 {
     private TableInterface $source;
 
@@ -58,7 +42,7 @@ final class Table implements IteratorAggregate, Countable
     }
 
     /**
-     * Create a Table wrapper from any TableInterface
+     * Create a BindableTable wrapper from any TableInterface
      */
     public static function from(self|TableInterface $source): self
     {

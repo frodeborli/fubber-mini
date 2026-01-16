@@ -9,6 +9,11 @@ use mini\Parsing\SQL\AST\{
     InsertStatement,
     UpdateStatement,
     DeleteStatement,
+    CreateTableStatement,
+    CreateIndexStatement,
+    DropTableStatement,
+    DropIndexStatement,
+    ColumnDefinition,
     UnionNode,
     ColumnNode,
     IdentifierNode,
@@ -26,7 +31,11 @@ use mini\Parsing\SQL\AST\{
     WindowFunctionNode,
     WithStatement
 };
-use mini\Table\{Table, Predicate};
+use mini\Table\Predicate;
+use mini\Table\ColumnDef;
+use mini\Table\InMemoryTable;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
 use mini\Table\Contracts\MutableTableInterface;
 use mini\Table\Contracts\SetInterface;
 use mini\Table\Contracts\TableInterface;
@@ -83,11 +92,15 @@ class VirtualDatabase implements DatabaseInterface
     /** Last insert ID from most recent INSERT */
     private ?string $lastInsertId = null;
 
+    /** @var \WeakMap<Query, PartialQuery> Maps Query instances to their underlying PartialQuery */
+    private \WeakMap $queryMap;
+
     public function __construct()
     {
         $this->evaluator = new ExpressionEvaluator();
         $this->evaluator->setSubqueryExecutor(fn($query, $outerRow) => $this->executeSubqueryWithContext($query, $outerRow));
         $this->registerBuiltinAggregates();
+        $this->queryMap = new \WeakMap();
     }
 
     /**
@@ -323,15 +336,70 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Create a new VirtualDatabase with shadowed tables
+     *
+     * Inherits all tables from this database, then registers the provided
+     * tables which shadow any existing tables with the same names.
+     *
+     * @param array<string, TableInterface> $tables Table name => TableInterface
+     * @return DatabaseInterface New VirtualDatabase with shadowed tables
+     */
+    public function withTables(array $tables): DatabaseInterface
+    {
+        $vdb = new self();
+
+        // Copy existing tables
+        foreach ($this->tables as $name => $table) {
+            $vdb->tables[$name] = $table;
+        }
+
+        // Copy custom aggregates
+        foreach ($this->aggregates as $name => $aggregate) {
+            $vdb->aggregates[$name] = $aggregate;
+        }
+
+        // Shadow with provided tables
+        foreach ($tables as $name => $table) {
+            $vdb->registerTable($name, $table);
+        }
+
+        return $vdb;
+    }
+
+    /**
      * Execute a SELECT query
      *
      * @param string $sql SQL query
      * @param array $params Bound parameters
-     * @return ResultSetInterface<object> Rows as stdClass objects
+     * @return Query Composable query object
      */
-    public function query(string $sql, array $params = []): PartialQuery
+    public function query(string $sql, array $params = []): Query
     {
-        return PartialQuery::fromSql($this, $this->rawExecutor(), $sql, $params);
+        $pq = PartialQuery::fromSql($this, $this->rawExecutor(), $sql, $params);
+        return $this->wrapQuery($pq);
+    }
+
+    /**
+     * Wrap a PartialQuery in a Query and register the mapping
+     */
+    private function wrapQuery(PartialQuery $pq): Query
+    {
+        $query = new Query($pq, function (PartialQuery $derivedPq): Query {
+            return $this->wrapQuery($derivedPq);
+        });
+        $this->queryMap[$query] = $pq;
+        return $query;
+    }
+
+    /**
+     * Get the underlying PartialQuery for a Query instance
+     */
+    private function unwrapQuery(Query $query): PartialQuery
+    {
+        if (!isset($this->queryMap[$query])) {
+            throw new \InvalidArgumentException("Query was not created by this database");
+        }
+        return $this->queryMap[$query];
     }
 
     /**
@@ -367,7 +435,7 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
-     * Execute an INSERT, UPDATE, or DELETE statement
+     * Execute an INSERT, UPDATE, DELETE, or DDL statement
      *
      * @param string $sql SQL statement
      * @param array $params Bound parameters
@@ -375,7 +443,7 @@ class VirtualDatabase implements DatabaseInterface
      */
     public function exec(string $sql, array $params = []): int
     {
-        $ast = PartialQuery::parseWithParams($sql, $params);
+        $ast = SqlParser::parseWithParams($sql, $params);
 
         if ($ast instanceof InsertStatement) {
             return $this->executeInsert($ast);
@@ -389,7 +457,25 @@ class VirtualDatabase implements DatabaseInterface
             return $this->executeDelete($ast);
         }
 
-        throw new \RuntimeException("exec() only accepts INSERT, UPDATE, or DELETE statements");
+        if ($ast instanceof CreateTableStatement) {
+            return $this->executeCreateTable($ast);
+        }
+
+        if ($ast instanceof DropTableStatement) {
+            return $this->executeDropTable($ast);
+        }
+
+        if ($ast instanceof CreateIndexStatement) {
+            // Indexes are no-op in VirtualDatabase (InMemoryTable handles this internally)
+            return 0;
+        }
+
+        if ($ast instanceof DropIndexStatement) {
+            // Indexes are no-op in VirtualDatabase
+            return 0;
+        }
+
+        throw new \RuntimeException("exec() only accepts INSERT, UPDATE, DELETE, or DDL statements");
     }
 
     /**
@@ -491,17 +577,17 @@ class VirtualDatabase implements DatabaseInterface
     /**
      * {@inheritdoc}
      */
-    public function delete(PartialQuery $query): int
+    public function delete(Query|PartialQuery $query): int
     {
-        throw new \RuntimeException("delete() with PartialQuery not yet supported in VirtualDatabase");
+        throw new \RuntimeException("delete() with Query not yet supported in VirtualDatabase");
     }
 
     /**
      * {@inheritdoc}
      */
-    public function update(PartialQuery $query, string|array $set, array $params = []): int
+    public function update(Query|PartialQuery $query, string|array $set, array $params = []): int
     {
-        throw new \RuntimeException("update() with PartialQuery not yet supported in VirtualDatabase");
+        throw new \RuntimeException("update() with Query not yet supported in VirtualDatabase");
     }
 
     /**
@@ -1613,14 +1699,30 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function sortResults(array $results, array $orderBy): array
     {
-        usort($results, function ($a, $b) use ($orderBy) {
+        if (empty($results)) {
+            return $results;
+        }
+
+        // Get column names from first result for numeric index lookups
+        $columnNames = array_keys(get_object_vars($results[0]));
+
+        usort($results, function ($a, $b) use ($orderBy, $columnNames) {
             foreach ($orderBy as $item) {
                 $colExpr = $item['column'];
                 $direction = strtoupper($item['direction'] ?? 'ASC');
 
-                // Get column name - could be identifier or need evaluation
+                // Get column name - could be identifier, numeric index, or expression
                 if ($colExpr instanceof IdentifierNode) {
                     $colName = $colExpr->getName();
+                    $aVal = $a->$colName ?? null;
+                    $bVal = $b->$colName ?? null;
+                } elseif ($colExpr instanceof LiteralNode && is_numeric($colExpr->value)) {
+                    // ORDER BY 1, ORDER BY 2, etc. - 1-based column index
+                    $idx = (int)$colExpr->value - 1;
+                    $colName = $columnNames[$idx] ?? null;
+                    if ($colName === null) {
+                        continue; // Invalid index, skip
+                    }
                     $aVal = $a->$colName ?? null;
                     $bVal = $b->$colName ?? null;
                 } else {
@@ -1658,7 +1760,14 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function sortResultsWithOriginal(array $results, array $orderBy, array $aliasToExpr): array
     {
-        usort($results, function ($a, $b) use ($orderBy, $aliasToExpr) {
+        if (empty($results)) {
+            return $results;
+        }
+
+        // Get column names from first projected result for numeric index lookups
+        $columnNames = array_keys(get_object_vars($results[0]['projected']));
+
+        usort($results, function ($a, $b) use ($orderBy, $aliasToExpr, $columnNames) {
             foreach ($orderBy as $item) {
                 $colExpr = $item['column'];
                 $direction = strtoupper($item['direction'] ?? 'ASC');
@@ -1675,6 +1784,15 @@ class VirtualDatabase implements DatabaseInterface
                         $aVal = $a['original']->$name ?? null;
                         $bVal = $b['original']->$name ?? null;
                     }
+                } elseif ($colExpr instanceof LiteralNode && is_numeric($colExpr->value)) {
+                    // ORDER BY 1, ORDER BY 2, etc. - 1-based column index
+                    $idx = (int)$colExpr->value - 1;
+                    $colName = $columnNames[$idx] ?? null;
+                    if ($colName === null) {
+                        continue;
+                    }
+                    $aVal = $a['projected']->$colName ?? null;
+                    $bVal = $b['projected']->$colName ?? null;
                 } else {
                     // Expression - evaluate against original row
                     $aVal = $this->evaluator->evaluate($colExpr, $a['original']);
@@ -2161,8 +2279,13 @@ class VirtualDatabase implements DatabaseInterface
             return $outerRefs;
         }
 
-        // Check against both table name and alias
-        $innerTables = [strtolower($subqueryTable), strtolower($subqueryAlias)];
+        // When a table is aliased (FROM t1 AS x), only the alias is valid for inner refs.
+        // The original table name becomes an outer reference (e.g., t1.b refers to outer t1).
+        if ($subqueryAlias !== $subqueryTable) {
+            $innerTables = [strtolower($subqueryAlias)];
+        } else {
+            $innerTables = [strtolower($subqueryTable)];
+        }
         $this->collectOuterReferences($ast->where, $innerTables, $outerRefs);
 
         return $outerRefs;
@@ -2373,8 +2496,13 @@ class VirtualDatabase implements DatabaseInterface
             $leftVal = $this->evaluateExprWithContext($node->left, $row, $outerContext);
             $rightVal = $this->evaluateExprWithContext($node->right, $row, $outerContext);
 
+            // SQL: comparisons with NULL return UNKNOWN (false in WHERE context)
+            if ($leftVal === null || $rightVal === null) {
+                return false;
+            }
+
             return match ($op) {
-                '=' => $leftVal === $rightVal || $leftVal == $rightVal,
+                '=' => $leftVal == $rightVal,
                 '!=', '<>' => $leftVal != $rightVal,
                 '<' => $leftVal < $rightVal,
                 '<=' => $leftVal <= $rightVal,
@@ -2403,8 +2531,8 @@ class VirtualDatabase implements DatabaseInterface
                 $colName = $node->getName();
                 $key = $qualifier . '.' . $colName;
 
-                // Check outer context first
-                if (isset($outerContext[$key])) {
+                // Check outer context first (isset is fast but returns false for NULL values)
+                if (isset($outerContext[$key]) || array_key_exists($key, $outerContext)) {
                     return $outerContext[$key];
                 }
             }
@@ -2421,10 +2549,10 @@ class VirtualDatabase implements DatabaseInterface
     /**
      * Build a Table template with binds for outer references
      */
-    private function buildCorrelatedTemplate(SelectStatement $ast, array $outerRefs): Table
+    private function buildCorrelatedTemplate(SelectStatement $ast, array $outerRefs): BindableTable
     {
         $tableName = $ast->from->getFullName();
-        $table = Table::from($this->getTable($tableName));
+        $table = BindableTable::from($this->getTable($tableName));
 
         // For each outer reference, add a bind
         // We need to modify the WHERE to use binds instead of outer refs
@@ -2473,7 +2601,7 @@ class VirtualDatabase implements DatabaseInterface
     /**
      * Apply WHERE clause, converting outer references to binds
      */
-    private function applyWhereWithBinds(Table $table, \mini\Parsing\SQL\AST\ASTNode $node, array $outerRefs): Table
+    private function applyWhereWithBinds(BindableTable $table, \mini\Parsing\SQL\AST\ASTNode $node, array $outerRefs): BindableTable
     {
         // Handle AND - apply both sides
         if ($node instanceof BinaryOperation && strtoupper($node->operator) === 'AND') {
@@ -2511,7 +2639,7 @@ class VirtualDatabase implements DatabaseInterface
                 $column = $node->left->getName();
                 $value = $this->evaluator->evaluate($node->right, null);
                 return match ($node->operator) {
-                    '=' => $value === null ? Table::from(EmptyTable::from($table)) : $table->eq($column, $value),
+                    '=' => $value === null ? BindableTable::from(EmptyTable::from($table)) : $table->eq($column, $value),
                     '<' => $table->lt($column, $value),
                     '<=' => $table->lte($column, $value),
                     '>' => $table->gt($column, $value),
@@ -2585,7 +2713,12 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("Table '$tableName' does not support INSERT");
         }
 
-        $columnNames = array_map(fn($col) => $col->getName(), $ast->columns);
+        // Use provided column names, or fall back to table's column order
+        if (!empty($ast->columns)) {
+            $columnNames = array_map(fn($col) => $col->getName(), $ast->columns);
+        } else {
+            $columnNames = array_keys($table->getColumns());
+        }
         $lastId = 0;
 
         foreach ($ast->values as $valueRow) {
@@ -2646,6 +2779,112 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Execute CREATE TABLE - creates an InMemoryTable with the given schema
+     */
+    private function executeCreateTable(CreateTableStatement $ast): int
+    {
+        $tableName = $ast->table->getName();
+
+        // Check IF NOT EXISTS
+        if ($this->tableExists($tableName)) {
+            if ($ast->ifNotExists) {
+                return 0;
+            }
+            throw new \RuntimeException("Table already exists: $tableName");
+        }
+
+        // Convert AST column definitions to ColumnDef objects
+        $columnDefs = [];
+        foreach ($ast->columns as $col) {
+            $columnDefs[] = $this->astColumnToColumnDef($col, $ast->constraints);
+        }
+
+        // Create and register the table
+        $table = new InMemoryTable(...$columnDefs);
+        $this->registerTable($tableName, $table);
+
+        return 0;
+    }
+
+    /**
+     * Execute DROP TABLE - removes a registered table
+     */
+    private function executeDropTable(DropTableStatement $ast): int
+    {
+        $tableName = $ast->table->getName();
+
+        if (!$this->tableExists($tableName)) {
+            if ($ast->ifExists) {
+                return 0;
+            }
+            throw new \RuntimeException("Table not found: $tableName");
+        }
+
+        unset($this->tables[strtolower($tableName)]);
+        return 0;
+    }
+
+    /**
+     * Convert AST ColumnDefinition to ColumnDef
+     *
+     * @param ColumnDefinition $col AST column definition
+     * @param array $constraints Table-level constraints for primary key detection
+     */
+    private function astColumnToColumnDef(ColumnDefinition $col, array $constraints): ColumnDef
+    {
+        // Determine column type from SQL data type
+        $type = $this->sqlTypeToColumnType($col->dataType);
+
+        // Determine index type
+        $indexType = IndexType::None;
+        if ($col->primaryKey) {
+            $indexType = IndexType::Primary;
+        } elseif ($col->unique) {
+            $indexType = IndexType::Unique;
+        }
+
+        // Check table-level constraints for PRIMARY KEY
+        foreach ($constraints as $constraint) {
+            if ($constraint->constraintType === 'PRIMARY KEY'
+                && count($constraint->columns) === 1
+                && $constraint->columns[0] === $col->name
+            ) {
+                $indexType = IndexType::Primary;
+            }
+        }
+
+        // Type parameters (e.g., scale for DECIMAL)
+        $typeParams = [];
+        if ($col->scale !== null) {
+            $typeParams['scale'] = $col->scale;
+        }
+
+        return new ColumnDef($col->name, $type, $indexType, $typeParams);
+    }
+
+    /**
+     * Map SQL data type string to ColumnType enum
+     */
+    private function sqlTypeToColumnType(?string $sqlType): ColumnType
+    {
+        if ($sqlType === null) {
+            return ColumnType::Text; // SQLite style - default to text
+        }
+
+        return match (strtoupper($sqlType)) {
+            'INTEGER', 'INT', 'SMALLINT', 'TINYINT', 'BIGINT' => ColumnType::Int,
+            'REAL', 'FLOAT', 'DOUBLE' => ColumnType::Float,
+            'DECIMAL', 'NUMERIC' => ColumnType::Decimal,
+            'TEXT', 'VARCHAR', 'CHAR', 'CLOB' => ColumnType::Text,
+            'BLOB', 'BINARY', 'VARBINARY' => ColumnType::Binary,
+            'DATE' => ColumnType::Date,
+            'TIME' => ColumnType::Time,
+            'DATETIME', 'TIMESTAMP' => ColumnType::DateTime,
+            default => ColumnType::Text,
+        };
+    }
+
+    /**
      * Apply a WHERE clause AST to a TableInterface using table methods
      */
     private function applyWhereToTableInterface(TableInterface $table, \mini\Parsing\SQL\AST\ASTNode $node): TableInterface
@@ -2656,11 +2895,16 @@ class VirtualDatabase implements DatabaseInterface
             return $this->applyWhereToTableInterface($table, $node->right);
         }
 
-        // Binary OR: use table's or() method with predicates
+        // Binary OR: use table's or() method with predicates, or fall back to row-by-row
         if ($node instanceof BinaryOperation && strtoupper($node->operator) === 'OR') {
-            $leftPredicate = $this->buildPredicateFromAst($node->left);
-            $rightPredicate = $this->buildPredicateFromAst($node->right);
-            return $table->or($leftPredicate, $rightPredicate);
+            try {
+                $leftPredicate = $this->buildPredicateFromAst($node->left);
+                $rightPredicate = $this->buildPredicateFromAst($node->right);
+                return $table->or($leftPredicate, $rightPredicate);
+            } catch (\RuntimeException $e) {
+                // Can't convert to predicates - evaluate row-by-row
+                return $this->filterByExpression($table, $node);
+            }
         }
 
         // Simple comparison: column op value
@@ -2820,14 +3064,19 @@ class VirtualDatabase implements DatabaseInterface
 
         // BETWEEN operation
         if ($node instanceof \mini\Parsing\SQL\AST\BetweenOperation) {
-            if (!$node->expression instanceof IdentifierNode) {
-                throw new \RuntimeException("BETWEEN expression must be a column");
+            // Can only push to table if expression is a simple column and bounds are literals
+            if ($node->expression instanceof IdentifierNode
+                && $node->low instanceof LiteralNode
+                && $node->high instanceof LiteralNode
+            ) {
+                $column = $this->buildQualifiedColumnName($node->expression);
+                $low = $this->evaluator->evaluate($node->low, null);
+                $high = $this->evaluator->evaluate($node->high, null);
+                $result = $table->gte($column, $low)->lte($column, $high);
+                return $node->negated ? $table->except($result) : $result;
             }
-            $column = $this->buildQualifiedColumnName($node->expression);
-            $low = $this->evaluator->evaluate($node->low, null);
-            $high = $this->evaluator->evaluate($node->high, null);
-            $result = $table->gte($column, $low)->lte($column, $high);
-            return $node->negated ? $table->except($result) : $result;
+            // Fall back to row-by-row evaluation
+            return $this->filterByExpression($table, $node);
         }
 
         // NOT expression: evaluate inner expression and exclude those rows
@@ -2852,14 +3101,10 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function filterByExpression(TableInterface $table, \mini\Parsing\SQL\AST\ASTNode $condition): TableInterface
     {
+        $columns = $table->getColumns();
         $filteredRows = [];
-        $columns = null;
 
         foreach ($table as $row) {
-            if ($columns === null) {
-                $columns = $table->getColumns();
-            }
-
             // Evaluate the condition against this row
             if ($this->evaluator->evaluateAsBool($condition, $row)) {
                 $filteredRows[] = $row;
@@ -2867,7 +3112,7 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         // Build result table with same schema
-        $result = new \mini\Table\InMemoryTable(...array_values($columns ?? []));
+        $result = new \mini\Table\InMemoryTable(...array_values($columns));
         foreach ($filteredRows as $row) {
             $result->insert((array)$row);
         }
@@ -2975,7 +3220,7 @@ class VirtualDatabase implements DatabaseInterface
                 return $table;
             } else {
                 // ANY with empty set has no match - return empty
-                return \mini\Table\Wrappers\EmptyTable::from($table);
+                return EmptyTable::from($table);
             }
         }
 

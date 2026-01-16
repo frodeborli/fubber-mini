@@ -83,6 +83,29 @@ class SqlLexer
     public const T_ROWS  = 'ROWS';
     public const T_ROW   = 'ROW';
     public const T_ONLY  = 'ONLY';
+
+    // DDL tokens
+    public const T_CREATE = 'CREATE';
+    public const T_DROP = 'DROP';
+    public const T_ALTER = 'ALTER';
+    public const T_TABLE = 'TABLE';
+    public const T_INDEX = 'INDEX';
+    public const T_VIEW = 'VIEW';
+    public const T_IF = 'IF';
+    public const T_PRIMARY = 'PRIMARY';
+    public const T_KEY = 'KEY';
+    public const T_UNIQUE = 'UNIQUE';
+    public const T_FOREIGN = 'FOREIGN';
+    public const T_REFERENCES = 'REFERENCES';
+    public const T_CONSTRAINT = 'CONSTRAINT';
+    public const T_DEFAULT = 'DEFAULT';
+    public const T_AUTOINCREMENT = 'AUTOINCREMENT';
+    public const T_CHECK = 'CHECK';
+    public const T_CASCADE = 'CASCADE';
+    public const T_RESTRICT = 'RESTRICT';
+    public const T_ACTION = 'ACTION';
+    public const T_NO = 'NO';
+
     public const T_IDENTIFIER = 'IDENTIFIER';
     public const T_STRING = 'STRING';
     public const T_NUMBER = 'NUMBER';
@@ -366,6 +389,27 @@ class SqlLexer
                         'ROWS' => self::T_ROWS,
                         'ROW' => self::T_ROW,
                         'ONLY' => self::T_ONLY,
+                        // DDL keywords
+                        'CREATE' => self::T_CREATE,
+                        'DROP' => self::T_DROP,
+                        'ALTER' => self::T_ALTER,
+                        'TABLE' => self::T_TABLE,
+                        'INDEX' => self::T_INDEX,
+                        'VIEW' => self::T_VIEW,
+                        'IF' => self::T_IF,
+                        'PRIMARY' => self::T_PRIMARY,
+                        'KEY' => self::T_KEY,
+                        'UNIQUE' => self::T_UNIQUE,
+                        'FOREIGN' => self::T_FOREIGN,
+                        'REFERENCES' => self::T_REFERENCES,
+                        'CONSTRAINT' => self::T_CONSTRAINT,
+                        'DEFAULT' => self::T_DEFAULT,
+                        'AUTOINCREMENT' => self::T_AUTOINCREMENT,
+                        'CHECK' => self::T_CHECK,
+                        'CASCADE' => self::T_CASCADE,
+                        'RESTRICT' => self::T_RESTRICT,
+                        'ACTION' => self::T_ACTION,
+                        'NO' => self::T_NO,
                         default => self::T_IDENTIFIER
                     };
                 }

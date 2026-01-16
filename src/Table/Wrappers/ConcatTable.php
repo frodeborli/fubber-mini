@@ -42,15 +42,17 @@ class ConcatTable extends AbstractTable
         $bCols = $b->getColumns();
 
         // Validate matching column count (SQL UNION requirement)
-        if (count($aCols) !== count($bCols)) {
+        // Skip validation if either side has unknown columns (e.g., PartialQuery)
+        if (!empty($aCols) && !empty($bCols) && count($aCols) !== count($bCols)) {
             throw new \InvalidArgumentException(
                 'UNION requires same number of columns: ' . count($aCols) . ' vs ' . count($bCols)
             );
         }
 
-        // Use first table's column names (SQL UNION standard)
+        // Use first table's column names if known, otherwise use second's, otherwise empty
         // We don't require column name match, only count match
-        parent::__construct(...array_values($aCols));
+        $cols = !empty($aCols) ? $aCols : $bCols;
+        parent::__construct(...array_values($cols));
     }
 
     protected function materialize(string ...$additionalColumns): Traversable
@@ -65,13 +67,15 @@ class ConcatTable extends AbstractTable
         $offset = $this->getOffset();
 
         // Yield from first table
-        foreach ($this->a->columns(...$aCols) as $row) {
+        // If column info unavailable, iterate directly (SELECT * semantics)
+        $aIterator = empty($aCols) ? $this->a : $this->a->columns(...$aCols);
+        foreach ($aIterator as $row) {
             if ($skipped++ < $offset) {
                 continue;
             }
 
-            // Remap to our column names if different
-            $out = $this->remapRow($row, $aCols, $cols);
+            // Remap to our column names if different, or pass through if unknown
+            $out = empty($cols) ? $row : $this->remapRow($row, $aCols, $cols);
             yield $out;
 
             if ($limit !== null && ++$emitted >= $limit) {
@@ -80,13 +84,15 @@ class ConcatTable extends AbstractTable
         }
 
         // Yield from second table
-        foreach ($this->b->columns(...$bCols) as $row) {
+        // If column info unavailable, iterate directly (SELECT * semantics)
+        $bIterator = empty($bCols) ? $this->b : $this->b->columns(...$bCols);
+        foreach ($bIterator as $row) {
             if ($skipped++ < $offset) {
                 continue;
             }
 
-            // Remap to our column names if different
-            $out = $this->remapRow($row, $bCols, $cols);
+            // Remap to our column names if different, or pass through if unknown
+            $out = empty($cols) ? $row : $this->remapRow($row, $bCols, $cols);
             yield $out;
 
             if ($limit !== null && ++$emitted >= $limit) {

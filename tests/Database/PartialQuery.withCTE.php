@@ -20,7 +20,104 @@ $test = new class extends Test {
         \mini\bootstrap();
         $pdo = new PDO('sqlite::memory:');
         $this->db = new PDODatabase($pdo);
+
+        // Create test tables for execution tests
+        $pdo->exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, active INTEGER)');
+        $pdo->exec("INSERT INTO users VALUES (1, 'Alice', 30, 1)");
+        $pdo->exec("INSERT INTO users VALUES (2, 'Bob', 25, 1)");
+        $pdo->exec("INSERT INTO users VALUES (3, 'Charlie', 35, 0)");
+        $pdo->exec("INSERT INTO users VALUES (4, 'Diana', 28, 1)");
     }
+
+    // =========================================================================
+    // Execution tests - these would have caught the CTE bubbling bug
+    // by producing "syntax error near WITH" in SQLite
+    // =========================================================================
+
+    public function testCTEWithBarrierExecutesValidSQL(): void
+    {
+        // Bug: barrier() was producing SELECT * FROM (WITH ... SELECT ...) AS _q
+        // which is invalid SQL - WITH cannot be inside a subquery
+        $q = $this->db->query('SELECT * FROM filtered')
+            ->withCTE('filtered', $this->db->query('SELECT * FROM users WHERE age > 20'))
+            ->limit(10)
+            ->eq('age', 30);  // Triggers barrier() due to pagination
+
+        // This would throw PDOException "syntax error near WITH" if CTEs don't bubble
+        $results = iterator_to_array($q);
+        $this->assertCount(1, $results);
+        $this->assertSame('Alice', $results[0]->name);
+    }
+
+    public function testCTEWithSelectExecutesValidSQL(): void
+    {
+        // Bug: selectInternal() was producing SELECT id FROM (WITH ... SELECT ...) AS _q
+        // which is invalid SQL
+        $q = $this->db->query('SELECT * FROM filtered')
+            ->withCTE('filtered', $this->db->query('SELECT * FROM users WHERE age > 20'))
+            ->select('id, name');
+
+        // This would throw PDOException "syntax error near WITH" if CTEs don't bubble
+        $results = iterator_to_array($q);
+        $this->assertTrue(count($results) > 0, 'Query should return results');
+    }
+
+    public function testCTEWithColumnsExecutesValidSQL(): void
+    {
+        // columns() uses selectInternal() internally
+        $q = $this->db->query('SELECT * FROM filtered')
+            ->withCTE('filtered', $this->db->query('SELECT * FROM users WHERE age > 20'))
+            ->columns('name');
+
+        // This would throw PDOException "syntax error near WITH" if CTEs don't bubble
+        $results = iterator_to_array($q);
+        $this->assertTrue(count($results) > 0, 'Query should return results');
+    }
+
+    public function testCTEWithMultipleBarriersExecutesValidSQL(): void
+    {
+        // Multiple operations that trigger barriers
+        $q = $this->db->query('SELECT * FROM filtered')
+            ->withCTE('filtered', $this->db->query('SELECT * FROM users WHERE age > 20'))
+            ->limit(10)
+            ->eq('age', 30)     // barrier
+            ->gt('id', 0);      // another filter on barriered query
+
+        // This would throw PDOException "syntax error near WITH" if CTEs don't bubble
+        $results = iterator_to_array($q);
+        $this->assertCount(1, $results);  // Only Alice has age=30
+    }
+
+    public function testCTEWithOrderAfterLimitExecutesValidSQL(): void
+    {
+        // order() after limit() triggers barrier
+        $q = $this->db->query('SELECT * FROM filtered')
+            ->withCTE('filtered', $this->db->query('SELECT * FROM users WHERE age > 20'))
+            ->limit(2)
+            ->order('name DESC');
+
+        // This would throw PDOException "syntax error near WITH" if CTEs don't bubble
+        $results = iterator_to_array($q);
+        $this->assertCount(2, $results);  // Limited to 2
+    }
+
+    public function testNestedCTEOperationsExecuteValidSQL(): void
+    {
+        // Complex: CTE + limit + filter + select - tests multiple bubble scenarios
+        $q = $this->db->query('SELECT * FROM filtered')
+            ->withCTE('filtered', $this->db->query('SELECT * FROM users WHERE age > 20'))
+            ->limit(10)
+            ->gt('age', 29)  // Alice (30), Charlie (35)
+            ->select('name, age');
+
+        // This would throw PDOException "syntax error near WITH" if CTEs don't bubble
+        $results = iterator_to_array($q);
+        $this->assertTrue(count($results) > 0, 'Query should return results');
+    }
+
+    // =========================================================================
+    // String-based tests (original tests below)
+    // =========================================================================
 
     public function testWithCTEAddsSimpleCTE(): void
     {
@@ -221,6 +318,43 @@ $test = new class extends Test {
         // Both CTEs should be present
         $this->assertStringContainsString('filtered_users AS', $sql);
         $this->assertStringContainsString('results AS', $sql);
+    }
+
+    public function testCTEsBubbleUpWhenBarrierIsApplied(): void
+    {
+        // Create query with CTE and pagination
+        $q = $this->db->query('SELECT * FROM users')
+            ->withCTE('users', $this->db->query('SELECT * FROM users WHERE active = 1'))
+            ->limit(10);
+
+        // Adding eq() after limit() triggers barrier() which wraps the query
+        // CTEs must bubble up - WITH cannot be inside a subquery
+        $filtered = $q->eq('name', 'Alice');
+
+        $sql = (string) $filtered;
+
+        // WITH should be at the outer level, not inside a subquery
+        $this->assertStringContainsString('WITH users AS', $sql);
+        // Should NOT have "FROM (WITH" which would be invalid SQL
+        $this->assertStringNotContainsString('FROM (WITH', $sql);
+        // The query should be properly structured
+        $this->assertStringContainsString('LIMIT 10', $sql);
+        $this->assertStringContainsString("name = 'Alice'", $sql);
+    }
+
+    public function testCTEsBubbleUpWithSelect(): void
+    {
+        // CTEs should bubble up when select() wraps the query
+        $q = $this->db->query('SELECT * FROM users')
+            ->withCTE('users', $this->db->query('SELECT * FROM users WHERE active = 1'));
+
+        $projected = $q->select('id, name');
+
+        $sql = (string) $projected;
+
+        // WITH should be at outer level
+        $this->assertStringContainsString('WITH users AS', $sql);
+        $this->assertStringNotContainsString('FROM (WITH', $sql);
     }
 };
 

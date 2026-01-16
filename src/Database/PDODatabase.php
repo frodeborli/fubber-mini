@@ -27,8 +27,22 @@ class PDODatabase implements DatabaseInterface
     private ?PDO $pdo = null;
     private bool $inTransaction = false;
 
+    /** @var \WeakMap<Query, PartialQuery> Maps Query instances to their underlying PartialQuery */
+    private \WeakMap $queryMap;
+
     /**
-     * Get PDO instance from container (lazy initialization)
+     * Create a PDODatabase instance
+     *
+     * @param PDO|null $pdo Optional PDO instance. If null, fetches from container lazily.
+     */
+    public function __construct(?PDO $pdo = null)
+    {
+        $this->pdo = $pdo;
+        $this->queryMap = new \WeakMap();
+    }
+
+    /**
+     * Get PDO instance (from constructor or container)
      */
     private function lazyPdo(): PDO
     {
@@ -39,11 +53,38 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Execute a SELECT query and return a composable PartialQuery
+     * Execute a SELECT query and return a composable Query
      */
-    public function query(string $sql, array $params = []): PartialQuery
+    public function query(string $sql, array $params = []): Query
     {
-        return PartialQuery::fromSql($this, $this->rawExecutor(), $sql, $params);
+        $pq = PartialQuery::fromSql($this, $this->rawExecutor(), $sql, $params);
+        return $this->wrapQuery($pq);
+    }
+
+    /**
+     * Wrap a PartialQuery in a Query and register the mapping
+     *
+     * The returned Query's wrap closure also registers derived queries,
+     * ensuring all Query instances created from this database are tracked.
+     */
+    private function wrapQuery(PartialQuery $pq): Query
+    {
+        $query = new Query($pq, function (PartialQuery $derivedPq): Query {
+            return $this->wrapQuery($derivedPq);
+        });
+        $this->queryMap[$query] = $pq;
+        return $query;
+    }
+
+    /**
+     * Get the underlying PartialQuery for a Query instance
+     */
+    private function unwrapQuery(Query $query): PartialQuery
+    {
+        if (!isset($this->queryMap[$query])) {
+            throw new \InvalidArgumentException("Query was not created by this database");
+        }
+        return $this->queryMap[$query];
     }
 
     /**
@@ -57,7 +98,7 @@ class PDODatabase implements DatabaseInterface
     private function rawExecutor(): \Closure
     {
         $dialect = $this->getDialect();
-        $renderer = SqlRenderer::get($dialect);
+        $renderer = SqlRenderer::forDialect($dialect);
 
         return function (PartialQuery $query, ?ASTNode $ast) use ($dialect, $renderer): \Traversable {
             try {
@@ -276,13 +317,14 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Delete rows matching a partial query
+     * Delete rows matching a query
      */
-    public function delete(PartialQuery $query): int
+    public function delete(Query|PartialQuery $query): int
     {
-        $table = $query->getSourceTable();
-        $ctes = $query->getCTEs();
-        $where = $query->getWhere();
+        $pq = $query instanceof Query ? $this->unwrapQuery($query) : $query;
+        $table = $pq->getSourceTable();
+        $ctes = $pq->getCTEs();
+        $where = $pq->getWhere();
 
         // Require WHERE clause for safety
         // Use db()->exec('DELETE FROM table') or TRUNCATE for mass deletes
@@ -294,7 +336,7 @@ class PDODatabase implements DatabaseInterface
 
         $sql = $ctes['sql'] . "DELETE FROM {$table}";
         $sql .= " WHERE {$where['sql']}";
-        $limit = $query->getLimit();
+        $limit = $pq->getLimit();
         if ($limit !== null) {
             $sql .= " LIMIT {$limit}";
         }
@@ -311,13 +353,14 @@ class PDODatabase implements DatabaseInterface
     }
 
     /**
-     * Update rows matching a partial query
+     * Update rows matching a query
      */
-    public function update(PartialQuery $query, string|array $set, array $params = []): int
+    public function update(Query|PartialQuery $query, string|array $set, array $params = []): int
     {
-        $table = $query->getSourceTable();
-        $ctes = $query->getCTEs();
-        $where = $query->getWhere();
+        $pq = $query instanceof Query ? $this->unwrapQuery($query) : $query;
+        $table = $pq->getSourceTable();
+        $ctes = $pq->getCTEs();
+        $where = $pq->getWhere();
 
         if (is_string($set)) {
             // Raw SQL expression with optional params
@@ -341,7 +384,7 @@ class PDODatabase implements DatabaseInterface
             $sql .= " WHERE {$where['sql']}";
         }
 
-        $limit = $query->getLimit();
+        $limit = $pq->getLimit();
         if ($limit !== null) {
             $sql .= " LIMIT {$limit}";
         }
@@ -766,5 +809,41 @@ class PDODatabase implements DatabaseInterface
         } catch (\Throwable) {
             // INFORMATION_SCHEMA not available
         }
+    }
+
+    /**
+     * Create a VirtualDatabase with shadowed tables
+     *
+     * Registers all tables from this database as PartialQuery objects,
+     * then shadows with the provided tables. This allows joining between
+     * real database tables and mock/test data.
+     *
+     * @param array<string, TableInterface> $tables Table name => TableInterface to shadow
+     * @return DatabaseInterface VirtualDatabase with real + shadowed tables
+     */
+    public function withTables(array $tables): DatabaseInterface
+    {
+        $vdb = new VirtualDatabase();
+
+        // Get all table names from schema
+        $tableNames = [];
+        foreach ($this->getSchema()->eq('type', 'column') as $row) {
+            $tableNames[$row->table_name] = true;
+        }
+
+        // Register real tables as PartialQuery (skip shadowed ones)
+        foreach (array_keys($tableNames) as $name) {
+            if (!isset($tables[$name])) {
+                $pq = PartialQuery::fromSql($this, $this->rawExecutor(), "SELECT * FROM {$name}");
+                $vdb->registerTable($name, $pq);
+            }
+        }
+
+        // Register shadow tables
+        foreach ($tables as $name => $table) {
+            $vdb->registerTable($name, $table);
+        }
+
+        return $vdb;
     }
 }

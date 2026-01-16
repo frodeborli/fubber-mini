@@ -110,6 +110,20 @@ enum SqlDialect
     }
 
     /**
+     * Quote an identifier according to dialect rules
+     *
+     * Handles escaping of the quote character within the identifier.
+     */
+    public function quoteIdentifier(string $identifier): string
+    {
+        return match($this) {
+            self::MySQL => '`' . str_replace('`', '``', $identifier) . '`',
+            self::SqlServer => '[' . str_replace(']', ']]', $identifier) . ']',
+            default => '"' . str_replace('"', '""', $identifier) . '"',
+        };
+    }
+
+    /**
      * Check if this dialect uses standard LIMIT/OFFSET syntax
      */
     public function usesStandardLimit(): bool
