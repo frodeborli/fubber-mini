@@ -266,7 +266,22 @@ class SqlParser
                 }
             }
 
-            // Parse JOINs
+            // Parse comma-separated tables as implicit CROSS JOINs
+            while ($this->match(SqlLexer::T_COMMA)) {
+                $table = $this->parseIdentifier();
+                $alias = null;
+                if ($this->match(SqlLexer::T_AS)) {
+                    $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                    $alias = $aliasToken['value'];
+                } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+                    // Implicit alias (keywords have their own token types)
+                    $alias = $this->current()['value'];
+                    $this->pos++;
+                }
+                $stmt->joins[] = new AST\JoinNode('CROSS', $table, null, $alias);
+            }
+
+            // Parse explicit JOINs
             while ($this->isJoinStart()) {
                 $stmt->joins[] = $this->parseJoin();
             }

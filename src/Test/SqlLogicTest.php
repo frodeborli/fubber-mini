@@ -307,6 +307,10 @@ class SqlLogicTest
                     $result->fail($name, $record, $this->diffResults($expected, $actual));
                 }
             }
+        } catch (\mini\Database\QueryTimeoutException $e) {
+            // Timeout - halt this backend for remaining tests
+            $this->halted[$name] = true;
+            $result->fail($name, $record, $e->getMessage());
         } catch (\Throwable $e) {
             $result->fail($name, $record, $e->getMessage());
         }

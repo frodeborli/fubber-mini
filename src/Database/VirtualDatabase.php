@@ -95,6 +95,12 @@ class VirtualDatabase implements DatabaseInterface
     /** @var \WeakMap<Query, PartialQuery> Maps Query instances to their underlying PartialQuery */
     private \WeakMap $queryMap;
 
+    /** Maximum query execution time in seconds (null = no limit) */
+    private ?float $queryTimeout = null;
+
+    /** Query start time for timeout tracking */
+    private ?float $queryStartTime = null;
+
     public function __construct()
     {
         $this->evaluator = new ExpressionEvaluator();
@@ -149,6 +155,34 @@ class VirtualDatabase implements DatabaseInterface
     public function isAggregate(string $name): bool
     {
         return isset($this->aggregates[strtoupper($name)]);
+    }
+
+    /**
+     * Set maximum query execution time in seconds
+     *
+     * @param float|null $seconds Maximum time in seconds, null to disable
+     */
+    public function setQueryTimeout(?float $seconds): self
+    {
+        $this->queryTimeout = $seconds;
+        return $this;
+    }
+
+    /**
+     * Check if current query has exceeded timeout
+     *
+     * @throws QueryTimeoutException if timeout exceeded
+     */
+    private function checkTimeout(): void
+    {
+        if ($this->queryTimeout !== null && $this->queryStartTime !== null) {
+            $elapsed = microtime(true) - $this->queryStartTime;
+            if ($elapsed > $this->queryTimeout) {
+                throw new QueryTimeoutException(
+                    sprintf("Query timeout: exceeded %.2f seconds", $this->queryTimeout)
+                );
+            }
+        }
     }
 
     /**
@@ -418,20 +452,40 @@ class VirtualDatabase implements DatabaseInterface
             }
 
             if ($ast instanceof WithStatement) {
-                return $this->executeWithStatement($ast);
+                return $this->wrapWithTimeout($this->executeWithStatement($ast));
             }
 
             if ($ast instanceof UnionNode) {
                 $table = $this->executeUnionAsTable($ast);
-                return new ResultSet($table);
+                return $this->wrapWithTimeout(new ResultSet($table));
             }
 
             if (!$ast instanceof SelectStatement) {
                 throw new \RuntimeException("query() only accepts SELECT statements");
             }
 
-            return new ResultSet($this->executeSelect($ast));
+            return $this->wrapWithTimeout(new ResultSet($this->executeSelect($ast)));
         };
+    }
+
+    /**
+     * Wrap an iterable with timeout checking
+     */
+    private function wrapWithTimeout(iterable $result): \Generator
+    {
+        $this->queryStartTime = microtime(true);
+        $rowCount = 0;
+        try {
+            foreach ($result as $key => $row) {
+                // Check timeout every 100 rows (avoid overhead on small queries)
+                if (++$rowCount % 100 === 0) {
+                    $this->checkTimeout();
+                }
+                yield $key => $row;
+            }
+        } finally {
+            $this->queryStartTime = null;
+        }
     }
 
     /**

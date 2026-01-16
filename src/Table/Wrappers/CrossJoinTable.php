@@ -154,6 +154,7 @@ class CrossJoinTable extends AbstractTable
         $leftCols = $this->left->getColumns();
         $rightCols = $this->right->getColumns();
 
+        // Try exact match first
         if (isset($leftCols[$column])) {
             $filtered = $this->left->$method($column, $value);
             return $this->withFilteredSources($filtered, $this->right);
@@ -162,6 +163,22 @@ class CrossJoinTable extends AbstractTable
         if (isset($rightCols[$column])) {
             $filtered = $this->right->$method($column, $value);
             return $this->withFilteredSources($this->left, $filtered);
+        }
+
+        // Try unqualified column match (e.g., 'a3' matches 't3.a3')
+        if (!str_contains($column, '.')) {
+            foreach ($leftCols as $name => $_) {
+                if (str_ends_with($name, '.' . $column)) {
+                    $filtered = $this->left->$method($name, $value);
+                    return $this->withFilteredSources($filtered, $this->right);
+                }
+            }
+            foreach ($rightCols as $name => $_) {
+                if (str_ends_with($name, '.' . $column)) {
+                    $filtered = $this->right->$method($name, $value);
+                    return $this->withFilteredSources($this->left, $filtered);
+                }
+            }
         }
 
         throw new \InvalidArgumentException("Unknown column in CROSS JOIN: '$column'");

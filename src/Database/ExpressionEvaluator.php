@@ -167,8 +167,6 @@ class ExpressionEvaluator
             throw new \RuntimeException("Cannot evaluate column reference without row context: " . $node->getFullName());
         }
 
-        // For now, use the final part of the identifier (column name)
-        // In Phase 2 with JOINs, we'll need to handle table.column resolution
         $columnName = $node->getName();
 
         // Check if it's a wildcard (shouldn't happen in expression context)
@@ -181,10 +179,21 @@ class ExpressionEvaluator
             return $row->$columnName;
         }
 
-        // Try the full qualified name (for JOINs later)
+        // Try the full qualified name
         $fullName = $node->getFullName();
         if (property_exists($row, $fullName)) {
             return $row->$fullName;
+        }
+
+        // For JOINs: try matching unqualified name against qualified properties
+        // e.g., 'e3' should match 't3.e3' in the row
+        if (!str_contains($columnName, '.')) {
+            $suffix = '.' . $columnName;
+            foreach ($row as $prop => $value) {
+                if (str_ends_with($prop, $suffix)) {
+                    return $value;
+                }
+            }
         }
 
         throw new \RuntimeException("Column not found: $columnName");
