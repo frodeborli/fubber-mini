@@ -23,6 +23,7 @@ class SqlLexer
     // Token types
     public const T_SELECT = 'SELECT';
     public const T_INSERT = 'INSERT';
+    public const T_REPLACE = 'REPLACE';
     public const T_UPDATE = 'UPDATE';
     public const T_DELETE = 'DELETE';
     public const T_FROM   = 'FROM';
@@ -351,6 +352,7 @@ class SqlLexer
                     $type = match($upper) {
                         'SELECT' => self::T_SELECT,
                         'INSERT' => self::T_INSERT,
+                        'REPLACE' => self::T_REPLACE,
                         'UPDATE' => self::T_UPDATE,
                         'DELETE' => self::T_DELETE,
                         'FROM' => self::T_FROM,

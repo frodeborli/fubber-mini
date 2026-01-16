@@ -3093,6 +3093,13 @@ class VirtualDatabase implements DatabaseInterface
         } else {
             $columnNames = array_keys($table->getColumns());
         }
+
+        // Find primary key column for REPLACE
+        $pkColumn = null;
+        if ($ast->replace) {
+            $pkColumn = $this->findPrimaryKeyColumn($table);
+        }
+
         $lastId = 0;
 
         foreach ($ast->values as $valueRow) {
@@ -3101,6 +3108,12 @@ class VirtualDatabase implements DatabaseInterface
                 $colName = $columnNames[$i] ?? "col_$i";
                 $row[$colName] = $this->evaluator->evaluate($valueNode, null);
             }
+
+            // REPLACE: delete existing row with same PK first
+            if ($ast->replace && $pkColumn !== null && isset($row[$pkColumn])) {
+                $this->deleteExistingRow($table, $pkColumn, $row[$pkColumn]);
+            }
+
             $lastId = $table->insert($row);
         }
 
@@ -3124,6 +3137,12 @@ class VirtualDatabase implements DatabaseInterface
             $columnNames = array_keys($table->getColumns());
         }
 
+        // Find primary key column for REPLACE
+        $pkColumn = null;
+        if ($ast->replace) {
+            $pkColumn = $this->findPrimaryKeyColumn($table);
+        }
+
         $count = 0;
         $lastId = 0;
 
@@ -3135,12 +3154,40 @@ class VirtualDatabase implements DatabaseInterface
                 $rowArray[$colName] = $value;
                 $i++;
             }
+
+            // REPLACE: delete existing row with same PK first
+            if ($ast->replace && $pkColumn !== null && isset($rowArray[$pkColumn])) {
+                $this->deleteExistingRow($table, $pkColumn, $rowArray[$pkColumn]);
+            }
+
             $lastId = $table->insert($rowArray);
             $count++;
         }
 
         $this->lastInsertId = (string) $lastId;
         return $count;
+    }
+
+    /**
+     * Find the primary key column name for a table
+     */
+    private function findPrimaryKeyColumn(MutableTableInterface $table): ?string
+    {
+        foreach ($table->getColumns() as $name => $col) {
+            if ($col->index === IndexType::Primary) {
+                return $name;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Delete a row by primary key value (for REPLACE)
+     */
+    private function deleteExistingRow(MutableTableInterface $table, string $pkColumn, mixed $pkValue): void
+    {
+        $query = $table->eq($pkColumn, $pkValue);
+        $table->delete($query);
     }
 
     private function executeUpdate(UpdateStatement $ast): int

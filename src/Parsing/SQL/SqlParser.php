@@ -76,6 +76,7 @@ class SqlParser
         $stmt = match($token['type']) {
             SqlLexer::T_SELECT => $this->parseSelectOrUnion(),
             SqlLexer::T_INSERT => $this->parseInsertStatement(),
+            SqlLexer::T_REPLACE => $this->parseReplaceStatement(),
             SqlLexer::T_UPDATE => $this->parseUpdateStatement(),
             SqlLexer::T_DELETE => $this->parseDeleteStatement(),
             SqlLexer::T_CREATE => $this->parseCreateStatement(),
@@ -454,9 +455,31 @@ class SqlParser
     private function parseInsertStatement(): InsertStatement
     {
         $this->expect(SqlLexer::T_INSERT);
+
+        // Check for INSERT OR REPLACE
+        $replace = false;
+        if ($this->match(SqlLexer::T_OR)) {
+            $this->expect(SqlLexer::T_REPLACE);
+            $replace = true;
+        }
+
         $this->expect(SqlLexer::T_INTO);
 
+        return $this->parseInsertBody($replace);
+    }
+
+    private function parseReplaceStatement(): InsertStatement
+    {
+        $this->expect(SqlLexer::T_REPLACE);
+        $this->expect(SqlLexer::T_INTO);
+
+        return $this->parseInsertBody(true);
+    }
+
+    private function parseInsertBody(bool $replace): InsertStatement
+    {
         $stmt = new InsertStatement();
+        $stmt->replace = $replace;
         $stmt->table = $this->parseIdentifier();
 
         if ($this->match(SqlLexer::T_LPAREN)) {
