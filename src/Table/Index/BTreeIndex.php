@@ -63,6 +63,19 @@ final class BTreeIndex implements IndexInterface
     /** @var array<string, array<int, true>> Buffered deletes: key => [rowId => true] */
     private array $deleteBuffer = [];
 
+    // Page cache (LRU)
+    private const CACHE_MAX_PAGES = 128; // ~512KB
+    private const CACHE_CHECK_INTERVAL = 1000; // Check for file changes every N reads
+
+    /** @var array<int, string> Page cache: pageNum => pageData */
+    private array $pageCache = [];
+
+    /** @var int Counter for periodic cache invalidation check */
+    private int $cacheReadCount = 0;
+
+    /** @var int Sequence number when cache was last validated */
+    private int $cacheSequence = 0;
+
     public function __construct(string $path)
     {
         $this->path = $path;
@@ -521,6 +534,7 @@ final class BTreeIndex implements IndexInterface
         $this->rootPage = $header['rootPage'];
         $this->nextPage = $header['nextPage'];
         $this->sequence = $header['sequence'];
+        $this->cacheSequence = $this->sequence;
     }
 
     private function readHeaderWithLock(): void
@@ -549,6 +563,10 @@ final class BTreeIndex implements IndexInterface
         fseek($this->file, 0);
         fwrite($this->file, $header);
         fflush($this->file);
+
+        // Update cache sequence and clear stale cached pages
+        $this->pageCache = [];
+        $this->cacheSequence = $this->sequence;
     }
 
     private function withWriteLock(callable $fn): void
@@ -567,6 +585,22 @@ final class BTreeIndex implements IndexInterface
 
     private function readPage(int $pageNum): string
     {
+        // Periodic check for file modifications by other processes
+        if (++$this->cacheReadCount >= self::CACHE_CHECK_INTERVAL) {
+            $this->cacheReadCount = 0;
+            $this->checkCacheValidity();
+        }
+
+        // Check cache
+        if (isset($this->pageCache[$pageNum])) {
+            // Move to end for LRU (unset + set)
+            $page = $this->pageCache[$pageNum];
+            unset($this->pageCache[$pageNum]);
+            $this->pageCache[$pageNum] = $page;
+            return $page;
+        }
+
+        // Read from disk
         $offset = self::HEADER_SIZE + ($pageNum - 1) * self::PAGE_SIZE;
         fseek($this->file, $offset);
         $data = fread($this->file, self::PAGE_SIZE);
@@ -575,7 +609,39 @@ final class BTreeIndex implements IndexInterface
             throw new \RuntimeException("Corrupted index: page $pageNum truncated");
         }
 
+        // Add to cache
+        $this->pageCache[$pageNum] = $data;
+
+        // Evict oldest if over limit
+        if (count($this->pageCache) > self::CACHE_MAX_PAGES) {
+            unset($this->pageCache[array_key_first($this->pageCache)]);
+        }
+
         return $data;
+    }
+
+    /**
+     * Check if file was modified by another process and invalidate cache if so.
+     */
+    private function checkCacheValidity(): void
+    {
+        flock($this->lockFile, LOCK_SH);
+        try {
+            fseek($this->file, 0);
+            $data = fread($this->file, self::HEADER_SIZE);
+            $header = unpack('Vmagic/Cversion/Creserved/vpageSize/ProotPage/PnextPage/Psequence', $data);
+
+            if ($header['sequence'] !== $this->cacheSequence) {
+                // File changed - invalidate cache and update state
+                $this->pageCache = [];
+                $this->rootPage = $header['rootPage'];
+                $this->nextPage = $header['nextPage'];
+                $this->sequence = $header['sequence'];
+                $this->cacheSequence = $this->sequence;
+            }
+        } finally {
+            flock($this->lockFile, LOCK_UN);
+        }
     }
 
     private function appendPage(string $page): int
@@ -1135,12 +1201,11 @@ final class BTreeIndex implements IndexInterface
 
     /**
      * Build internal node levels from child pages.
+     * @param int[] $children Child page numbers
+     * @param string[] $keys First key of each child (same length as $children)
      */
     private function buildInternalLevels(array $children, array $keys): int
     {
-        // Remove first key (not needed as separator)
-        array_shift($keys);
-
         while (count($children) > 1) {
             $newChildren = [];
             $newKeys = [];
@@ -1149,14 +1214,14 @@ final class BTreeIndex implements IndexInterface
             $maxPerNode = 100;
 
             for ($i = 0; $i < count($children);) {
+                $nodeFirstKey = $keys[$i]; // First key of this subtree
                 $nodeChildren = [$children[$i]];
                 $nodeKeys = [];
                 $i++;
 
                 while ($i < count($children) && count($nodeKeys) < $maxPerNode) {
-                    if ($i - 1 < count($keys)) {
-                        $nodeKeys[] = $keys[$i - 1];
-                    }
+                    // Separator key is the first key of the next child
+                    $nodeKeys[] = $keys[$i];
                     $nodeChildren[] = $children[$i];
                     $i++;
 
@@ -1173,14 +1238,7 @@ final class BTreeIndex implements IndexInterface
 
                 $pageNum = $this->appendPage($this->createInternalPage($nodeChildren, $nodeKeys));
                 $newChildren[] = $pageNum;
-
-                // First key of this node becomes separator for parent level
-                if (!empty($nodeKeys)) {
-                    $newKeys[] = $nodeKeys[0];
-                } elseif ($i < count($children)) {
-                    // Need a key from the next batch
-                    $newKeys[] = $keys[$i - 1] ?? '';
-                }
+                $newKeys[] = $nodeFirstKey; // Propagate first key of this subtree
             }
 
             $children = $newChildren;
