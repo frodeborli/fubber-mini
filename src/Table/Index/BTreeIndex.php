@@ -144,19 +144,16 @@ final class BTreeLeafPage
             $rowIdCounts[] = $meta[$i];
         }
 
-        // Build entry data: rowIds + key for each entry
+        // Build entry data: rowIds + key for each entry (rowIdCount always >= 1)
         $entryData = '';
         for ($i = 0; $i < $n; $i++) {
             $entry = $entries[$i];
             $rowIdCount = $rowIdCounts[$i];
-            if ($rowIdCount > 0) {
-                $rowIds = [];
-                for ($j = 1; $j <= $rowIdCount; $j++) {
-                    $rowIds[] = $entry[$j];
-                }
-                $entryData .= \pack('P*', ...$rowIds);
+            $rowIds = [];
+            for ($j = 1; $j <= $rowIdCount; $j++) {
+                $rowIds[] = $entry[$j];
             }
-            $entryData .= $entry[0]; // key
+            $entryData .= \pack('P*', ...$rowIds) . $entry[0];
         }
 
         // Single pack for header, then append entry data
