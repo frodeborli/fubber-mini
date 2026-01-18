@@ -27,8 +27,10 @@ final class BTreeLeafPage
     public int $count;
     /** @var array Header metadata: offsets (1..n+1) + rowIdCounts (n+2..2n+1), 1-based */
     public array $meta;
-    /** @var array<array<int, string|int>>|null Cached entries for scans */
-    public ?array $entries = null;
+    /** @var array<array<int, string|int>> Cached entries for scans */
+    public array $entries = [];
+    /** Whether entries array is valid for current page data */
+    public bool $entriesBuilt = false;
 
     private function __construct() {}
 
@@ -45,34 +47,32 @@ final class BTreeLeafPage
         $instance->meta = $instance->count > 0
             ? \unpack('v' . (2 * $instance->count + 1), $data, 3)
             : [];
-        $instance->entries = null;
+        $instance->entriesBuilt = false;
         return $instance;
     }
 
     /**
      * Build and cache all entries for efficient scan iteration.
+     * Use $leaf->count to bound iteration, not count($entries).
      */
     public function buildEntries(): void
     {
-        if ($this->entries !== null) {
+        if ($this->entriesBuilt) {
             return;
         }
         $n = $this->count;
-        if ($n === 0) {
-            $this->entries = [];
-            return;
-        }
         $meta = $this->meta;
         $data = $this->data;
-        $this->entries = [];
-        for ($i = 1; $i <= $n; $i++) {
-            $pos = $meta[$i];
-            $rowIdCount = $meta[$n + 1 + $i];
-            $keyLen = $meta[$i + 1] - $pos - ($rowIdCount << 3);
+        for ($i = 0; $i < $n; $i++) {
+            $j = $i + 1; // 1-based index into meta
+            $pos = $meta[$j];
+            $rowIdCount = $meta[$n + 1 + $j];
+            $keyLen = $meta[$j + 1] - $pos - ($rowIdCount << 3);
             $entry = \unpack('P' . $rowIdCount, $data, $pos);
             $entry[0] = \substr($data, $pos + ($rowIdCount << 3), $keyLen);
-            $this->entries[] = $entry;
+            $this->entries[$i] = $entry;
         }
+        $this->entriesBuilt = true;
     }
 
     /**
@@ -82,7 +82,7 @@ final class BTreeLeafPage
     public function toArray(): array
     {
         $this->buildEntries();
-        return $this->entries;
+        return \array_slice($this->entries, 0, $this->count);
     }
 
     /**
@@ -117,20 +117,86 @@ final class BTreeLeafPage
 
     public function release(): void
     {
-        $this->data = '';
-        $this->meta = [];
-        $this->entries = null;
+        // Don't clear data/meta/entries - fromRaw() will overwrite them
         self::$pool[self::$poolCount++] = $this;
+    }
+
+    /**
+     * Serialize entries to binary page format.
+     * Uses $this->entries (flat format) and $this->count.
+     */
+    public function asString(): string
+    {
+        $n = $this->count;
+        if ($n === 0) {
+            return \pack('Cv', BTreeIndex::PAGE_LEAF, 0);
+        }
+
+        // Build entry data and calculate offsets + rowIdCounts
+        $entryData = '';
+        $offsets = [];
+        $rowIdCounts = [];
+
+        // Header size: type(1) + count(2) + offsets((n+1) * 2) + rowIdCounts(n * 2)
+        $headerSize = 3 + ($n + 1) * 2 + $n * 2;
+
+        for ($i = 0; $i < $n; $i++) {
+            $entry = $this->entries[$i];
+            $offsets[] = $headerSize + \strlen($entryData);
+            $rowIdCount = \count($entry) - 1;
+            $rowIdCounts[] = $rowIdCount;
+
+            // Entry: rowIds(8 each) + key
+            $entryBytes = '';
+            for ($j = 1; $j <= $rowIdCount; $j++) {
+                $entryBytes .= \pack('P', $entry[$j]);
+            }
+            $entryBytes .= $entry[0]; // key
+            $entryData .= $entryBytes;
+        }
+
+        // End marker offset
+        $offsets[] = $headerSize + \strlen($entryData);
+
+        // Build page: type(1) + count(2) + offsets + rowIdCounts + entries
+        $page = \pack('Cv', BTreeIndex::PAGE_LEAF, $n);
+        foreach ($offsets as $off) {
+            $page .= \pack('v', $off);
+        }
+        foreach ($rowIdCounts as $cnt) {
+            $page .= \pack('v', $cnt);
+        }
+        $page .= $entryData;
+
+        return $page;
+    }
+
+    /**
+     * Get a leaf page from pool (or create new) and set entries.
+     * @param array<array<int, string|int>> $entries Flat format [[key, rowId1, ...], ...]
+     */
+    public static function fromEntries(array $entries): self
+    {
+        if (self::$poolCount > 0) {
+            $instance = self::$pool[--self::$poolCount];
+        } else {
+            $instance = new self();
+        }
+        $instance->entries = $entries;
+        $instance->count = \count($entries);
+        $instance->entriesBuilt = true;
+        return $instance;
     }
 }
 
 /**
  * Parsed internal page - children are page numbers, keys are separators.
- * Uses object pooling to avoid GC overhead.
  *
  * Page format:
  * - Header: type(1) + count(2) + children((n+1) * 8) + offsets((n+1) * 2)
  * - Key data: keys concatenated (keyLen = offsets[i+1] - offsets[i])
+ *
+ * Keys are parsed eagerly since internal pages are cached and reused.
  *
  * @internal
  */
@@ -142,12 +208,10 @@ final class BTreeInternalPage
 
     /** Number of children */
     public int $childCount;
-    /** @var array<int, int> Child page numbers (1-based from unpack) */
+    /** @var array<int, int> Child page numbers (1-based from unpack, 0-based when building) */
     public array $children;
     /** @var string[] Separator keys (0-based) */
     public array $keys;
-
-    private function __construct() {}
 
     public static function fromRaw(string $data): self
     {
@@ -180,13 +244,30 @@ final class BTreeInternalPage
     }
 
     /**
-     * Create internal page from children and keys arrays.
+     * Get an internal page from pool (or create new) and set children/keys.
      * @param int[] $children 0-based array of child page numbers
      * @param string[] $keys 0-based array of separator keys
      */
-    public static function create(array $children, array $keys): string
+    public static function fromArrays(array $children, array $keys): self
     {
-        $n = count($keys);
+        if (self::$poolCount > 0) {
+            $instance = self::$pool[--self::$poolCount];
+        } else {
+            $instance = new self();
+        }
+        $instance->children = $children;
+        $instance->childCount = \count($children);
+        $instance->keys = $keys;
+        return $instance;
+    }
+
+    /**
+     * Serialize to binary page format.
+     * Children must be 0-based when building (not 1-based from unpack).
+     */
+    public function asString(): string
+    {
+        $n = \count($this->keys);
 
         // Header size: type(1) + count(2) + children((n+1)*8) + offsets((n+1)*2)
         $headerSize = 3 + ($n + 1) * 8 + ($n + 1) * 2;
@@ -194,16 +275,16 @@ final class BTreeInternalPage
         // Build key data and calculate offsets
         $keyData = '';
         $offsets = [];
-        foreach ($keys as $key) {
-            $offsets[] = $headerSize + strlen($keyData);
+        foreach ($this->keys as $key) {
+            $offsets[] = $headerSize + \strlen($keyData);
             $keyData .= $key;
         }
-        $offsets[] = $headerSize + strlen($keyData); // End marker
+        $offsets[] = $headerSize + \strlen($keyData); // End marker
 
         // Build page
-        $page = \pack('Cv', 0x01, $n); // PAGE_INTERNAL = 0x01
+        $page = \pack('Cv', BTreeIndex::PAGE_INTERNAL, $n);
 
-        foreach ($children as $child) {
+        foreach ($this->children as $child) {
             $page .= \pack('P', $child);
         }
 
@@ -217,8 +298,6 @@ final class BTreeInternalPage
 
     public function release(): void
     {
-        $this->children = [];
-        $this->keys = [];
         self::$pool[self::$poolCount++] = $this;
     }
 }
@@ -254,9 +333,9 @@ final class BTreeIndex implements IndexInterface
     // So max key = PAGE_SIZE - 19 = 4077
     private const MAX_KEY_LENGTH = 4077;
 
-    // Page types
-    private const PAGE_INTERNAL = 0x01;
-    private const PAGE_LEAF = 0x02;
+    // Page types (public for BTreeLeafPage/BTreeInternalPage::asString())
+    public const PAGE_INTERNAL = 0x01;
+    public const PAGE_LEAF = 0x02;
 
     /** @var resource|null File handle */
     private $file = null;
@@ -403,8 +482,9 @@ final class BTreeIndex implements IndexInterface
 
                     if ($this->rootPage === 0) {
                         // Empty tree - create first leaf
-                        $leaf = $this->createLeafPage([[$key, $rowId]]);
-                        $this->rootPage = $this->appendPage($leaf);
+                        $leaf = BTreeLeafPage::fromEntries([[$key, $rowId]]);
+                        $this->rootPage = $this->appendPage($leaf->asString());
+                        $leaf->release();
                     } else {
                         $path = $this->findPath($key);
                         $this->insertIntoTree($key, $rowId, $path);
@@ -505,9 +585,9 @@ final class BTreeIndex implements IndexInterface
 
             if ($this->rootPage === 0) {
                 // Empty tree - create first leaf
-                $leaf = $this->createLeafPage([[$key, $rowId]]);
-                $pageNum = $this->appendPage($leaf);
-                $this->rootPage = $pageNum;
+                $leaf = BTreeLeafPage::fromEntries([[$key, $rowId]]);
+                $this->rootPage = $this->appendPage($leaf->asString());
+                $leaf->release();
             } else {
                 // Find path to leaf and insert
                 $path = $this->findPath($key);
@@ -718,7 +798,7 @@ final class BTreeIndex implements IndexInterface
 
             try {
                 // Write header placeholder (full page for alignment)
-                fwrite($temp, str_repeat("\0", self::PAGE_SIZE));
+                fwrite($temp, pack('@' . self::PAGE_SIZE));
 
                 // Rewrite all reachable pages
                 $pageMap = []; // old page => new page
@@ -738,8 +818,7 @@ final class BTreeIndex implements IndexInterface
                     $newNextPage,
                     $this->sequence + 1
                 );
-                $header .= str_repeat("\0", self::PAGE_SIZE - strlen($header));
-                fwrite($temp, $header);
+                fwrite($temp, pack('a' . self::PAGE_SIZE, $header));
 
                 fclose($temp);
 
@@ -849,11 +928,9 @@ final class BTreeIndex implements IndexInterface
             $this->nextPage,
             $this->sequence
         );
-        // Pad to full page size
-        $header .= str_repeat("\0", self::PAGE_SIZE - strlen($header));
 
         fseek($this->file, 0);
-        fwrite($this->file, $header);
+        fwrite($this->file, pack('a' . self::PAGE_SIZE, $header));
         fflush($this->file);
 
         // Update cache sequence and clear stale cached pages
@@ -977,13 +1054,8 @@ final class BTreeIndex implements IndexInterface
         // Page 0 is the header page, data pages start at 1
         $offset = $pageNum * self::PAGE_SIZE;
 
-        // Pad page to PAGE_SIZE
-        if (strlen($page) < self::PAGE_SIZE) {
-            $page .= str_repeat("\0", self::PAGE_SIZE - strlen($page));
-        }
-
         fseek($this->file, $offset);
-        fwrite($this->file, $page);
+        fwrite($this->file, pack('a' . self::PAGE_SIZE, $page));
         fflush($this->file);
 
         return $pageNum;
@@ -992,55 +1064,6 @@ final class BTreeIndex implements IndexInterface
     // =========================================================================
     // Leaf page format
     // =========================================================================
-
-    /**
-     * Create a leaf page from entries.
-     * Header format: type(1) + count(2) + offsets((n+1) * 2) + rowIdCounts(n * 2)
-     * Entry format: rowIds(8 each) + key - no per-entry metadata
-     * @param array<array<int, string|int>> $entries Flat format: [[key, rowId1, rowId2, ...], ...]
-     */
-    private function createLeafPage(array $entries): string
-    {
-        $n = count($entries);
-
-        // Build entry data and calculate offsets + rowIdCounts
-        $entryData = '';
-        $offsets = [];      // n+1 offsets (last is end marker)
-        $rowIdCounts = [];  // n rowIdCounts
-
-        // Header size: type(1) + count(2) + offsets((n+1) * 2) + rowIdCounts(n * 2)
-        $headerSize = 3 + ($n + 1) * 2 + $n * 2;
-
-        foreach ($entries as $entry) {
-            // Entry offset from page start
-            $offsets[] = $headerSize + strlen($entryData);
-            $rowIdCount = count($entry) - 1; // minus the key at index 0
-            $rowIdCounts[] = $rowIdCount;
-
-            // Entry: rowIds(8 each) + key
-            $entryBytes = '';
-            for ($i = 1; $i <= $rowIdCount; $i++) {
-                $entryBytes .= pack('P', $entry[$i]);
-            }
-            $entryBytes .= $entry[0]; // key
-            $entryData .= $entryBytes;
-        }
-
-        // End marker offset
-        $offsets[] = $headerSize + strlen($entryData);
-
-        // Build page: type(1) + count(2) + offsets((n+1) * 2) + rowIdCounts(n * 2) + entries
-        $page = pack('Cv', self::PAGE_LEAF, $n);
-        foreach ($offsets as $off) {
-            $page .= pack('v', $off);
-        }
-        foreach ($rowIdCounts as $cnt) {
-            $page .= pack('v', $cnt);
-        }
-        $page .= $entryData;
-
-        return $page;
-    }
 
     private function parseLeafPage(string $page): BTreeLeafPage
     {
@@ -1058,8 +1081,6 @@ final class BTreeIndex implements IndexInterface
     private function findChildIndex(array $keys, string $key): int
     {
         // Binary search for first key >= $key
-        // This ensures we go to the leftmost child that could contain the key
-        // (important when there are duplicate keys in separator positions)
         $lo = 0;
         $hi = count($keys);
         while ($lo < $hi) {
@@ -1133,23 +1154,28 @@ final class BTreeIndex implements IndexInterface
         }
 
         // Check if leaf needs splitting
-        $newLeaf = $this->createLeafPage($entries);
+        $leaf = BTreeLeafPage::fromEntries($entries);
+        $newLeaf = $leaf->asString();
 
         if (strlen($newLeaf) <= self::PAGE_SIZE) {
             // Fits - just append new leaf and update parent
             $newLeafNum = $this->appendPage($newLeaf);
+            $leaf->release();
             $this->updatePath($path, $leafPageNum, $newLeafNum, null, null);
         } else {
             // Split required
+            $leaf->release();
             $mid = count($entries) >> 1;
             $leftEntries = array_slice($entries, 0, $mid);
             $rightEntries = array_slice($entries, $mid);
 
-            $leftLeaf = $this->createLeafPage($leftEntries);
-            $rightLeaf = $this->createLeafPage($rightEntries);
+            $leftLeaf = BTreeLeafPage::fromEntries($leftEntries);
+            $rightLeaf = BTreeLeafPage::fromEntries($rightEntries);
 
-            $leftNum = $this->appendPage($leftLeaf);
-            $rightNum = $this->appendPage($rightLeaf);
+            $leftNum = $this->appendPage($leftLeaf->asString());
+            $rightNum = $this->appendPage($rightLeaf->asString());
+            $leftLeaf->release();
+            $rightLeaf->release();
 
             // Promote first key of right leaf
             $promoteKey = $rightEntries[0][0];
@@ -1173,12 +1199,13 @@ final class BTreeIndex implements IndexInterface
         return $lo;
     }
 
-    private function propagateSplit(array $path, int $oldChild, int $leftChild, int $rightChild, string $promoteKey): void
+    private function propagateSplit(array $path, int $_oldChild, int $leftChild, int $rightChild, string $promoteKey): void
     {
         if (empty($path)) {
             // Create new root
-            $newRoot = BTreeInternalPage::create([$leftChild, $rightChild], [$promoteKey]);
-            $this->rootPage = $this->appendPage($newRoot);
+            $root = BTreeInternalPage::fromArrays([$leftChild, $rightChild], [$promoteKey]);
+            $this->rootPage = $this->appendPage($root->asString());
+            $root->release();
             return;
         }
 
@@ -1194,32 +1221,37 @@ final class BTreeIndex implements IndexInterface
         array_splice($keys, $childIndex, 0, [$promoteKey]);
 
         // Check if internal node needs splitting
-        $newParent = BTreeInternalPage::create($children, $keys);
+        $newParent = BTreeInternalPage::fromArrays($children, $keys);
+        $newParentStr = $newParent->asString();
 
-        if (strlen($newParent) <= self::PAGE_SIZE) {
+        if (strlen($newParentStr) <= self::PAGE_SIZE) {
             // Fits
-            $newParentNum = $this->appendPage($newParent);
+            $newParentNum = $this->appendPage($newParentStr);
+            $newParent->release();
             $this->updatePath($path, $parentPageNum, $newParentNum, null, null);
         } else {
             // Split internal node
+            $newParent->release();
             $mid = count($keys) >> 1;
             $leftKeys = array_slice($keys, 0, $mid);
             $rightKeys = array_slice($keys, $mid + 1);
             $leftChildren = array_slice($children, 0, $mid + 1);
             $rightChildren = array_slice($children, $mid + 1);
-            $promoteKey = $keys[$mid];
+            $splitPromoteKey = $keys[$mid];
 
-            $leftPage = BTreeInternalPage::create($leftChildren, $leftKeys);
-            $rightPage = BTreeInternalPage::create($rightChildren, $rightKeys);
+            $leftPage = BTreeInternalPage::fromArrays($leftChildren, $leftKeys);
+            $rightPage = BTreeInternalPage::fromArrays($rightChildren, $rightKeys);
 
-            $leftNum = $this->appendPage($leftPage);
-            $rightNum = $this->appendPage($rightPage);
+            $leftNum = $this->appendPage($leftPage->asString());
+            $rightNum = $this->appendPage($rightPage->asString());
+            $leftPage->release();
+            $rightPage->release();
 
-            $this->propagateSplit($path, $parentPageNum, $leftNum, $rightNum, $promoteKey);
+            $this->propagateSplit($path, $parentPageNum, $leftNum, $rightNum, $splitPromoteKey);
         }
     }
 
-    private function updatePath(array $path, int $oldChild, int $newChild, ?int $extraChild, ?string $extraKey): void
+    private function updatePath(array $path, int $_oldChild, int $newChild, ?int $extraChild, ?string $extraKey): void
     {
         if (empty($path)) {
             // We've reached the root level
@@ -1227,8 +1259,9 @@ final class BTreeIndex implements IndexInterface
                 $this->rootPage = $newChild;
             } else {
                 // This shouldn't happen - splits are handled in propagateSplit
-                $newRoot = BTreeInternalPage::create([$newChild, $extraChild], [$extraKey]);
-                $this->rootPage = $this->appendPage($newRoot);
+                $root = BTreeInternalPage::fromArrays([$newChild, $extraChild], [$extraKey]);
+                $this->rootPage = $this->appendPage($root->asString());
+                $root->release();
             }
             return;
         }
@@ -1247,8 +1280,9 @@ final class BTreeIndex implements IndexInterface
             array_splice($keys, $childIndex, 0, [$extraKey]);
         }
 
-        $newParent = BTreeInternalPage::create($children, $keys);
-        $newParentNum = $this->appendPage($newParent);
+        $newParent = BTreeInternalPage::fromArrays($children, $keys);
+        $newParentNum = $this->appendPage($newParent->asString());
+        $newParent->release();
 
         $this->updatePath($path, $parentPageNum, $newParentNum, null, null);
     }
@@ -1299,8 +1333,9 @@ final class BTreeIndex implements IndexInterface
         }
 
         // Create new leaf (even if empty - lazy cleanup via compact)
-        $newLeaf = $this->createLeafPage($entries);
-        $newLeafNum = $this->appendPage($newLeaf);
+        $leaf = BTreeLeafPage::fromEntries($entries);
+        $newLeafNum = $this->appendPage($leaf->asString());
+        $leaf->release();
 
         $this->updatePath($path, $leafPageNum, $newLeafNum, null, null);
     }
@@ -1358,7 +1393,7 @@ final class BTreeIndex implements IndexInterface
             // Flat format: [0 => key, 1 => id1, 2 => id2, ...]
             $page->buildEntries();
             $entries = $page->entries;
-            $entryCount = count($entries);
+            $entryCount = $page->count;
 
             for ($e = 0; $e < $entryCount; $e++) {
                 $entry = $entries[$e];
@@ -1447,13 +1482,17 @@ final class BTreeIndex implements IndexInterface
             $chunk = array_slice($entries, $i, $maxPerLeaf);
 
             // Check if chunk fits in a page, split if needed
-            $page = $this->createLeafPage($chunk);
+            $leaf = BTreeLeafPage::fromEntries($chunk);
+            $page = $leaf->asString();
             while (strlen($page) > self::PAGE_SIZE && count($chunk) > 1) {
+                $leaf->release();
                 $chunk = array_slice($chunk, 0, (int)(count($chunk) * 0.8));
-                $page = $this->createLeafPage($chunk);
+                $leaf = BTreeLeafPage::fromEntries($chunk);
+                $page = $leaf->asString();
             }
 
             $pageNum = $this->appendPage($page);
+            $leaf->release();
             $leafPages[] = $pageNum;
             $leafKeys[] = $chunk[0][0];
 
@@ -1496,17 +1535,22 @@ final class BTreeIndex implements IndexInterface
                     $i++;
 
                     // Check if page fits
-                    $page = BTreeInternalPage::create($nodeChildren, $nodeKeys);
-                    if (strlen($page) > self::PAGE_SIZE) {
+                    $node = BTreeInternalPage::fromArrays($nodeChildren, $nodeKeys);
+                    $pageStr = $node->asString();
+                    if (strlen($pageStr) > self::PAGE_SIZE) {
                         // Back up one
+                        $node->release();
                         array_pop($nodeChildren);
                         array_pop($nodeKeys);
                         $i--;
                         break;
                     }
+                    $node->release();
                 }
 
-                $pageNum = $this->appendPage(BTreeInternalPage::create($nodeChildren, $nodeKeys));
+                $node = BTreeInternalPage::fromArrays($nodeChildren, $nodeKeys);
+                $pageNum = $this->appendPage($node->asString());
+                $node->release();
                 $newChildren[] = $pageNum;
                 $newKeys[] = $nodeFirstKey; // Propagate first key of this subtree
             }
@@ -1656,7 +1700,7 @@ final class BTreeIndex implements IndexInterface
         while (true) {
             $leaf->buildEntries();
             $entries = $leaf->entries;
-            $entryCount = count($entries);
+            $entryCount = $leaf->count;
 
             for ($e = 0; $e < $entryCount; $e++) {
                 $entry = $entries[$e];
@@ -1743,7 +1787,7 @@ final class BTreeIndex implements IndexInterface
         while (true) {
             $leaf->buildEntries();
             $entries = $leaf->entries;
-            $entryCount = count($entries);
+            $entryCount = $leaf->count;
 
             for ($e = $entryCount - 1; $e >= 0; $e--) {
                 $entry = $entries[$e];
@@ -1823,7 +1867,7 @@ final class BTreeIndex implements IndexInterface
         while (true) {
             $leaf->buildEntries();
             $entries = $leaf->entries;
-            $entryCount = count($entries);
+            $entryCount = $leaf->count;
 
             for ($e = 0; $e < $entryCount; $e++) {
                 $entry = $entries[$e];
@@ -1911,7 +1955,7 @@ final class BTreeIndex implements IndexInterface
         while (true) {
             $leaf->buildEntries();
             $entries = $leaf->entries;
-            $entryCount = count($entries);
+            $entryCount = $leaf->count;
 
             for ($e = $entryCount - 1; $e >= 0; $e--) {
                 $entry = $entries[$e];
@@ -2007,17 +2051,15 @@ final class BTreeIndex implements IndexInterface
         }
 
         // Create new internal page with updated children
-        $newPage = BTreeInternalPage::create($newChildren, $page->keys);
-        if (strlen($newPage) < self::PAGE_SIZE) {
-            $newPage .= str_repeat("\0", self::PAGE_SIZE - strlen($newPage));
-        }
+        $newNode = BTreeInternalPage::fromArrays($newChildren, $page->keys);
 
         $newPageNum = $newNextPage++;
         $pageMap[$pageNum] = $newPageNum;
 
         $offset = $newPageNum * self::PAGE_SIZE;
         fseek($temp, $offset);
-        fwrite($temp, $newPage);
+        fwrite($temp, pack('a' . self::PAGE_SIZE, $newNode->asString()));
+        $newNode->release();
 
         return $newPageNum;
     }
