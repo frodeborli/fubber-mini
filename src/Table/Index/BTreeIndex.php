@@ -64,7 +64,7 @@ final class BTreeIndex implements IndexInterface
     private array $deleteBuffer = [];
 
     // Page cache (LRU) - stores parsed data, not raw bytes
-    private const CACHE_MAX_PAGES = 128;
+    private const CACHE_MAX_PAGES = 1024;
     private const CACHE_CHECK_INTERVAL = 1000; // Check for file changes every N reads
 
     /** @var array<int, array> Parsed page cache: pageNum => [type, parsedData] */
@@ -635,6 +635,7 @@ final class BTreeIndex implements IndexInterface
 
     /**
      * Get cached parsed page, reading and parsing if not cached.
+     * Only internal nodes are cached - leaf nodes are read fresh each time.
      * @return array{int, mixed} [type, parsedData]
      */
     private function getCachedPage(int $pageNum): array
@@ -645,7 +646,7 @@ final class BTreeIndex implements IndexInterface
             $this->checkCacheValidity();
         }
 
-        // Check cache
+        // Check cache (internal nodes only)
         if (isset($this->pageCache[$pageNum])) {
             // Move to end for LRU (unset + set)
             $cached = $this->pageCache[$pageNum];
@@ -659,12 +660,12 @@ final class BTreeIndex implements IndexInterface
         $type = ord($page[0]);
 
         if ($type === self::PAGE_LEAF) {
-            $parsed = [self::PAGE_LEAF, $this->parseLeafPage($page)];
-        } else {
-            $parsed = [self::PAGE_INTERNAL, $this->parseInternalPage($page)];
+            // Don't cache leaf nodes - they're accessed once per query
+            return [self::PAGE_LEAF, $this->parseLeafPage($page)];
         }
 
-        // Add to cache
+        // Cache internal nodes - they're traversed repeatedly
+        $parsed = [self::PAGE_INTERNAL, $this->parseInternalPage($page)];
         $this->pageCache[$pageNum] = $parsed;
 
         // Evict oldest if over limit
