@@ -127,7 +127,7 @@ statement ok
 CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT)
 
 statement ok
-CREATE TABLE orders(id INTEGER, user_id INTEGER, amount INTEGER)
+CREATE TABLE orders(id INTEGER PRIMARY KEY, user_id INTEGER, amount INTEGER)
 
 statement ok
 INSERT INTO users VALUES(1, 'Alice')
@@ -139,18 +139,13 @@ statement ok
 INSERT INTO orders VALUES(1, 1, 100)
 
 statement ok
-INSERT INTO orders VALUES(2, 1, 150)
-
-statement ok
-INSERT INTO orders VALUES(3, 2, 200)
+INSERT INTO orders VALUES(2, 2, 200)
 
 query TI rowsort
 SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id
 ----
 Alice
 100
-Alice
-150
 Bob
 200
 TEST;

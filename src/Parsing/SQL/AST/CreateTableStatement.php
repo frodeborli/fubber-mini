@@ -10,6 +10,7 @@ class CreateTableStatement extends ASTNode
     public string $type = 'CREATE_TABLE_STATEMENT';
     public IdentifierNode $table;
     public bool $ifNotExists = false;
+    public bool $temporary = false;
     /** @var ColumnDefinition[] */
     public array $columns = [];
     /** @var TableConstraint[] */

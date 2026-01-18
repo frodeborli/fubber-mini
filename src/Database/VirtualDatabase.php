@@ -111,6 +111,9 @@ class VirtualDatabase implements DatabaseInterface
     /** Table class to use for CREATE TABLE (InMemoryTable or ArrayTable) */
     private string $tableClass = ArrayTable::class;
 
+    /** Current session for temp table resolution (set during query execution) */
+    private ?Session $currentSession = null;
+
     public function __construct()
     {
         $this->evaluator = new ExpressionEvaluator();
@@ -189,6 +192,71 @@ class VirtualDatabase implements DatabaseInterface
     {
         $this->tableClass = ArrayTable::class;
         return $this;
+    }
+
+    /**
+     * Create a new session for this database
+     *
+     * Sessions provide isolated temporary table storage. Each session has its
+     * own namespace for TEMPORARY tables, preventing collisions in fiber/coroutine
+     * environments where multiple requests may share the same VDB instance.
+     *
+     * @return Session A new session wrapping this database
+     */
+    public function session(): Session
+    {
+        return new Session($this);
+    }
+
+    /**
+     * Execute a SELECT query with session context
+     *
+     * @internal Used by Session to execute queries with temp table resolution
+     */
+    public function queryWithSession(string $sql, array $params, Session $session): Query
+    {
+        $pq = PartialQuery::fromSql($this, $this->rawExecutorWithSession($session), $sql, $params);
+        return $this->wrapQuery($pq);
+    }
+
+    /**
+     * Execute an INSERT/UPDATE/DELETE/DDL with session context
+     *
+     * @internal Used by Session to execute statements with temp table support
+     */
+    public function execWithSession(string $sql, array $params, Session $session): int
+    {
+        $ast = SqlParser::parseWithParams($sql, $params);
+
+        if ($ast instanceof InsertStatement) {
+            return $this->executeInsertWithSession($ast, $session);
+        }
+
+        if ($ast instanceof UpdateStatement) {
+            return $this->executeUpdateWithSession($ast, $session);
+        }
+
+        if ($ast instanceof DeleteStatement) {
+            return $this->executeDeleteWithSession($ast, $session);
+        }
+
+        if ($ast instanceof CreateTableStatement) {
+            return $this->executeCreateTableWithSession($ast, $session);
+        }
+
+        if ($ast instanceof DropTableStatement) {
+            return $this->executeDropTableWithSession($ast, $session);
+        }
+
+        if ($ast instanceof CreateIndexStatement) {
+            return 0;
+        }
+
+        if ($ast instanceof DropIndexStatement) {
+            return 0;
+        }
+
+        throw new \RuntimeException("exec() only accepts INSERT, UPDATE, DELETE, or DDL statements");
     }
 
     /**
@@ -376,9 +444,20 @@ class VirtualDatabase implements DatabaseInterface
 
     /**
      * Get a registered table by name
+     *
+     * If a session is active (during query execution), checks the session's
+     * temporary tables first before checking permanent tables.
      */
     public function getTable(string $name): ?TableInterface
     {
+        // Check session temp tables first if we have a session context
+        if ($this->currentSession !== null) {
+            $tempTable = $this->currentSession->getTempTable($name);
+            if ($tempTable !== null) {
+                return $tempTable;
+            }
+        }
+
         return $this->tables[strtolower($name)] ?? null;
     }
 
@@ -542,6 +621,150 @@ class VirtualDatabase implements DatabaseInterface
         } finally {
             $this->queryStartTime = null;
         }
+    }
+
+    /**
+     * Create raw executor closure with session context
+     *
+     * @internal Used by Session for query execution with temp table support
+     */
+    private function rawExecutorWithSession(Session $session): \Closure
+    {
+        // Uses yield from so finally runs after iteration completes, not when closure returns.
+        // This ensures currentSession stays set during the entire query execution.
+        return function (PartialQuery $query, ?ASTNode $ast) use ($session): \Traversable {
+            $previousSession = $this->currentSession;
+            $this->currentSession = $session;
+            try {
+                if ($ast === null) {
+                    $ast = self::peekAst($query);
+                }
+
+                if ($ast instanceof WithStatement) {
+                    yield from $this->wrapWithTimeout($this->executeWithStatement($ast));
+                    return;
+                }
+
+                if ($ast instanceof UnionNode) {
+                    $table = $this->executeUnionAsTable($ast);
+                    yield from $this->wrapWithTimeout($table);
+                    return;
+                }
+
+                if (!$ast instanceof SelectStatement) {
+                    throw new \RuntimeException("query() only accepts SELECT statements");
+                }
+
+                yield from $this->wrapWithTimeout($this->executeSelect($ast));
+            } finally {
+                $this->currentSession = $previousSession;
+            }
+        };
+    }
+
+    /**
+     * Execute INSERT with session context
+     */
+    private function executeInsertWithSession(InsertStatement $ast, Session $session): int
+    {
+        $previousSession = $this->currentSession;
+        $this->currentSession = $session;
+        try {
+            return $this->executeInsert($ast);
+        } finally {
+            $this->currentSession = $previousSession;
+        }
+    }
+
+    /**
+     * Execute UPDATE with session context
+     */
+    private function executeUpdateWithSession(UpdateStatement $ast, Session $session): int
+    {
+        $previousSession = $this->currentSession;
+        $this->currentSession = $session;
+        try {
+            return $this->executeUpdate($ast);
+        } finally {
+            $this->currentSession = $previousSession;
+        }
+    }
+
+    /**
+     * Execute DELETE with session context
+     */
+    private function executeDeleteWithSession(DeleteStatement $ast, Session $session): int
+    {
+        $previousSession = $this->currentSession;
+        $this->currentSession = $session;
+        try {
+            return $this->executeDelete($ast);
+        } finally {
+            $this->currentSession = $previousSession;
+        }
+    }
+
+    /**
+     * Execute CREATE TABLE with session context
+     *
+     * TEMPORARY tables are stored in the session, not the main tables array.
+     */
+    private function executeCreateTableWithSession(CreateTableStatement $ast, Session $session): int
+    {
+        $tableName = $ast->table->getName();
+
+        // Check existence (temp tables take precedence)
+        $exists = $session->hasTempTable($tableName) || $this->tableExists($tableName);
+        if ($exists) {
+            if ($ast->ifNotExists) {
+                return 0;
+            }
+            throw new \RuntimeException("Table already exists: $tableName");
+        }
+
+        // Convert AST column definitions to ColumnDef objects
+        $columnDefs = [];
+        foreach ($ast->columns as $col) {
+            $columnDefs[] = $this->astColumnToColumnDef($col, $ast->constraints);
+        }
+
+        // Create the table
+        $tableClass = $this->tableClass;
+        $table = new $tableClass(...$columnDefs);
+
+        // Store in session if TEMPORARY, otherwise in main tables
+        if ($ast->temporary) {
+            $session->setTempTable($tableName, $table);
+        } else {
+            $this->registerTable($tableName, $table);
+        }
+
+        return 0;
+    }
+
+    /**
+     * Execute DROP TABLE with session context
+     */
+    private function executeDropTableWithSession(DropTableStatement $ast, Session $session): int
+    {
+        $tableName = $ast->table->getName();
+
+        // Check temp tables first
+        if ($session->hasTempTable($tableName)) {
+            $session->dropTempTable($tableName);
+            return 0;
+        }
+
+        // Fall back to permanent tables
+        if (!$this->tableExists($tableName)) {
+            if ($ast->ifExists) {
+                return 0;
+            }
+            throw new \RuntimeException("Table not found: $tableName");
+        }
+
+        unset($this->tables[strtolower($tableName)]);
+        return 0;
     }
 
     /**
@@ -3682,10 +3905,19 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
-     * Execute CREATE TABLE - creates an InMemoryTable with the given schema
+     * Execute CREATE TABLE - creates a table with the given schema
+     *
+     * TEMPORARY tables require a session context. Use $vdb->session()->exec() for temp tables.
      */
     private function executeCreateTable(CreateTableStatement $ast): int
     {
+        // TEMPORARY tables require a session
+        if ($ast->temporary) {
+            throw new \RuntimeException(
+                "CREATE TEMPORARY TABLE requires a session. Use \$vdb->session()->exec() instead."
+            );
+        }
+
         $tableName = $ast->table->getName();
 
         // Check IF NOT EXISTS

@@ -193,3 +193,69 @@ protected function setUp(): void
 ```
 
 Note: `set()` must be called before `get()` retrieves the service, otherwise it throws an exception to prevent shadowing already-instantiated services.
+
+## SQL Logic Test Suite
+
+Mini includes integration with the [SQLLogicTest](https://www.sqlite.org/sqllogictest/doc/trunk/about.wiki) suite for verifying VirtualDatabase SQL compliance. This suite contains ~11,000 queries that test SQL behavior against SQLite as a reference.
+
+### Quick Tests
+
+The standard test suite (`mini test`) includes basic SQL Logic Tests that run without external dependencies:
+
+```bash
+vendor/bin/mini test tests/Database/SqlLogicTestSuite.php
+```
+
+This runs:
+- Built-in tests for DDL, DML, JOINs, aggregates, and subqueries
+- A sample from the bundled test file
+- Extended tests if the full test data is installed
+
+### Full Test Suite
+
+For comprehensive SQL compliance testing, install the full test data:
+
+```bash
+cd tests
+git clone https://github.com/dolthub/sqllogictest sqllogictest-data
+```
+
+Then run the full suite with the dedicated CLI tool:
+
+```bash
+# Run all tests (~11k queries, takes ~1 minute)
+bin/sql-logic-test
+
+# Run specific test files
+bin/sql-logic-test select1              # Just select1.test
+bin/sql-logic-test evidence             # All evidence/ tests
+
+# Debug failures
+bin/sql-logic-test --stop-on-error      # Stop on first failure
+bin/sql-logic-test --print-errors       # Show exception details
+```
+
+### Current Compliance
+
+VirtualDatabase passes ~93% of applicable SQLLogicTest queries. Known limitations:
+- Queries with 9+ joined tables are rejected (complexity cap)
+- Some edge cases in UPDATE/DELETE with complex conditions
+
+### Test Data Structure
+
+```
+tests/
+├── sqllogictest/              # Bundled test files (always available)
+│   └── slt_good_0.test        # Sample test file
+└── sqllogictest-data/         # External test data (git clone)
+    └── test/
+        ├── select1.test       # Core SELECT tests
+        ├── select2.test
+        ├── select3.test
+        ├── select4.test
+        ├── select5.test       # Complex multi-table queries
+        └── evidence/          # SQL standard compliance tests
+            ├── in1.test
+            ├── in2.test
+            └── slt_lang_*.test
+```

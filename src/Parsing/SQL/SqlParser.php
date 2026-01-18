@@ -1328,7 +1328,15 @@ class SqlParser
         }
 
         if ($token['type'] === SqlLexer::T_TABLE) {
-            return $this->parseCreateTable();
+            $this->pos++; // consume TABLE token
+            return $this->parseCreateTable(temporary: false);
+        }
+
+        // CREATE TEMPORARY TABLE or CREATE TEMP TABLE
+        if ($token['type'] === SqlLexer::T_TEMPORARY || $token['type'] === SqlLexer::T_TEMP) {
+            $this->pos++;
+            $this->expect(SqlLexer::T_TABLE);
+            return $this->parseCreateTable(temporary: true);
         }
 
         if ($token['type'] === SqlLexer::T_INDEX) {
@@ -1346,12 +1354,12 @@ class SqlParser
     /**
      * Parse CREATE TABLE statement
      *
-     * Syntax: CREATE TABLE [IF NOT EXISTS] name (column_def, ..., [constraint, ...])
+     * Syntax: CREATE [TEMPORARY|TEMP] TABLE [IF NOT EXISTS] name (column_def, ..., [constraint, ...])
      */
-    private function parseCreateTable(): CreateTableStatement
+    private function parseCreateTable(bool $temporary = false): CreateTableStatement
     {
-        $this->expect(SqlLexer::T_TABLE);
         $stmt = new CreateTableStatement();
+        $stmt->temporary = $temporary;
 
         // IF NOT EXISTS
         if ($this->match(SqlLexer::T_IF)) {

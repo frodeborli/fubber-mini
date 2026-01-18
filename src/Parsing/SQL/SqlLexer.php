@@ -94,6 +94,8 @@ class SqlLexer
     public const T_RESTRICT = 'RESTRICT';
     public const T_ACTION = 'ACTION';
     public const T_NO = 'NO';
+    public const T_TEMPORARY = 'TEMPORARY';
+    public const T_TEMP = 'TEMP';
 
     public const T_IDENTIFIER = 'IDENTIFIER';
     public const T_STRING = 'STRING';
@@ -139,6 +141,7 @@ class SqlLexer
         'AUTOINCREMENT' => self::T_AUTOINCREMENT, 'CHECK' => self::T_CHECK,
         'CASCADE' => self::T_CASCADE, 'RESTRICT' => self::T_RESTRICT,
         'ACTION' => self::T_ACTION, 'NO' => self::T_NO,
+        'TEMPORARY' => self::T_TEMPORARY, 'TEMP' => self::T_TEMP,
     ];
 
     /**
