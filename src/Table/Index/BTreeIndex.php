@@ -134,7 +134,7 @@ final class BTreeLeafPage
         $meta = $this->meta;
         $entries = $this->entries;
 
-        // Extract offsets and rowIdCounts from 1-based meta into 0-based arrays
+        // Extract offsets (n+1) and rowIdCounts (n) from 1-based meta
         $offsets = [];
         $rowIdCounts = [];
         for ($i = 1; $i <= $n + 1; $i++) {
@@ -144,27 +144,23 @@ final class BTreeLeafPage
             $rowIdCounts[] = $meta[$i];
         }
 
-        // Build header in fewer allocations
-        $page = \pack('Cv', BTreeIndex::PAGE_LEAF, $n)
-              . \pack('v*', ...$offsets)
-              . \pack('v*', ...$rowIdCounts);
-
-        // Entry data: rowIds + key for each entry
+        // Build entry data: rowIds + key for each entry
+        $entryData = '';
         for ($i = 0; $i < $n; $i++) {
             $entry = $entries[$i];
             $rowIdCount = $rowIdCounts[$i];
             if ($rowIdCount > 0) {
-                // Build rowIds array explicitly (entry is [0 => key, 1..n => rowIds])
                 $rowIds = [];
                 for ($j = 1; $j <= $rowIdCount; $j++) {
                     $rowIds[] = $entry[$j];
                 }
-                $page .= \pack('P*', ...$rowIds);
+                $entryData .= \pack('P*', ...$rowIds);
             }
-            $page .= $entry[0]; // key
+            $entryData .= $entry[0]; // key
         }
 
-        return $page;
+        // Single pack for header, then append entry data
+        return \pack('Cvv' . ($n + 1) . 'v' . $n, BTreeIndex::PAGE_LEAF, $n, ...$offsets, ...$rowIdCounts) . $entryData;
     }
 
     /**
@@ -289,9 +285,10 @@ final class BTreeInternalPage
     public function asString(): string
     {
         $n = \count($this->keys);
+        $c = $n + 1; // child/offset count
 
         // Header size: type(1) + count(2) + children((n+1)*8) + offsets((n+1)*2)
-        $headerSize = 3 + ($n + 1) * 8 + ($n + 1) * 2;
+        $headerSize = 3 + $c * 8 + $c * 2;
 
         // Build key data and calculate offsets
         $keyData = '';
@@ -302,12 +299,8 @@ final class BTreeInternalPage
         }
         $offsets[] = $headerSize + \strlen($keyData); // End marker
 
-        // Build page in fewer allocations
-        $page = \pack('Cv', BTreeIndex::PAGE_INTERNAL, $n)
-              . \pack('P*', ...$this->children)
-              . \pack('v*', ...$offsets)
-              . $keyData;
-        return $page;
+        // Single pack for header, then append key data
+        return \pack('CvP' . $c . 'v' . $c, BTreeIndex::PAGE_INTERNAL, $n, ...$this->children, ...$offsets) . $keyData;
     }
 
     public function release(): void
@@ -1069,7 +1062,7 @@ final class BTreeIndex implements IndexInterface
         $offset = $pageNum * self::PAGE_SIZE;
 
         fseek($this->file, $offset);
-        fwrite($this->file, pack('a' . self::PAGE_SIZE, $page));
+        fwrite($this->file, \pack('a' . self::PAGE_SIZE, $page));
         fflush($this->file);
 
         return $pageNum;
