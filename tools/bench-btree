@@ -1,0 +1,125 @@
+#!/usr/bin/env php
+<?php
+/**
+ * BTreeIndex Benchmark
+ *
+ * Usage: tools/bench-btree [rows] [queries]
+ *   rows    - Number of rows to index (default: 100000)
+ *   queries - Number of queries to run (default: 50000)
+ */
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use mini\Table\Index\BTreeIndex;
+
+$rows = (int)($argv[1] ?? 100_000);
+$queries = (int)($argv[2] ?? 50_000);
+
+$path = '/tmp/btree_bench_' . getmypid() . '.btree';
+register_shutdown_function(function() use ($path) {
+    @unlink($path);
+    @unlink($path . '.lock');
+});
+
+function bench(string $name, callable $fn, int $ops): array {
+    $start = hrtime(true);
+    $fn();
+    $elapsed = (hrtime(true) - $start) / 1e9;
+    $rate = $ops / $elapsed;
+    return [$name, $ops, $elapsed, $rate];
+}
+
+function formatRate(float $rate): string {
+    if ($rate >= 1_000_000) return sprintf('%.2fM/s', $rate / 1_000_000);
+    if ($rate >= 1_000) return sprintf('%.1fK/s', $rate / 1_000);
+    return sprintf('%.0f/s', $rate);
+}
+
+function printResult(array $r): void {
+    printf("%-30s %10s  %7.2fs  %s\n", $r[0], number_format($r[1]), $r[2], formatRate($r[3]));
+}
+
+echo "BTreeIndex Benchmark\n";
+echo "====================\n\n";
+echo "Rows: " . number_format($rows) . ", Queries: " . number_format($queries) . "\n\n";
+
+// Build index
+echo "Building index...\n";
+$t = hrtime(true);
+$index = BTreeIndex::fromGenerator($path, function() use ($rows) {
+    for ($i = 0; $i < $rows; $i++) {
+        yield [sprintf('%08d', $i), $i];
+    }
+});
+$buildTime = (hrtime(true) - $t) / 1e9;
+$fileSize = filesize($path);
+printf("Built in %.2fs, file size: %.1f MB\n\n", $buildTime, $fileSize / 1024 / 1024);
+
+// Random query keys
+$queryKeys = [];
+for ($i = 0; $i < $queries; $i++) {
+    $queryKeys[$i] = sprintf('%08d', mt_rand(0, $rows - 1));
+}
+
+echo sprintf("%-30s %10s  %8s  %s\n", "Operation", "Count", "Time", "Rate");
+echo str_repeat("-", 65) . "\n";
+
+// Point lookups
+printResult(bench("Point lookup (eq)", function() use ($index, $queryKeys, $queries) {
+    for ($i = 0; $i < $queries; $i++) {
+        foreach ($index->eq($queryKeys[$i]) as $id) {}
+    }
+}, $queries));
+
+// Has checks
+printResult(bench("Existence check (has)", function() use ($index, $queryKeys, $queries) {
+    for ($i = 0; $i < $queries; $i++) {
+        $index->has($queryKeys[$i]);
+    }
+}, $queries));
+
+// Range queries
+$rangeQueries = min(5000, $queries);
+printResult(bench("Range forward (100 keys)", function() use ($index, $rangeQueries, $rows) {
+    for ($i = 0; $i < $rangeQueries; $i++) {
+        $start = sprintf('%08d', mt_rand(0, $rows - 101));
+        $end = sprintf('%08d', (int)$start + 99);
+        foreach ($index->range($start, $end) as $id) {}
+    }
+}, $rangeQueries));
+
+printResult(bench("Range reverse (100 keys)", function() use ($index, $rangeQueries, $rows) {
+    for ($i = 0; $i < $rangeQueries; $i++) {
+        $start = sprintf('%08d', mt_rand(0, $rows - 101));
+        $end = sprintf('%08d', (int)$start + 99);
+        foreach ($index->range($start, $end, true) as $id) {}
+    }
+}, $rangeQueries));
+
+// Full scan
+printResult(bench("Full scan", function() use ($index) {
+    foreach ($index->range() as $id) {}
+}, $rows));
+
+printResult(bench("Full scan reverse", function() use ($index) {
+    foreach ($index->range(null, null, true) as $id) {}
+}, $rows));
+
+// Incremental inserts
+$insertCount = min(1000, $queries);
+$index2path = '/tmp/btree_bench2_' . getmypid() . '.btree';
+register_shutdown_function(function() use ($index2path) {
+    @unlink($index2path);
+    @unlink($index2path . '.lock');
+});
+
+printResult(bench("Single inserts (no txn)", function() use ($index2path, $insertCount) {
+    $idx = new BTreeIndex($index2path);
+    for ($i = 0; $i < $insertCount; $i++) {
+        $idx->insert(sprintf('%08d', $i), $i);
+    }
+    $idx->close();
+}, $insertCount));
+
+$index->close();
+echo "\nDone.\n";
