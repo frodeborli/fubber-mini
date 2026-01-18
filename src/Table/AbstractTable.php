@@ -28,9 +28,6 @@ abstract class AbstractTable implements TableInterface
 {
     use TablePropertiesTrait;
 
-    /** Maximum rows to buffer optimistically during iteration */
-    protected const OPTIMISTIC_BUFFER_COUNT = 1000;
-
     /** @var array<string, ColumnDef> All columns in the table */
     private readonly array $columnDefs;
 
@@ -42,24 +39,6 @@ abstract class AbstractTable implements TableInterface
 
     protected ?int $limit = null;
     protected int $offset = 0;
-
-    /** @var int|null Cached count result (cleared on clone) */
-    protected ?int $cachedCount = null;
-
-    /** @var bool|null Cached exists result (cleared on clone) */
-    protected ?bool $cachedExists = null;
-
-    /** @var array<int|string, object>|null Cached rows for small result sets */
-    protected ?array $cachedRows = null;
-
-    /** @var int Cache version when rows were cached (for mutation tracking) */
-    protected int $cacheVersion = 0;
-
-    /** @var bool Whether optimistic buffering was disabled (result set too large) */
-    protected bool $bufferingDisabled = false;
-
-    /** @var array<string, true>|null Lazy membership index for has() */
-    protected ?array $membershipIndex = null;
 
     /** @var ColumnDef|false|null Cached primary key column (null=not checked, false=none found) */
     private ColumnDef|false|null $primaryKeyColumn = null;
@@ -74,15 +53,11 @@ abstract class AbstractTable implements TableInterface
     }
 
     /**
-     * Clear cached values on clone (immutable operations clone)
+     * Hook for subclasses to customize clone behavior
      */
     public function __clone()
     {
-        $this->cachedCount = null;
-        $this->cachedExists = null;
-        $this->cachedRows = null;
-        $this->bufferingDisabled = false;
-        $this->membershipIndex = null;
+        // Default: nothing to reset
     }
 
     /**
@@ -264,21 +239,13 @@ abstract class AbstractTable implements TableInterface
 
     public function exists(): bool
     {
-        if ($this->cachedExists !== null) {
-            return $this->cachedExists;
-        }
-        // If count is already cached, use it
-        if ($this->cachedCount !== null) {
-            return $this->cachedExists = $this->cachedCount > 0;
-        }
-        return $this->cachedExists = $this->limit(1)->count() > 0;
+        return $this->limit(1)->count() > 0;
     }
 
     /**
      * Check if value(s) exist in the table's projected columns
      *
      * Uses indexed columns when available to avoid full table scans.
-     * Falls back to cached rows or iteration for non-indexed lookups.
      *
      * @param object $member Object with properties matching getColumns()
      */
@@ -303,30 +270,6 @@ abstract class AbstractTable implements TableInterface
             $memberValues[$col] = $member->$col ?? null;
         }
 
-        // Short-circuit: try direct lookup in cached rows via primary key
-        // Note: rowid may or may not match primary key, so only trust positive matches
-        if ($this->cachedRows !== null) {
-            $pk = $this->getPrimaryKeyColumn();
-            if ($pk !== null && isset($cols[$pk->name])) {
-                $pkValue = $memberValues[$pk->name];
-                if ($pkValue !== null && isset($this->cachedRows[$pkValue])) {
-                    $cachedRow = $this->cachedRows[$pkValue];
-                    // Verify all columns match
-                    $matches = true;
-                    foreach ($memberValues as $col => $val) {
-                        if (($cachedRow->$col ?? null) !== $val) {
-                            $matches = false;
-                            break;
-                        }
-                    }
-                    if ($matches) {
-                        return true;
-                    }
-                }
-                // Don't return false - rowid might not match PK, fall through
-            }
-        }
-
         // Try to find a unique index we can query directly
         $uniqueCol = $this->findUniqueIndexColumn($cols);
         if ($uniqueCol !== null) {
@@ -342,44 +285,21 @@ abstract class AbstractTable implements TableInterface
             return $query->exists();
         }
 
-        // Build membership key from normalized values
-        $colNames = array_keys($cols);
-        $targetKey = $this->membershipKeyFromValues($memberValues);
-
-        // No unique index - fall back to membership index for small/cached tables
-        if ($this->membershipIndex !== null) {
-            return isset($this->membershipIndex[$targetKey]);
-        }
-
-        // Build index from cached rows if available
-        if ($this->cachedRows !== null) {
-            $this->membershipIndex = [];
-            foreach ($this->cachedRows as $row) {
-                $this->membershipIndex[$this->membershipKey($row, $colNames)] = true;
-            }
-            return isset($this->membershipIndex[$targetKey]);
-        }
-
-        // No cache, no index - iterate and search (also builds cache for small tables)
+        // No unique index - iterate and search
         foreach ($this as $row) {
-            if ($this->membershipKey($row, $colNames) === $targetKey) {
+            $matches = true;
+            foreach ($memberValues as $col => $val) {
+                if (($row->$col ?? null) !== $val) {
+                    $matches = false;
+                    break;
+                }
+            }
+            if ($matches) {
                 return true;
             }
         }
 
         return false;
-    }
-
-    /**
-     * Generate membership key from pre-extracted values array
-     */
-    private function membershipKeyFromValues(array $values): string
-    {
-        $parts = [];
-        foreach ($values as $val) {
-            $parts[] = ($val === null ? 'n:' : 's:') . $val;
-        }
-        return implode("\x00", $parts);
     }
 
     /**
@@ -415,20 +335,6 @@ abstract class AbstractTable implements TableInterface
     }
 
     /**
-     * Generate a membership key for index lookup
-     */
-    private function membershipKey(object $row, array $colNames): string
-    {
-        $parts = [];
-        foreach ($colNames as $col) {
-            $val = $row->$col ?? null;
-            // Prefix with type to distinguish null from "null" string
-            $parts[] = ($val === null ? 'n:' : 's:') . $val;
-        }
-        return implode("\x00", $parts);
-    }
-
-    /**
      * Materialize function is needed to facilitate AbstractTableWrapper and other logic that
      * might require access to columns that aren't selected for output via TableInterface::columns().
      *
@@ -439,78 +345,21 @@ abstract class AbstractTable implements TableInterface
     /**
      * Iterate over rows with visible columns only
      *
-     * Uses optimistic buffering for small result sets (≤1000 rows):
-     * - First iteration buffers rows while yielding them
-     * - Subsequent iterations yield from cache (no re-execution)
-     * - Large result sets disable buffering to avoid memory issues
-     *
-     * Also memoizes count after full iteration for O(1) count() calls.
-     *
      * @return Traversable<int|string, object>
      */
     final public function getIterator(): Traversable
     {
-        // If we have cached rows from a previous iteration, yield from them
-        // But only if the cache is still valid (no mutations since caching)
-        if ($this->cachedRows !== null && $this->cacheVersion === $this->getDataVersion()) {
-            yield from $this->cachedRows;
+        // Fast path: no column projection needed
+        if (empty($this->visibleColumns)) {
+            yield from $this->materialize();
             return;
         }
 
-        // Invalidate stale cache
-        if ($this->cachedRows !== null) {
-            $this->cachedRows = null;
-        }
-
+        // Slow path: project to visible columns only
         $visibleCols = $this->getColumns();
-        $buffer = $this->bufferingDisabled ? null : [];
-        $count = 0;
-
         foreach ($this->materialize() as $id => $row) {
-            // Project to visible columns only, unless columns are unknown (empty = pass through)
-            $projected = empty($visibleCols)
-                ? $row
-                : (object) array_intersect_key((array) $row, $visibleCols);
-
-            // Buffer if under limit
-            if ($buffer !== null) {
-                if ($count < static::OPTIMISTIC_BUFFER_COUNT) {
-                    $buffer[$id] = $projected;
-                } else {
-                    // Exceeded limit - stop buffering
-                    $this->bufferingDisabled = true;
-                    $buffer = null;
-                }
-            }
-
-            yield $id => $projected;
-            $count++;
+            yield $id => (object) array_intersect_key((array) $row, $visibleCols);
         }
-
-        // After full iteration, cache small result sets
-        if ($buffer !== null) {
-            $this->cachedRows = $buffer;
-            $this->cacheVersion = $this->getDataVersion();
-        }
-
-        // Memoize count for subsequent count() calls
-        if ($this->cachedCount === null) {
-            $this->cachedCount = $count;
-            $this->cachedExists = $count > 0;
-        }
-    }
-
-    /**
-     * Get current data version for cache invalidation
-     *
-     * Subclasses with mutable underlying data should override this
-     * to return a version number that changes when data is modified.
-     *
-     * @return int Current data version (0 = immutable/never changes)
-     */
-    protected function getDataVersion(): int
-    {
-        return 0;
     }
 
     /**
@@ -568,29 +417,16 @@ abstract class AbstractTable implements TableInterface
     /**
      * Load a single row by its row ID
      *
-     * Default implementation checks cached rows first, then iterates.
+     * Default implementation iterates to find the row.
      * Subclasses should override for O(1) lookups when possible.
      */
     public function load(string|int $rowId): ?object
     {
-        // Check cached rows first
-        if ($this->cachedRows !== null && $this->cacheVersion === $this->getDataVersion()) {
-            if (isset($this->cachedRows[$rowId])) {
-                return $this->cachedRows[$rowId];
-            }
-            // If cache is complete (not disabled), row doesn't exist
-            if (!$this->bufferingDisabled) {
-                return null;
-            }
-        }
-
-        // Fall back to iteration
         foreach ($this as $id => $row) {
             if ($id === $rowId) {
                 return $row;
             }
         }
-
         return null;
     }
 }

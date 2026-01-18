@@ -34,6 +34,7 @@ use mini\Parsing\SQL\AST\{
 use mini\Table\Predicate;
 use mini\Table\ColumnDef;
 use mini\Table\InMemoryTable;
+use mini\Table\ArrayTable;
 use mini\Table\Types\ColumnType;
 use mini\Table\Types\IndexType;
 use mini\Table\Contracts\MutableTableInterface;
@@ -91,6 +92,10 @@ class VirtualDatabase implements DatabaseInterface
 
     private AstOptimizer $optimizer;
 
+    /** Reflection accessors for PartialQuery to avoid cloning overhead */
+    private static ?\ReflectionProperty $astProperty = null;
+    private static ?\ReflectionMethod $ensureAstMethod = null;
+
     /** Last insert ID from most recent INSERT */
     private ?string $lastInsertId = null;
 
@@ -102,6 +107,9 @@ class VirtualDatabase implements DatabaseInterface
 
     /** Query start time for timeout tracking */
     private ?float $queryStartTime = null;
+
+    /** Table class to use for CREATE TABLE (InMemoryTable or ArrayTable) */
+    private string $tableClass = ArrayTable::class;
 
     public function __construct()
     {
@@ -168,6 +176,18 @@ class VirtualDatabase implements DatabaseInterface
     public function setQueryTimeout(?float $seconds): self
     {
         $this->queryTimeout = $seconds;
+        return $this;
+    }
+
+    /**
+     * Use ArrayTable instead of InMemoryTable for CREATE TABLE
+     *
+     * ArrayTable is a pure PHP implementation without SQLite dependency.
+     * Useful for benchmarking or environments without SQLite extension.
+     */
+    public function useArrayTable(): self
+    {
+        $this->tableClass = ArrayTable::class;
         return $this;
     }
 
@@ -440,18 +460,36 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Get AST from PartialQuery without cloning using reflection
+     *
+     * PartialQuery::getAST() always deep-clones to protect internal state,
+     * but VirtualDatabase only reads the AST. Using reflection to access
+     * the private $ast property avoids expensive cloning.
+     */
+    private static function peekAst(PartialQuery $query): ASTNode
+    {
+        if (self::$astProperty === null) {
+            self::$astProperty = new \ReflectionProperty(PartialQuery::class, 'ast');
+            self::$ensureAstMethod = new \ReflectionMethod(PartialQuery::class, 'ensureAST');
+        }
+
+        // Ensure AST is parsed using reflection to call private ensureAST()
+        self::$ensureAstMethod->invoke($query);
+        return self::$astProperty->getValue($query);
+    }
+
+    /**
      * Get a raw query executor closure for PartialQuery
      *
      * VirtualDatabase always needs AST to evaluate in-memory.
-     * If AST is not provided, calls getAST() to force parsing.
+     * If AST is not provided, uses reflection to access it without cloning.
      */
     private function rawExecutor(): \Closure
     {
         return function (PartialQuery $query, ?ASTNode $ast): \Traversable {
-            // If AST not provided (unmodified query), get it from query
-            // This forces parsing but VirtualDatabase always needs AST
+            // If AST not provided (unmodified query), get it via reflection (no clone)
             if ($ast === null) {
-                $ast = $query->getAST();
+                $ast = self::peekAst($query);
             }
 
             if ($ast instanceof WithStatement) {
@@ -460,27 +498,42 @@ class VirtualDatabase implements DatabaseInterface
 
             if ($ast instanceof UnionNode) {
                 $table = $this->executeUnionAsTable($ast);
-                return $this->wrapWithTimeout(new ResultSet($table));
+                return $this->wrapWithTimeout($table);
             }
 
             if (!$ast instanceof SelectStatement) {
                 throw new \RuntimeException("query() only accepts SELECT statements");
             }
 
-            return $this->wrapWithTimeout(new ResultSet($this->executeSelect($ast)));
+            return $this->wrapWithTimeout($this->executeSelect($ast));
         };
     }
 
     /**
      * Wrap an iterable with timeout checking
+     *
+     * When no timeout is configured, returns the result directly to avoid
+     * generator overhead.
      */
-    private function wrapWithTimeout(iterable $result): \Generator
+    private function wrapWithTimeout(iterable $result): iterable
+    {
+        // Fast path: no timeout configured, skip the wrapper entirely
+        if ($this->queryTimeout === null) {
+            return $result;
+        }
+
+        return $this->timeoutGenerator($result);
+    }
+
+    /**
+     * Generator that checks for timeout every 100 rows
+     */
+    private function timeoutGenerator(iterable $result): \Generator
     {
         $this->queryStartTime = microtime(true);
         $rowCount = 0;
         try {
             foreach ($result as $key => $row) {
-                // Check timeout every 100 rows (avoid overhead on small queries)
                 if (++$rowCount % 100 === 0) {
                     $this->checkTimeout();
                 }
@@ -1117,27 +1170,22 @@ class VirtualDatabase implements DatabaseInterface
             }
         }
 
-        // Check if we have CROSS JOINs that could benefit from predicate pushdown
-        $hasCrossJoins = !empty($ast->joins) && $ast->where !== null;
-        foreach ($ast->joins as $join) {
-            if (strtoupper($join->joinType) !== 'CROSS') {
-                $hasCrossJoins = false;
-                break;
-            }
-        }
+        // Use predicate pushdown for all multi-table queries with WHERE
+        // This pushes simple predicates (eq/lt/gt/like with constants) to tables before joins
+        $hasMultipleTables = !empty($ast->joins);
+        $hasWhere = $ast->where !== null;
 
-        if ($hasCrossJoins) {
-            // Limit: VDB supports up to 4 tables in comma-joins (1 base + 3 joins)
-            // Beyond this, join ordering becomes critical and VDB doesn't optimize it
+        if ($hasMultipleTables && $hasWhere) {
+            // Limit tables to avoid exponential explosion
             $tableCount = 1 + count($ast->joins);
-            if ($tableCount > 4) {
+            if ($tableCount > 8) {
                 throw new \RuntimeException(
-                    "VDB limitation: comma-joins support up to 4 tables, got $tableCount. " .
-                    "Use explicit JOIN syntax with ON clauses for larger joins."
+                    "VDB limitation: joins limited to 8 tables (got $tableCount). " .
+                    "Break into smaller queries or use subqueries."
                 );
             }
 
-            // Use optimized path with predicate pushdown for comma-joins
+            // Use optimized path: push predicates to tables first, then join
             $table = $this->executeSelectWithPredicatePushdown($ast);
         } else {
             // Standard path: process JOINs then WHERE
@@ -1980,26 +2028,21 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("Table not found: $tableName");
         }
 
-        // Check if we have CROSS JOINs that could benefit from predicate pushdown
-        $hasCrossJoins = !empty($ast->joins) && $ast->where !== null;
-        foreach ($ast->joins as $join) {
-            if (strtoupper($join->joinType) !== 'CROSS') {
-                $hasCrossJoins = false;
-                break;
-            }
-        }
+        // Use predicate pushdown for all multi-table queries with WHERE
+        $hasMultipleTables = !empty($ast->joins);
+        $hasWhere = $ast->where !== null;
 
-        if ($hasCrossJoins) {
-            // Limit: VDB supports up to 4 tables in comma-joins
+        if ($hasMultipleTables && $hasWhere) {
+            // Limit tables to avoid exponential explosion
             $tableCount = 1 + count($ast->joins);
-            if ($tableCount > 4) {
+            if ($tableCount > 8) {
                 throw new \RuntimeException(
-                    "VDB limitation: comma-joins support up to 4 tables, got $tableCount. " .
-                    "Use explicit JOIN syntax with ON clauses for larger joins."
+                    "VDB limitation: joins limited to 8 tables (got $tableCount). " .
+                    "Break into smaller queries or use subqueries."
                 );
             }
 
-            // Use optimized path with predicate pushdown for comma-joins
+            // Use optimized path: push predicates to tables first, then join
             $table = $this->executeSelectWithPredicatePushdown($ast);
         } else {
             // Standard path: process JOINs then WHERE
@@ -2098,46 +2141,135 @@ class VirtualDatabase implements DatabaseInterface
             }
         }
 
-        // 4. Build cross join incrementally, attaching predicates as dependencies are met
-        // This follows the rule: "Place predicate immediately after LAST table it depends on"
-        $result = null;
-        $activeTables = [];
+        // 4. Build equi-join graph and find connected components
+        // This ensures we fully reduce each component via InnerJoins before cross-joining
         $tableNames = array_keys($tables);
 
-        foreach ($tableNames as $alias) {
-            $activeTables[] = $alias;
-
-            if ($result === null) {
-                $result = $tables[$alias];
-            } else {
-                $join = new CrossJoinTable($result, $tables[$alias]);
-
-                // Find predicates whose dependencies are now ALL satisfied
-                foreach ($remainingPredicates as $k => $pred) {
-                    $deps = $this->findTablesInPredicate($pred, $tableNames);
-                    if (!empty($deps) && array_diff($deps, $activeTables) === []) {
-                        // All dependencies satisfied - attach as join condition
-                        // Check if this is an equi-join (col1 = col2) for hash join optimization
-                        $equiJoin = $this->tryExtractEquiJoin($pred, $tableNames);
-                        if ($equiJoin !== null) {
-                            // Use hash join - O(n+m) instead of O(n*m)
-                            $join = $join->withEquiJoin($equiJoin['left'], $equiJoin['right']);
-                        } else {
-                            // General predicate - evaluated during iteration
-                            $evaluator = $this->evaluator;
-                            $join = $join->withJoinCondition(
-                                fn($row) => $evaluator->evaluateAsBool($pred, $row)
-                            );
-                        }
-                        unset($remainingPredicates[$k]);
-                    }
+        // Extract all equi-join predicates with their table pairs
+        $equiJoins = []; // [{pred, key, tables: [t1, t2], cols: [left, right]}]
+        foreach ($remainingPredicates as $k => $pred) {
+            $equiJoin = $this->tryExtractEquiJoin($pred, $tableNames);
+            if ($equiJoin !== null) {
+                $deps = $this->findTablesInPredicate($pred, $tableNames);
+                if (count($deps) === 2) {
+                    $equiJoins[] = [
+                        'key' => $k,
+                        'pred' => $pred,
+                        'tables' => $deps,
+                        'cols' => $equiJoin,
+                    ];
                 }
-
-                $result = $join;
             }
         }
 
-        // 5. Any remaining predicates (shouldn't be any if dependency tracking is correct)
+        // Build connected components using union-find
+        $parent = array_combine($tableNames, $tableNames);
+        $find = function($x) use (&$parent, &$find) {
+            if ($parent[$x] !== $x) {
+                $parent[$x] = $find($parent[$x]);
+            }
+            return $parent[$x];
+        };
+        $union = function($x, $y) use (&$parent, $find) {
+            $px = $find($x);
+            $py = $find($y);
+            if ($px !== $py) {
+                $parent[$px] = $py;
+            }
+        };
+
+        // Union tables connected by equi-joins
+        foreach ($equiJoins as $ej) {
+            $union($ej['tables'][0], $ej['tables'][1]);
+        }
+
+        // Group tables by component
+        $components = [];
+        foreach ($tableNames as $t) {
+            $root = $find($t);
+            $components[$root][] = $t;
+        }
+        $components = array_values($components);
+
+        // 5. Join within each component using InnerJoins, then cross-join components
+        $componentResults = [];
+        $usedPredicateKeys = [];
+
+        foreach ($components as $componentTables) {
+            $result = null;
+            $joinedTables = [];
+
+            // Greedily join tables in this component
+            while (count($joinedTables) < count($componentTables)) {
+                if ($result === null) {
+                    // Start with first table
+                    $firstTable = $componentTables[0];
+                    $result = $tables[$firstTable];
+                    $joinedTables[] = $firstTable;
+                    continue;
+                }
+
+                // Find an equi-join connecting a new table to already-joined tables
+                $foundJoin = false;
+                foreach ($equiJoins as $ej) {
+                    if (isset($usedPredicateKeys[$ej['key']])) {
+                        continue;
+                    }
+
+                    $t1 = $ej['tables'][0];
+                    $t2 = $ej['tables'][1];
+
+                    // Check if this joins a new table to existing result
+                    $t1Joined = in_array($t1, $joinedTables, true);
+                    $t2Joined = in_array($t2, $joinedTables, true);
+
+                    if ($t1Joined && !$t2Joined && in_array($t2, $componentTables, true)) {
+                        // Join t2 to result
+                        $bindPredicate = (new \mini\Table\Predicate())
+                            ->eqBind($ej['cols']['left'], ':' . $ej['cols']['right']);
+                        $leftWithBind = $result->withProperty('__bind__', $bindPredicate);
+                        $result = new \mini\Table\Wrappers\InnerJoinTable($leftWithBind, $tables[$t2]);
+                        $joinedTables[] = $t2;
+                        $usedPredicateKeys[$ej['key']] = true;
+                        unset($remainingPredicates[$ej['key']]);
+                        $foundJoin = true;
+                        break;
+                    } elseif ($t2Joined && !$t1Joined && in_array($t1, $componentTables, true)) {
+                        // Join t1 to result (swap columns)
+                        $bindPredicate = (new \mini\Table\Predicate())
+                            ->eqBind($ej['cols']['right'], ':' . $ej['cols']['left']);
+                        $leftWithBind = $result->withProperty('__bind__', $bindPredicate);
+                        $result = new \mini\Table\Wrappers\InnerJoinTable($leftWithBind, $tables[$t1]);
+                        $joinedTables[] = $t1;
+                        $usedPredicateKeys[$ej['key']] = true;
+                        unset($remainingPredicates[$ej['key']]);
+                        $foundJoin = true;
+                        break;
+                    }
+                }
+
+                // If no equi-join found, add remaining tables via cross-join (shouldn't happen in a component)
+                if (!$foundJoin) {
+                    foreach ($componentTables as $t) {
+                        if (!in_array($t, $joinedTables, true)) {
+                            $result = new CrossJoinTable($result, $tables[$t]);
+                            $joinedTables[] = $t;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            $componentResults[] = $result;
+        }
+
+        // 6. Cross-join the components together
+        $result = $componentResults[0];
+        for ($i = 1; $i < count($componentResults); $i++) {
+            $result = new CrossJoinTable($result, $componentResults[$i]);
+        }
+
+        // 7. Apply remaining predicates (non-equi-join conditions)
         if (!empty($remainingPredicates)) {
             $combinedPredicate = $this->rebuildAndExpression(array_values($remainingPredicates));
             $result = $this->filterByExpression($result, $combinedPredicate);
@@ -2238,10 +2370,19 @@ class VirtualDatabase implements DatabaseInterface
     private function collectTableReferences(ASTNode $node, array $knownTables, array &$tables): void
     {
         if ($node instanceof IdentifierNode) {
+            // Check if identifier is qualified (e.g., t1.id)
+            if ($node->isQualified()) {
+                $qualifier = $node->getQualifier();
+                $tableAlias = $qualifier[0] ?? null;
+                if ($tableAlias !== null && in_array($tableAlias, $knownTables, true)) {
+                    $tables[] = $tableAlias;
+                    return;
+                }
+            }
+
             $colName = $node->getName();
-            // Check if column name starts with a known table alias
+            // Check if column name starts with a known table alias (legacy format)
             foreach ($knownTables as $alias) {
-                // Match "alias.col" or unqualified names like "d6" matching table "t6"
                 if (str_starts_with($colName, $alias . '.')) {
                     $tables[] = $alias;
                     return;
@@ -2564,6 +2705,12 @@ class VirtualDatabase implements DatabaseInterface
             return $exists ? $table : $table->except($table);
         }
 
+        // Try to use ExistsTable for equi-join correlations (much faster)
+        $existsTableResult = $this->tryApplyExistsWithExistsTable($table, $node, $subqueryAst, $outerRefs);
+        if ($existsTableResult !== null) {
+            return $existsTableResult;
+        }
+
         // Check if WHERE contains OR with outer references
         // If so, use row-by-row evaluation instead of template approach
         $useRowByRowEval = $this->hasOrWithOuterReferences($subqueryAst->where, $outerRefs);
@@ -2756,6 +2903,192 @@ class VirtualDatabase implements DatabaseInterface
         if ($node instanceof BinaryOperation) {
             return $this->nodeReferencesTable($node->left, $tableName)
                 || $this->nodeReferencesTable($node->right, $tableName);
+        }
+
+        return false;
+    }
+
+    /**
+     * Try to apply correlated EXISTS using ExistsTable (hash-based, much faster)
+     *
+     * Works when correlation is simple equi-join(s) and other predicates are non-correlated.
+     * Returns null if ExistsTable approach is not applicable.
+     */
+    private function tryApplyExistsWithExistsTable(
+        TableInterface $table,
+        ExistsOperation $node,
+        SelectStatement $subqueryAst,
+        array $outerRefs
+    ): ?TableInterface {
+        // Only handle simple single-table subqueries for now
+        if (!empty($subqueryAst->joins)) {
+            return null;
+        }
+
+        // Extract correlations and non-correlated predicates from WHERE
+        $correlations = [];
+        $nonCorrelatedPredicates = [];
+
+        if ($subqueryAst->where === null) {
+            return null; // No WHERE clause
+        }
+
+        // Flatten AND predicates
+        $predicates = [];
+        $this->flattenAndPredicates($subqueryAst->where, $predicates);
+
+        $subqueryTableName = $subqueryAst->from->getFullName();
+        $subqueryAlias = $subqueryAst->fromAlias ?? $subqueryTableName;
+
+        foreach ($predicates as $pred) {
+            // Check if this is an equi-join correlation (inner.col = outer.col)
+            if ($pred instanceof BinaryOperation && $pred->operator === '=') {
+                $left = $pred->left;
+                $right = $pred->right;
+
+                // Check for column = column pattern
+                if ($left instanceof IdentifierNode && $right instanceof IdentifierNode) {
+                    $leftInfo = $this->parseColumnReference($left, $subqueryAlias);
+                    $rightInfo = $this->parseColumnReference($right, $subqueryAlias);
+
+                    // One side should be inner table, other should be outer reference
+                    if ($leftInfo && $rightInfo) {
+                        $innerCol = null;
+                        $outerCol = null;
+
+                        if ($leftInfo['isInner'] && !$rightInfo['isInner']) {
+                            $innerCol = $leftInfo['qualified'];
+                            $outerCol = $rightInfo['qualified'];
+                        } elseif (!$leftInfo['isInner'] && $rightInfo['isInner']) {
+                            $innerCol = $rightInfo['qualified'];
+                            $outerCol = $leftInfo['qualified'];
+                        }
+
+                        if ($innerCol !== null && $outerCol !== null) {
+                            $correlations[] = [$outerCol, $innerCol];
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Check if predicate references outer table
+            $refsOuter = false;
+            foreach ($outerRefs as $ref) {
+                if ($this->predicateReferencesColumn($pred, $ref['table'], $ref['column'])) {
+                    $refsOuter = true;
+                    break;
+                }
+            }
+
+            if ($refsOuter) {
+                // Non-equi-join outer reference - can't use ExistsTable
+                return null;
+            }
+
+            $nonCorrelatedPredicates[] = $pred;
+        }
+
+        if (empty($correlations)) {
+            return null; // No equi-join correlations found
+        }
+
+        // Build inner table with non-correlated predicates
+        $innerTable = $this->getTable($subqueryTableName)->withAlias($subqueryAlias);
+        foreach ($nonCorrelatedPredicates as $pred) {
+            $innerTable = $this->applyWhereToTableInterface($innerTable, $pred);
+        }
+
+        // Map correlation column names to actual column names in the tables
+        $outerCols = $table->getColumns();
+        $innerCols = $innerTable->getColumns();
+        $mappedCorrelations = [];
+
+        foreach ($correlations as [$outerCol, $innerCol]) {
+            // Find actual outer column name
+            $actualOuterCol = $this->findMatchingColumn($outerCol, $outerCols);
+            $actualInnerCol = $this->findMatchingColumn($innerCol, $innerCols);
+
+            if ($actualOuterCol === null || $actualInnerCol === null) {
+                return null;
+            }
+
+            $mappedCorrelations[] = [$actualOuterCol, $actualInnerCol];
+        }
+
+        // Create ExistsTable
+        return new \mini\Table\Wrappers\ExistsTable($table, $innerTable, $mappedCorrelations, $node->negated);
+    }
+
+    /**
+     * Find a column in the table's columns, handling qualified/unqualified names
+     *
+     * @param string $colName Column name to find (may be qualified like "t1.id" or unqualified like "id")
+     * @param array<string, ColumnDef> $columns Table columns
+     * @return string|null Actual column name in the table, or null if not found
+     */
+    private function findMatchingColumn(string $colName, array $columns): ?string
+    {
+        // Exact match
+        if (isset($columns[$colName])) {
+            return $colName;
+        }
+
+        // If colName is qualified (t1.id), try unqualified (id)
+        if (str_contains($colName, '.')) {
+            $unqualified = explode('.', $colName)[1];
+            if (isset($columns[$unqualified])) {
+                return $unqualified;
+            }
+        }
+
+        // If colName is unqualified, look for qualified match (e.g., "id" matches "t1.id")
+        foreach ($columns as $name => $_) {
+            if (str_ends_with($name, '.' . $colName)) {
+                return $name;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Parse a column reference to determine if it's inner or outer table
+     */
+    private function parseColumnReference(IdentifierNode $node, string $innerAlias): ?array
+    {
+        $name = $node->getName();
+        $qualifier = $node->isQualified() ? ($node->getQualifier()[0] ?? null) : null;
+
+        if ($qualifier !== null) {
+            $qualified = $qualifier . '.' . $name;
+            $isInner = ($qualifier === $innerAlias);
+            return ['qualified' => $qualified, 'isInner' => $isInner];
+        }
+
+        // Unqualified - assume inner if it exists in inner table
+        return ['qualified' => $name, 'isInner' => true];
+    }
+
+    /**
+     * Check if a predicate references a specific column
+     */
+    private function predicateReferencesColumn(ASTNode $node, string $table, string $column): bool
+    {
+        if ($node instanceof IdentifierNode) {
+            $name = $node->getName();
+            $qualifier = $node->isQualified() ? ($node->getQualifier()[0] ?? null) : null;
+            return ($qualifier === $table && $name === $column) ||
+                   ($qualifier === null && $name === $column);
+        }
+
+        if ($node instanceof BinaryOperation) {
+            return $this->predicateReferencesColumn($node->left, $table, $column) ||
+                   $this->predicateReferencesColumn($node->right, $table, $column);
+        }
+
+        if ($node instanceof UnaryOperation) {
+            return $this->predicateReferencesColumn($node->expression, $table, $column);
         }
 
         return false;
@@ -3317,11 +3650,11 @@ class VirtualDatabase implements DatabaseInterface
             } else {
                 // For InMemoryTable, we can use rowid via eq on _rowid_
                 // But _rowid_ is internal to SQLite. Use a workaround - build WHERE clause manually
-                if ($table instanceof InMemoryTable) {
-                    // InMemoryTable supports eq with rowid column
+                if ($table instanceof InMemoryTable || $table instanceof ArrayTable) {
+                    // InMemoryTable and ArrayTable support eq with _rowid_ column
                     $rowQuery = $table->eq('_rowid_', $pending['rowid']);
                 } else {
-                    throw new \RuntimeException("UPDATE with self-referencing expressions requires a primary key or InMemoryTable");
+                    throw new \RuntimeException("UPDATE with self-referencing expressions requires a primary key, InMemoryTable, or ArrayTable");
                 }
             }
             $table->update($rowQuery, $pending['changes']);
@@ -3370,7 +3703,8 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         // Create and register the table
-        $table = new InMemoryTable(...$columnDefs);
+        $tableClass = $this->tableClass;
+        $table = new $tableClass(...$columnDefs);
         $this->registerTable($tableName, $table);
 
         return 0;
@@ -3481,9 +3815,14 @@ class VirtualDatabase implements DatabaseInterface
                 $table = $this->applySinglePredicate($table, $pred);
             }
 
-            // Then filter with complex predicates on the reduced set
+            // Then apply complex predicates on the reduced set
+            // EXISTS gets special handling via applyExistsToTable (much faster)
             foreach ($complex as $pred) {
-                $table = $this->filterByExpression($table, $pred);
+                if ($pred instanceof ExistsOperation) {
+                    $table = $this->applyExistsToTable($table, $pred);
+                } else {
+                    $table = $this->filterByExpression($table, $pred);
+                }
             }
 
             return $table;
@@ -3546,7 +3885,7 @@ class VirtualDatabase implements DatabaseInterface
             if ($node->left instanceof LiteralNode && $node->right instanceof IdentifierNode
                 && in_array($op, ['=', '!=', '<>', '<', '<=', '>', '>='], true)
             ) {
-                $column = $this->buildQualifiedColumnName($node->right);
+                $column = $this->resolveColumnForTable($this->buildQualifiedColumnName($node->right), $table);
                 $value = $node->left->value;
                 $flippedOp = $this->flipComparisonOp($op);
 
@@ -3570,7 +3909,7 @@ class VirtualDatabase implements DatabaseInterface
             $canPushToTable = $node->left instanceof IdentifierNode && $isValueNode($node->right);
 
             if ($canPushToTable) {
-                $column = $this->buildQualifiedColumnName($node->left);
+                $column = $this->resolveColumnForTable($this->buildQualifiedColumnName($node->left), $table);
                 // Evaluate right side - this handles both literals and subqueries
                 $value = $this->evaluator->evaluate($node->right, null);
 
@@ -3592,14 +3931,15 @@ class VirtualDatabase implements DatabaseInterface
             // Try to simplify arithmetic expressions: (col + 5) > 7  →  col > 2
             $simplified = $this->trySimplifyArithmeticComparison($node);
             if ($simplified !== null) {
+                $column = $this->resolveColumnForTable($simplified['column'], $table);
                 return match ($simplified['op']) {
                     '=' => $simplified['value'] === null
                         ? EmptyTable::from($table)
-                        : $table->eq($simplified['column'], $simplified['value']),
-                    '<' => $table->lt($simplified['column'], $simplified['value']),
-                    '<=' => $table->lte($simplified['column'], $simplified['value']),
-                    '>' => $table->gt($simplified['column'], $simplified['value']),
-                    '>=' => $table->gte($simplified['column'], $simplified['value']),
+                        : $table->eq($column, $simplified['value']),
+                    '<' => $table->lt($column, $simplified['value']),
+                    '<=' => $table->lte($column, $simplified['value']),
+                    '>' => $table->gt($column, $simplified['value']),
+                    '>=' => $table->gte($column, $simplified['value']),
                     '!=', '<>' => $this->filterByExpression($table, $node),
                     default => $this->filterByExpression($table, $node),
                 };
@@ -3614,7 +3954,7 @@ class VirtualDatabase implements DatabaseInterface
             if (!$node->left instanceof IdentifierNode) {
                 throw new \RuntimeException("Left side of LIKE must be a column");
             }
-            $column = $this->buildQualifiedColumnName($node->left);
+            $column = $this->resolveColumnForTable($this->buildQualifiedColumnName($node->left), $table);
             $pattern = $this->evaluator->evaluate($node->pattern, null);
             $result = $table->like($column, $pattern);
             return $node->negated ? $table->except($result) : $result;
@@ -3625,7 +3965,7 @@ class VirtualDatabase implements DatabaseInterface
             if (!$node->expression instanceof IdentifierNode) {
                 throw new \RuntimeException("IS NULL expression must be a column");
             }
-            $column = $this->buildQualifiedColumnName($node->expression);
+            $column = $this->resolveColumnForTable($this->buildQualifiedColumnName($node->expression), $table);
             $nullRows = $table->eq($column, null);
             return $node->negated ? $table->except($nullRows) : $nullRows;
         }
@@ -3636,7 +3976,7 @@ class VirtualDatabase implements DatabaseInterface
             if (!$node->left instanceof IdentifierNode) {
                 return $this->filterByExpression($table, $node);
             }
-            $column = $this->buildQualifiedColumnName($node->left);
+            $column = $this->resolveColumnForTable($this->buildQualifiedColumnName($node->left), $table);
 
             if ($node->isSubquery()) {
                 // Subquery: execute and pass as SetInterface
@@ -4674,5 +5014,39 @@ class VirtualDatabase implements DatabaseInterface
             return $qualifier . '.' . $node->getName();
         }
         return $node->getName();
+    }
+
+    /**
+     * Resolve a column name against a table's actual columns
+     *
+     * Handles cases where query uses qualified name (t1.id) but table has unqualified (id),
+     * or vice versa.
+     */
+    private function resolveColumnForTable(string $colName, TableInterface $table): string
+    {
+        $columns = $table->getColumns();
+
+        // Exact match
+        if (isset($columns[$colName])) {
+            return $colName;
+        }
+
+        // If colName is qualified (t1.id), try unqualified (id)
+        if (str_contains($colName, '.')) {
+            $unqualified = explode('.', $colName, 2)[1];
+            if (isset($columns[$unqualified])) {
+                return $unqualified;
+            }
+        }
+
+        // If colName is unqualified, look for qualified match (e.g., "id" matches "t1.id")
+        foreach ($columns as $name => $_) {
+            if (str_ends_with($name, '.' . $colName)) {
+                return $name;
+            }
+        }
+
+        // No match found - return original (will likely cause an error downstream)
+        return $colName;
     }
 }

@@ -53,6 +53,12 @@ class SqlParser
     private array $tokens;
     private int $pos = 0;
 
+    /** @var array<string, ASTNode> Static cache of parsed ASTs keyed by SQL string */
+    private static array $astCache = [];
+
+    /** Maximum number of cached ASTs (simple LRU via array_shift when exceeded) */
+    private const CACHE_MAX_SIZE = 256;
+
     /**
      * Parse SQL string into AST
      *
@@ -1239,15 +1245,67 @@ class SqlParser
      */
     public static function parseWithParams(string $sql, array $params = []): ASTNode
     {
-        $parser = new self();
-        $ast = $parser->parse($sql);
+        // Get AST from cache (may be shared)
+        $wasCached = false;
+        $ast = self::parseCached($sql, $wasCached);
 
+        // If we have params to bind, we'll mutate the AST - must clone if shared
         if (!empty($params)) {
+            if ($wasCached) {
+                $ast = $ast->deepClone();
+            }
             $paramsCopy = $params;
             self::bindParams($ast, $paramsCopy);
         }
 
         return $ast;
+    }
+
+    /**
+     * Parse SQL with caching - returns AST from cache (possibly shared)
+     *
+     * Returns the cached AST directly. Callers should treat it as shared
+     * (read-only) and deep-clone before mutation. This avoids cloning
+     * overhead for read-only query execution paths.
+     *
+     * For queries that will be mutated, use the instance parse() method
+     * which always returns a fresh AST.
+     *
+     * @param string $sql SQL query to parse
+     * @param bool &$wasCached Output: true if AST was from cache
+     * @return ASTNode Parsed AST (may be shared - treat as read-only)
+     * @throws SqlSyntaxException
+     */
+    public static function parseCached(string $sql, bool &$wasCached = false): ASTNode
+    {
+        // Check cache first
+        if (isset(self::$astCache[$sql])) {
+            $wasCached = true;
+            return self::$astCache[$sql];
+        }
+
+        $wasCached = false;
+
+        // Parse fresh
+        $parser = new self();
+        $ast = $parser->parse($sql);
+
+        // Evict oldest entry if cache is full
+        if (count(self::$astCache) >= self::CACHE_MAX_SIZE) {
+            array_shift(self::$astCache);
+        }
+
+        // Cache and return (caller should treat as shared)
+        self::$astCache[$sql] = $ast;
+        return $ast;
+    }
+
+    /**
+     * Clear the AST cache (for testing or memory management)
+     */
+    public static function clearCache(): void
+    {
+        self::$astCache = [];
     }
 
     // =========================================================================

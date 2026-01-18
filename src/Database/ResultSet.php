@@ -46,6 +46,13 @@ class ResultSet implements ResultSetInterface
      */
     public function getIterator(): \Traversable
     {
+        // Fast path: no hydration configured, yield rows directly
+        if ($this->hydrator === null && $this->entityClass === null) {
+            yield from $this->rows;
+            return;
+        }
+
+        // Slow path: apply hydration
         foreach ($this->rows as $row) {
             yield $this->hydrateRow($row);
         }

@@ -5,21 +5,11 @@ namespace mini\Parsing\SQL;
 /**
  * SQL Lexer - Tokenizes SQL strings
  *
- * Features:
- * - Case-insensitive keywords
- * - String escaping ('' and \')
- * - Positional (?) and named (:name) placeholders
- * - Comments (-- and # and /* *\/)
- * - Quoted identifiers: `backticks` (MySQL) and "double quotes" (standard SQL)
- * - Dot tokens for qualified names (table.column parsed in parser)
- * - Numbers with at most one decimal point
+ * Uses a single combined regex with named groups for fast tokenization.
+ * Patterns are ordered long-to-short to ensure correct matching.
  */
 class SqlLexer
 {
-    private string $sql;
-    private int $length;
-    private int $cursor = 0;
-
     // Token types
     public const T_SELECT = 'SELECT';
     public const T_INSERT = 'INSERT';
@@ -65,7 +55,7 @@ class SqlLexer
     public const T_EXCEPT = 'EXCEPT';
     public const T_ALL = 'ALL';
     public const T_ANY = 'ANY';
-    public const T_SOME = 'SOME';  // SOME is synonym for ANY in SQL
+    public const T_SOME = 'SOME';
     public const T_CASE = 'CASE';
     public const T_WHEN = 'WHEN';
     public const T_THEN = 'THEN';
@@ -84,8 +74,6 @@ class SqlLexer
     public const T_ROWS  = 'ROWS';
     public const T_ROW   = 'ROW';
     public const T_ONLY  = 'ONLY';
-
-    // DDL tokens
     public const T_CREATE = 'CREATE';
     public const T_DROP = 'DROP';
     public const T_ALTER = 'ALTER';
@@ -119,10 +107,75 @@ class SqlLexer
     public const T_OP     = 'OPERATOR';
     public const T_EOF    = 'EOF';
 
+    /** @var array<string, string> Keyword to token type */
+    private const KEYWORDS = [
+        'SELECT' => self::T_SELECT, 'INSERT' => self::T_INSERT, 'REPLACE' => self::T_REPLACE,
+        'UPDATE' => self::T_UPDATE, 'DELETE' => self::T_DELETE, 'FROM' => self::T_FROM,
+        'INTO' => self::T_INTO, 'VALUES' => self::T_VALUES, 'SET' => self::T_SET,
+        'WHERE' => self::T_WHERE, 'AND' => self::T_AND, 'OR' => self::T_OR,
+        'IN' => self::T_IN, 'ORDER' => self::T_ORDER, 'BY' => self::T_BY,
+        'LIMIT' => self::T_LIMIT, 'OFFSET' => self::T_OFFSET, 'AS' => self::T_AS,
+        'ASC' => self::T_ASC, 'DESC' => self::T_DESC, 'NOT' => self::T_NOT,
+        'IS' => self::T_IS, 'NULL' => self::T_NULL, 'TRUE' => self::T_TRUE,
+        'FALSE' => self::T_FALSE, 'LIKE' => self::T_LIKE, 'JOIN' => self::T_JOIN,
+        'LEFT' => self::T_LEFT, 'RIGHT' => self::T_RIGHT, 'INNER' => self::T_INNER,
+        'OUTER' => self::T_OUTER, 'FULL' => self::T_FULL, 'CROSS' => self::T_CROSS,
+        'ON' => self::T_ON, 'DISTINCT' => self::T_DISTINCT, 'GROUP' => self::T_GROUP,
+        'HAVING' => self::T_HAVING, 'BETWEEN' => self::T_BETWEEN, 'EXISTS' => self::T_EXISTS,
+        'UNION' => self::T_UNION, 'INTERSECT' => self::T_INTERSECT, 'EXCEPT' => self::T_EXCEPT,
+        'ALL' => self::T_ALL, 'ANY' => self::T_ANY, 'SOME' => self::T_SOME,
+        'CASE' => self::T_CASE, 'WHEN' => self::T_WHEN, 'THEN' => self::T_THEN,
+        'ELSE' => self::T_ELSE, 'END' => self::T_END, 'OVER' => self::T_OVER,
+        'PARTITION' => self::T_PARTITION, 'WITH' => self::T_WITH, 'RECURSIVE' => self::T_RECURSIVE,
+        'CURRENT_DATE' => self::T_CURRENT_DATE, 'CURRENT_TIME' => self::T_CURRENT_TIME,
+        'CURRENT_TIMESTAMP' => self::T_CURRENT_TIMESTAMP, 'FETCH' => self::T_FETCH,
+        'FIRST' => self::T_FIRST, 'NEXT' => self::T_NEXT, 'ROWS' => self::T_ROWS,
+        'ROW' => self::T_ROW, 'ONLY' => self::T_ONLY, 'CREATE' => self::T_CREATE,
+        'DROP' => self::T_DROP, 'ALTER' => self::T_ALTER, 'TABLE' => self::T_TABLE,
+        'INDEX' => self::T_INDEX, 'VIEW' => self::T_VIEW, 'IF' => self::T_IF,
+        'PRIMARY' => self::T_PRIMARY, 'KEY' => self::T_KEY, 'UNIQUE' => self::T_UNIQUE,
+        'FOREIGN' => self::T_FOREIGN, 'REFERENCES' => self::T_REFERENCES,
+        'CONSTRAINT' => self::T_CONSTRAINT, 'DEFAULT' => self::T_DEFAULT,
+        'AUTOINCREMENT' => self::T_AUTOINCREMENT, 'CHECK' => self::T_CHECK,
+        'CASCADE' => self::T_CASCADE, 'RESTRICT' => self::T_RESTRICT,
+        'ACTION' => self::T_ACTION, 'NO' => self::T_NO,
+    ];
+
+    /**
+     * Combined regex pattern built once at class load time.
+     * Named groups: WS (whitespace), CMT (comment), NUM, STR, HEX, POS, NAM, ID, BT, DQ, OP
+     */
+    private static string $pattern;
+
+    private string $sql;
+
+    public static function init(): void
+    {
+        // Operators sorted long-to-short for correct matching
+        $ops = ['<>', '>=', '<=', '!=', '||', '>', '<', '=', '!', '+', '-', '*', '/', '%', '|', '(', ')', ',', '.'];
+        $opPattern = implode('|', array_map(fn($op) => preg_quote($op, '~'), $ops));
+
+        // Build combined pattern with named capture groups
+        // Uses preg_match_all for batch processing - much faster than iterative preg_match
+        self::$pattern = '~' .
+            '(?<WS>\s+)|' .                                       // whitespace (skipped)
+            '(?<CMT>--[^\n]*|\#[^\n]*|/\*[\s\S]*?\*/)|' .         // comments (skipped)
+            '(?<NUM>\d+(?:\.\d*)?)|' .                            // numbers
+            "'(?<STR>(?:[^'\\\\]|''|\\\\.)*)'|" .                 // strings
+            "[xX]'(?<HEX>[0-9a-fA-F]*)'|" .                       // hex blobs
+            '(?<POS>\?)|' .                                       // positional placeholder
+            '(?<NAM>:[a-zA-Z_]\w*)|' .                            // named placeholder
+            '(?<ID>[a-zA-Z_]\w*)|' .                              // identifiers
+            '`(?<BT>[^`]*)`|' .                                   // backtick quoted
+            '"(?<DQ>[^"]*)"' .                                    // double quoted
+            '|(?<OP>' . $opPattern . ')|' .                       // operators (sorted)
+            '(?<ERR>[\s\S])' .                                    // catch-all for errors
+        '~';
+    }
+
     public function __construct(string $sql)
     {
         $this->sql = $sql;
-        $this->length = strlen($sql);
     }
 
     /**
@@ -133,326 +186,129 @@ class SqlLexer
      */
     public function tokenize(): array
     {
+        $sql = $this->sql;
+        $count = preg_match_all(self::$pattern, $sql, $m, PREG_PATTERN_ORDER | PREG_UNMATCHED_AS_NULL);
+
+        // Local refs for hot path
+        $keywords = self::KEYWORDS;
+        $raw = $m[0];
+        $mWS = $m['WS'];
+        $mCMT = $m['CMT'];
+        $mNUM = $m['NUM'];
+        $mSTR = $m['STR'];
+        $mHEX = $m['HEX'];
+        $mPOS = $m['POS'];
+        $mNAM = $m['NAM'];
+        $mID = $m['ID'];
+        $mBT = $m['BT'];
+        $mDQ = $m['DQ'];
+        $mOP = $m['OP'];
+        $mERR = $m['ERR'];
+
+        // Single pass: calculate offset and build tokens together
         $tokens = [];
+        $pos = 0;
 
-        while ($this->cursor < $this->length) {
-            $start = $this->cursor;
-            $char = $this->sql[$this->cursor];
-            $next = $this->cursor + 1 < $this->length ? $this->sql[$this->cursor + 1] : '';
+        for ($i = 0; $i < $count; $i++) {
+            $len = strlen($raw[$i]);
 
-            // Whitespace
-            if (ctype_space($char)) {
-                $this->cursor++;
+            // Error check
+            if ($mERR[$i] !== null) {
+                throw new SqlSyntaxException("Unexpected character '{$mERR[$i]}'", $sql, $pos);
+            }
+
+            // Skip whitespace and comments
+            if ($mWS[$i] !== null || $mCMT[$i] !== null) {
+                $pos += $len;
                 continue;
             }
 
-            // Comments
-            if ($char === '#' || ($char === '-' && $next === '-')) {
-                while ($this->cursor < $this->length && $this->sql[$this->cursor] !== "\n") {
-                    $this->cursor++;
+            // Numbers
+            if ($mNUM[$i] !== null) {
+                $tokens[] = ['type' => self::T_NUMBER, 'value' => $mNUM[$i], 'pos' => $pos];
+                $pos += $len;
+                continue;
+            }
+
+            // Strings
+            if ($mSTR[$i] !== null) {
+                $str = $mSTR[$i];
+                $str = str_replace("''", "'", $str);
+                $str = str_replace("\\'", "'", $str);
+                $tokens[] = ['type' => self::T_STRING, 'value' => $str, 'pos' => $pos];
+                $pos += $len;
+                continue;
+            }
+
+            // Hex blobs
+            if ($mHEX[$i] !== null) {
+                $hex = $mHEX[$i];
+                $binary = $hex === '' ? '' : hex2bin($hex);
+                if ($binary === false) {
+                    throw new SqlSyntaxException("Invalid hex literal: x'$hex'", $sql, $pos);
                 }
+                $tokens[] = ['type' => self::T_STRING, 'value' => $binary, 'pos' => $pos];
+                $pos += $len;
                 continue;
             }
 
-            if ($char === '/' && $next === '*') {
-                $this->cursor += 2;
-                while ($this->cursor < $this->length) {
-                    if ($this->sql[$this->cursor] === '*' &&
-                        ($this->cursor + 1 < $this->length && $this->sql[$this->cursor + 1] === '/')) {
-                        $this->cursor += 2;
-                        break;
-                    }
-                    $this->cursor++;
-                }
+            // Positional placeholder
+            if ($mPOS[$i] !== null) {
+                $tokens[] = ['type' => self::T_PLACEHOLDER, 'value' => '?', 'pos' => $pos];
+                $pos += $len;
                 continue;
             }
 
-            // Numbers (allow at most one decimal point)
-            if (is_numeric($char)) {
-                $num = '';
-                $hasDot = false;
-                while ($this->cursor < $this->length) {
-                    $c = $this->sql[$this->cursor];
-                    if (is_numeric($c)) {
-                        $num .= $c;
-                        $this->cursor++;
-                    } elseif ($c === '.' && !$hasDot) {
-                        $num .= $c;
-                        $hasDot = true;
-                        $this->cursor++;
-                    } else {
-                        break;
-                    }
-                }
-                $tokens[] = ['type' => self::T_NUMBER, 'value' => $num, 'pos' => $start];
+            // Named placeholder
+            if ($mNAM[$i] !== null) {
+                $tokens[] = ['type' => self::T_PLACEHOLDER, 'value' => $mNAM[$i], 'pos' => $pos];
+                $pos += $len;
                 continue;
             }
 
-            // Strings (Single quotes) with Escaping
-            if ($char === "'") {
-                $this->cursor++;
-                $str = '';
-                while ($this->cursor < $this->length) {
-                    $c = $this->sql[$this->cursor];
-
-                    if ($c === "'") {
-                        // Standard SQL escape: ''
-                        if ($this->cursor + 1 < $this->length && $this->sql[$this->cursor + 1] === "'") {
-                            $str .= "'";
-                            $this->cursor += 2;
-                            continue;
-                        }
-                        // End of string
-                        $this->cursor++;
-                        break;
-                    }
-
-                    if ($c === '\\') {
-                        // Backslash escape: \'
-                        if ($this->cursor + 1 < $this->length && $this->sql[$this->cursor + 1] === "'") {
-                            $str .= "'";
-                            $this->cursor += 2;
-                            continue;
-                        }
-                    }
-
-                    $str .= $c;
-                    $this->cursor++;
-                }
-                $tokens[] = ['type' => self::T_STRING, 'value' => $str, 'pos' => $start];
+            // Identifiers/keywords
+            if ($mID[$i] !== null) {
+                $word = $mID[$i];
+                $type = $keywords[strtoupper($word)] ?? self::T_IDENTIFIER;
+                $tokens[] = ['type' => $type, 'value' => $word, 'pos' => $pos];
+                $pos += $len;
                 continue;
             }
 
-            // Positional Placeholder (?)
-            if ($char === '?') {
-                $tokens[] = ['type' => self::T_PLACEHOLDER, 'value' => '?', 'pos' => $start];
-                $this->cursor++;
+            // Backtick quoted
+            if ($mBT[$i] !== null) {
+                $tokens[] = ['type' => self::T_IDENTIFIER, 'value' => $mBT[$i], 'pos' => $pos];
+                $pos += $len;
                 continue;
             }
 
-            // Named Placeholder (:name)
-            if ($char === ':') {
-                $this->cursor++;
-
-                if ($this->cursor < $this->length) {
-                    $peek = $this->sql[$this->cursor];
-                    if (ctype_alpha($peek) || $peek === '_') {
-                        $pStart = $start;
-                        while ($this->cursor < $this->length) {
-                            $c = $this->sql[$this->cursor];
-                            if (!ctype_alnum($c) && $c !== '_') {
-                                break;
-                            }
-                            $this->cursor++;
-                        }
-                        $value = substr($this->sql, $pStart, $this->cursor - $pStart);
-                        $tokens[] = ['type' => self::T_PLACEHOLDER, 'value' => $value, 'pos' => $start];
-                        continue;
-                    }
-                }
-                throw new SqlSyntaxException("Invalid placeholder syntax", $this->sql, $start);
+            // Double quoted
+            if ($mDQ[$i] !== null) {
+                $tokens[] = ['type' => self::T_IDENTIFIER, 'value' => $mDQ[$i], 'pos' => $pos];
+                $pos += $len;
+                continue;
             }
 
-            // Operators / Punctuation
-            if (in_array($char, ['(', ')', ',', '.', '*', '/', '=', '>', '<', '!', '%', '|'])) {
-                $type = match($char) {
+            // Operators
+            if ($mOP[$i] !== null) {
+                $op = $mOP[$i];
+                $type = match ($op) {
                     '(' => self::T_LPAREN,
                     ')' => self::T_RPAREN,
                     ',' => self::T_COMMA,
                     '.' => self::T_DOT,
                     '*' => self::T_STAR,
-                    default => self::T_OP
+                    default => self::T_OP,
                 };
-
-                if (($char === '!' || $char === '>' || $char === '<') && $next === '=') {
-                    $tokens[] = ['type' => self::T_OP, 'value' => $char . '=', 'pos' => $start];
-                    $this->cursor += 2;
-                    continue;
-                }
-
-                // <> is alias for !=
-                if ($char === '<' && $next === '>') {
-                    $tokens[] = ['type' => self::T_OP, 'value' => '<>', 'pos' => $start];
-                    $this->cursor += 2;
-                    continue;
-                }
-
-                // || string concatenation operator
-                if ($char === '|' && $next === '|') {
-                    $tokens[] = ['type' => self::T_OP, 'value' => '||', 'pos' => $start];
-                    $this->cursor += 2;
-                    continue;
-                }
-
-                $tokens[] = ['type' => $type, 'value' => $char, 'pos' => $start];
-                $this->cursor++;
-                continue;
+                $tokens[] = ['type' => $type, 'value' => $op, 'pos' => $pos];
             }
-
-            // Blob literals: x'hexdigits' or X'hexdigits'
-            if (($char === 'x' || $char === 'X') && $next === "'") {
-                $this->cursor += 2; // Skip x'
-                $hex = '';
-                while ($this->cursor < $this->length) {
-                    $c = $this->sql[$this->cursor];
-                    if ($c === "'") {
-                        $this->cursor++;
-                        break;
-                    }
-                    $hex .= $c;
-                    $this->cursor++;
-                }
-                // Convert hex string to binary data
-                $binary = hex2bin($hex);
-                if ($binary === false) {
-                    throw new SqlSyntaxException("Invalid hex literal: x'$hex'", $this->sql, $start);
-                }
-                $tokens[] = ['type' => self::T_STRING, 'value' => $binary, 'pos' => $start];
-                continue;
-            }
-
-            // Identifiers and Keywords
-            // Supports: bare identifiers, `backtick` (MySQL), "double quote" (standard SQL)
-            if (ctype_alpha($char) || $char === '_' || $char === '`' || $char === '"') {
-                $quoteChar = null;
-                if ($char === '`' || $char === '"') {
-                    $quoteChar = $char;
-                    $this->cursor++;
-                }
-
-                $word = '';
-                while ($this->cursor < $this->length) {
-                    $c = $this->sql[$this->cursor];
-                    if ($quoteChar !== null) {
-                        if ($c === $quoteChar) {
-                            // Handle escaped quotes (doubled quote chars)
-                            if ($this->cursor + 1 < $this->length && $this->sql[$this->cursor + 1] === $quoteChar) {
-                                $word .= $quoteChar;
-                                $this->cursor += 2;
-                                continue;
-                            }
-                            $this->cursor++;
-                            break;
-                        }
-                    } else {
-                        // Simple identifiers - alphanumeric and underscores only
-                        // Dots are handled as separate tokens for table.column syntax
-                        if (!ctype_alnum($c) && $c !== '_') {
-                            break;
-                        }
-                    }
-                    $word .= $c;
-                    $this->cursor++;
-                }
-
-                $upper = strtoupper($word);
-                $type = self::T_IDENTIFIER;
-
-                if ($quoteChar === null) {
-                    $type = match($upper) {
-                        'SELECT' => self::T_SELECT,
-                        'INSERT' => self::T_INSERT,
-                        'REPLACE' => self::T_REPLACE,
-                        'UPDATE' => self::T_UPDATE,
-                        'DELETE' => self::T_DELETE,
-                        'FROM' => self::T_FROM,
-                        'INTO' => self::T_INTO,
-                        'VALUES' => self::T_VALUES,
-                        'SET' => self::T_SET,
-                        'WHERE' => self::T_WHERE,
-                        'AND' => self::T_AND,
-                        'OR' => self::T_OR,
-                        'IN' => self::T_IN,
-                        'ORDER' => self::T_ORDER,
-                        'BY' => self::T_BY,
-                        'LIMIT' => self::T_LIMIT,
-                        'OFFSET' => self::T_OFFSET,
-                        'AS' => self::T_AS,
-                        'ASC' => self::T_ASC,
-                        'DESC' => self::T_DESC,
-                        'NOT' => self::T_NOT,
-                        'IS' => self::T_IS,
-                        'NULL' => self::T_NULL,
-                        'TRUE' => self::T_TRUE,
-                        'FALSE' => self::T_FALSE,
-                        'LIKE' => self::T_LIKE,
-                        'JOIN' => self::T_JOIN,
-                        'LEFT' => self::T_LEFT,
-                        'RIGHT' => self::T_RIGHT,
-                        'INNER' => self::T_INNER,
-                        'OUTER' => self::T_OUTER,
-                        'FULL' => self::T_FULL,
-                        'CROSS' => self::T_CROSS,
-                        'ON' => self::T_ON,
-                        'DISTINCT' => self::T_DISTINCT,
-                        'GROUP' => self::T_GROUP,
-                        'HAVING' => self::T_HAVING,
-                        'BETWEEN' => self::T_BETWEEN,
-                        'EXISTS' => self::T_EXISTS,
-                        'UNION' => self::T_UNION,
-                        'INTERSECT' => self::T_INTERSECT,
-                        'EXCEPT' => self::T_EXCEPT,
-                        'ALL' => self::T_ALL,
-                        'ANY' => self::T_ANY,
-                        'SOME' => self::T_SOME,
-                        'CASE' => self::T_CASE,
-                        'WHEN' => self::T_WHEN,
-                        'THEN' => self::T_THEN,
-                        'ELSE' => self::T_ELSE,
-                        'END' => self::T_END,
-                        'OVER' => self::T_OVER,
-                        'PARTITION' => self::T_PARTITION,
-                        'WITH' => self::T_WITH,
-                        'RECURSIVE' => self::T_RECURSIVE,
-                        'CURRENT_DATE' => self::T_CURRENT_DATE,
-                        'CURRENT_TIME' => self::T_CURRENT_TIME,
-                        'CURRENT_TIMESTAMP' => self::T_CURRENT_TIMESTAMP,
-                        'FETCH' => self::T_FETCH,
-                        'FIRST' => self::T_FIRST,
-                        'NEXT' => self::T_NEXT,
-                        'ROWS' => self::T_ROWS,
-                        'ROW' => self::T_ROW,
-                        'ONLY' => self::T_ONLY,
-                        // DDL keywords
-                        'CREATE' => self::T_CREATE,
-                        'DROP' => self::T_DROP,
-                        'ALTER' => self::T_ALTER,
-                        'TABLE' => self::T_TABLE,
-                        'INDEX' => self::T_INDEX,
-                        'VIEW' => self::T_VIEW,
-                        'IF' => self::T_IF,
-                        'PRIMARY' => self::T_PRIMARY,
-                        'KEY' => self::T_KEY,
-                        'UNIQUE' => self::T_UNIQUE,
-                        'FOREIGN' => self::T_FOREIGN,
-                        'REFERENCES' => self::T_REFERENCES,
-                        'CONSTRAINT' => self::T_CONSTRAINT,
-                        'DEFAULT' => self::T_DEFAULT,
-                        'AUTOINCREMENT' => self::T_AUTOINCREMENT,
-                        'CHECK' => self::T_CHECK,
-                        'CASCADE' => self::T_CASCADE,
-                        'RESTRICT' => self::T_RESTRICT,
-                        'ACTION' => self::T_ACTION,
-                        'NO' => self::T_NO,
-                        default => self::T_IDENTIFIER
-                    };
-                }
-
-                $tokens[] = ['type' => $type, 'value' => $word, 'pos' => $start];
-                continue;
-            }
-
-            // Unary Minus / Plus
-            if ($char === '-' || $char === '+') {
-                $tokens[] = ['type' => self::T_OP, 'value' => $char, 'pos' => $start];
-                $this->cursor++;
-                continue;
-            }
-
-            throw new SqlSyntaxException("Unexpected character '$char'", $this->sql, $this->cursor);
+            $pos += $len;
         }
 
-        $tokens[] = ['type' => self::T_EOF, 'value' => null, 'pos' => $this->cursor];
+        $tokens[] = ['type' => self::T_EOF, 'value' => null, 'pos' => $pos];
         return $tokens;
     }
 }
+
+// Initialize static pattern
+SqlLexer::init();

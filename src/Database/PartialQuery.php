@@ -123,6 +123,10 @@ final class PartialQuery implements ResultSetInterface, MutableTableInterface
      * Called before any operation that reads or modifies the AST.
      * Parses baseSql and binds originalParams on first call.
      * Nulls out baseSql/originalParams to prevent accidental use of stale data.
+     *
+     * Uses cached parsing when available. If AST is from cache, it's marked
+     * as shared (astIsPrivate = false) so ensureMutableAST() will clone
+     * before any mutations.
      */
     private function ensureAST(): void
     {
@@ -130,13 +134,23 @@ final class PartialQuery implements ResultSetInterface, MutableTableInterface
             return;
         }
 
-        $parser = new SqlParser();
-        $this->ast = $parser->parse($this->baseSql);
-        $this->astIsPrivate = true;
+        // Use cached parsing - returns shared AST if cached
+        $wasCached = false;
+        $this->ast = SqlParser::parseCached($this->baseSql, $wasCached);
 
+        // If we have params to bind, we'll mutate - must clone if shared
         if (!empty($this->originalParams)) {
+            if ($wasCached) {
+                $this->ast = $this->ast->deepClone();
+                $this->astIsPrivate = true;
+            } else {
+                $this->astIsPrivate = true;
+            }
             $paramsCopy = $this->originalParams;
             $this->bindParamsToAST($this->ast, $paramsCopy);
+        } else {
+            // No params - AST is shared if from cache, private if fresh
+            $this->astIsPrivate = !$wasCached;
         }
 
         // Defensive: null out original data now that AST is source of truth

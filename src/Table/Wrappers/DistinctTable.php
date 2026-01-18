@@ -121,10 +121,6 @@ class DistinctTable extends AbstractTableWrapper
 
     public function count(): int
     {
-        if ($this->cachedCount !== null) {
-            return $this->cachedCount;
-        }
-        $count = iterator_count($this);
-        return $this->cachedCount = $count;
+        return iterator_count($this);
     }
 }

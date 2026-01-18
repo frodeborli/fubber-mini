@@ -222,10 +222,6 @@ class CSVTable extends AbstractTable
 
     public function count(): int
     {
-        if ($this->cachedCount !== null) {
-            return $this->cachedCount;
-        }
-
         $total = count($this->rows);
         $offset = $this->getOffset();
         $limit = $this->getLimit();
@@ -235,7 +231,7 @@ class CSVTable extends AbstractTable
             $count = min($count, $limit);
         }
 
-        return $this->cachedCount = $count;
+        return $count;
     }
 
     public function eq(string $column, int|float|string|null $value): TableInterface

@@ -28,6 +28,7 @@ args(
         ->withFlag(null, 'print-results')
         ->withFlag(null, 'print-errors')
         ->withFlag(null, 'stop-on-error')
+        ->withFlag(null, 'array-table')
         ->withRequiredValue(null, 'include-query')
         ->withRequiredValue(null, 'exclude-query')
         ->withFlag('h', 'help')
@@ -106,6 +107,9 @@ foreach ($testFiles as $file) {
     $runner->addBackend('sqlite', createSqlite());
     $vdb = new VirtualDatabase();
     $vdb->setQueryTimeout(1.0); // 1 second max per query
+    if (args()->getFlag('array-table')) {
+        $vdb->useArrayTable();
+    }
     $runner->addBackend('vdb', $vdb);
 
     // Apply debug flags

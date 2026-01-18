@@ -199,14 +199,7 @@ class SortedTable extends AbstractTableWrapper
 
     public function count(): int
     {
-        if ($this->cachedCount !== null) {
-            return $this->cachedCount;
-        }
-        $count = 0;
-        foreach ($this as $_) {
-            $count++;
-        }
-        return $this->cachedCount = $count;
+        return iterator_count($this);
     }
 
     // -------------------------------------------------------------------------

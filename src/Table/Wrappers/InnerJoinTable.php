@@ -9,27 +9,23 @@ use mini\Table\Contracts\TableInterface;
 use mini\Table\OrderDef;
 use mini\Table\Predicate;
 use mini\Table\Types\IndexType;
-use mini\Table\Utility\PredicateFilter;
 use Traversable;
 
 /**
- * Inner join of two tables with ON condition
+ * Inner join of two tables with equi-join condition
  *
  * Yields rows where the join condition matches between left and right tables.
  * Uses property-based binding: left table must have '__bind__' property with Predicate.
  *
- * ```php
- * // SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id
- * new InnerJoinTable(
- *     $users->withAlias('u')->withProperty('__bind__', p->eqBind('u.id', ':o.user_id')),
- *     $orders->withAlias('o')
- * )
- * ```
+ * Basic nested loop: iterate right, probe left with eq() for each row.
  */
 class InnerJoinTable extends AbstractTable
 {
-    private Predicate $bindPredicate;
-    private array $bindParams;
+    /** @var string Left column name for join */
+    private string $leftCol;
+
+    /** @var string Right column name for join */
+    private string $rightCol;
 
     public function __construct(
         private TableInterface $left,
@@ -42,26 +38,32 @@ class InnerJoinTable extends AbstractTable
                 'INNER JOIN requires __bind__ property with Predicate on left table'
             );
         }
-        $this->bindPredicate = $bindPredicate;
-        $this->bindParams = $bindPredicate->getUnboundParams();
 
-        if (empty($this->bindParams)) {
+        // Extract the single equi-join condition
+        $conditions = $bindPredicate->getConditions();
+        if (count($conditions) !== 1) {
             throw new \InvalidArgumentException(
-                'INNER JOIN requires at least one bind parameter (e.g., eqBind)'
+                'INNER JOIN currently only supports single equi-join condition'
             );
         }
+
+        $cond = $conditions[0];
+        $this->leftCol = $cond['column'];
+        $this->rightCol = ltrim($cond['value'], ':');
 
         $leftCols = $left->getColumns();
         $rightCols = $right->getColumns();
 
-        // Validate right has the referenced columns
-        foreach ($this->bindParams as $param) {
-            $colName = ltrim($param, ':');
-            if (!isset($rightCols[$colName])) {
-                throw new \InvalidArgumentException(
-                    "Bind parameter '$param' references unknown right column: $colName"
-                );
-            }
+        // Validate columns exist
+        if (!isset($leftCols[$this->leftCol])) {
+            throw new \InvalidArgumentException(
+                "Left join column '{$this->leftCol}' does not exist"
+            );
+        }
+        if (!isset($rightCols[$this->rightCol])) {
+            throw new \InvalidArgumentException(
+                "Right join column '{$this->rightCol}' does not exist"
+            );
         }
 
         // Validate no column name conflicts
@@ -73,7 +75,7 @@ class InnerJoinTable extends AbstractTable
             }
         }
 
-        // Merge column definitions - preserve index info since columns map to single source
+        // Merge column definitions
         $merged = [];
         foreach ($leftCols as $name => $def) {
             $merged[] = new ColumnDef($name, $def->type, $def->index);
@@ -87,206 +89,171 @@ class InnerJoinTable extends AbstractTable
 
     protected function materialize(string ...$additionalColumns): Traversable
     {
-        $rowId = 0;
-        $skipped = 0;
-        $emitted = 0;
+        $leftCol = $this->leftCol;
+        $rightCol = $this->rightCol;
+
+        // Check index status on join columns
+        $leftCols = $this->left->getColumns();
+        $rightCols = $this->right->getColumns();
+        $leftIndexed = $leftCols[$leftCol]->index->isIndexed();
+        $rightIndexed = $rightCols[$rightCol]->index->isIndexed();
+
+        if ($leftIndexed || $rightIndexed) {
+            // Sort-merge join: at least one side can sort efficiently
+            yield from $this->sortMergeJoin();
+        } else {
+            // Neither side indexed: use partitioned hash join
+            yield from $this->blockHashJoin();
+        }
+    }
+
+    /**
+     * Sort-merge join: sort both sides and merge matching runs
+     */
+    private function sortMergeJoin(): Traversable
+    {
+        $leftCol = $this->leftCol;
+        $rightCol = $this->rightCol;
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
-        // Query planning: determine optimal iteration order based on indexes
-        // Iterate the table WITHOUT indexes, probe the table WITH indexes
-        $leftJoinCols = $this->getPredicateColumns();
-        $rightJoinCols = array_map(fn($p) => ltrim($p, ':'), $this->bindParams);
+        // Get sorted iterators - use order() to let each table sort efficiently
+        $sortedLeft = $this->left->order($leftCol);
+        $sortedRight = $this->right->order($rightCol);
 
-        $leftHasIndex = $this->hasUsefulIndex($this->left, $leftJoinCols);
-        $rightHasIndex = $this->hasUsefulIndex($this->right, $rightJoinCols);
+        $leftIter = $sortedLeft->getIterator();
+        $rightIter = $sortedRight->getIterator();
 
-        // Wrap probe side with OptimizingTable if neither side has indexes
-        $probeLeft = $this->left;
-        $probeRight = $this->right;
-        if (!$leftHasIndex && !$rightHasIndex) {
-            $probeLeft = $this->wrapWithOptimizing($probeLeft, $this->right->count(), $leftJoinCols);
-            $probeRight = $this->wrapWithOptimizing($probeRight, $this->left->count(), $rightJoinCols);
-        }
+        $leftIter->rewind();
+        $rightIter->rewind();
 
-        // Swap if right has NO index but left DOES
-        // (iterate right is wasteful if we can't probe left efficiently, but we CAN probe right)
-        $shouldSwap = !$rightHasIndex && $leftHasIndex;
+        $rowId = 0;
+        $skipped = 0;
+        $emitted = 0;
 
-        if ($shouldSwap) {
-            // Swapped: iterate left, probe right
-            $invertedPredicate = $this->invertPredicate();
-            $invertedParams = $invertedPredicate->getUnboundParams();
+        // Buffer for handling duplicate keys
+        $leftBuffer = [];
+        $currentLeftKey = null;
 
-            foreach ($this->left as $leftRow) {
-                $bindings = $this->extractBindingsFrom($leftRow, $invertedParams);
-                $boundPredicate = $invertedPredicate->bind($bindings);
-                $filteredRight = PredicateFilter::apply($probeRight, $boundPredicate);
+        while ($leftIter->valid() && $rightIter->valid()) {
+            $leftRow = $leftIter->current();
+            $rightRow = $rightIter->current();
+            $leftKey = $leftRow->$leftCol;
+            $rightKey = $rightRow->$rightCol;
 
-                foreach ($filteredRight as $rightRow) {
+            if ($leftKey < $rightKey) {
+                // Left is behind, advance it
+                $leftIter->next();
+                $leftBuffer = [];
+                $currentLeftKey = null;
+            } elseif ($leftKey > $rightKey) {
+                // Right is behind, advance it
+                $rightIter->next();
+            } else {
+                // Keys match - collect all left rows with this key
+                if ($currentLeftKey !== $leftKey) {
+                    $leftBuffer = [];
+                    $currentLeftKey = $leftKey;
+                    while ($leftIter->valid()) {
+                        $lr = $leftIter->current();
+                        if ($lr->$leftCol !== $leftKey) {
+                            break;
+                        }
+                        $leftBuffer[] = $lr;
+                        $leftIter->next();
+                    }
+                }
+
+                // Emit all combinations with current right row
+                foreach ($leftBuffer as $lr) {
                     if ($skipped++ < $offset) {
                         continue;
                     }
-
-                    yield $rowId++ => $this->mergeRows($leftRow, $rightRow);
-
+                    yield $rowId++ => (object) ((array) $lr + (array) $rightRow);
                     if ($limit !== null && ++$emitted >= $limit) {
                         return;
                     }
                 }
+
+                $rightIter->next();
             }
-        } else {
-            // Normal: iterate right, probe left
+        }
+    }
+
+    /**
+     * Block nested loop join with hash probe
+     *
+     * Processes left side in chunks, scanning right side once per chunk.
+     * Memory bounded to chunk size, trades memory for right-side scans.
+     */
+    private function blockHashJoin(): Traversable
+    {
+        $leftCol = $this->leftCol;
+        $rightCol = $this->rightCol;
+        $limit = $this->getLimit();
+        $offset = $this->getOffset();
+
+        // TODO: Tune chunk size - can probably be 1000 or so
+        $chunkSize = 64;
+        $rowId = 0;
+        $skipped = 0;
+        $emitted = 0;
+
+        // Process left side in chunks
+        $hashTable = [];
+        $chunkCount = 0;
+        $leftIter = $this->left->getIterator();
+
+        foreach ($leftIter as $leftRow) {
+            $key = $leftRow->$leftCol;
+            $hashTable[$key][] = $leftRow;
+            $chunkCount++;
+
+            // When chunk is full, scan right side
+            if ($chunkCount >= $chunkSize) {
+                // Full scan of right, probe hash table
+                foreach ($this->right as $rightRow) {
+                    $key = $rightRow->$rightCol;
+                    if (!isset($hashTable[$key])) {
+                        continue;
+                    }
+
+                    foreach ($hashTable[$key] as $matchedLeft) {
+                        if ($skipped++ < $offset) {
+                            continue;
+                        }
+                        yield $rowId++ => (object) ((array) $matchedLeft + (array) $rightRow);
+                        if ($limit !== null && ++$emitted >= $limit) {
+                            return;
+                        }
+                    }
+                }
+
+                // Clear chunk for next batch
+                $hashTable = [];
+                $chunkCount = 0;
+            }
+        }
+
+        // Process remaining rows in final partial chunk
+        if ($chunkCount > 0) {
             foreach ($this->right as $rightRow) {
-                $bindings = $this->extractBindings($rightRow);
-                $boundPredicate = $this->bindPredicate->bind($bindings);
-                $filteredLeft = PredicateFilter::apply($probeLeft, $boundPredicate);
+                $key = $rightRow->$rightCol;
+                if (!isset($hashTable[$key])) {
+                    continue;
+                }
 
-                foreach ($filteredLeft as $leftRow) {
+                foreach ($hashTable[$key] as $matchedLeft) {
                     if ($skipped++ < $offset) {
                         continue;
                     }
-
-                    yield $rowId++ => $this->mergeRows($leftRow, $rightRow);
-
+                    yield $rowId++ => (object) ((array) $matchedLeft + (array) $rightRow);
                     if ($limit !== null && ++$emitted >= $limit) {
                         return;
                     }
                 }
             }
         }
-    }
-
-    /**
-     * Check if table has useful index for given columns
-     */
-    private function hasUsefulIndex(TableInterface $table, array $columns): bool
-    {
-        $tableCols = $table->getColumns();
-        foreach ($columns as $col) {
-            if (isset($tableCols[$col]) && $tableCols[$col]->index !== IndexType::None) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Wrap table with OptimizingTable if possible
-     *
-     * For AliasTable, we need to unwrap, optimize the source, and re-wrap
-     * since AliasTable delegates eq() to its source.
-     */
-    private function wrapWithOptimizing(TableInterface $table, int $expectedCalls, array $columns): TableInterface
-    {
-        // Handle AliasTable: unwrap, optimize source, re-wrap
-        if ($table instanceof AliasTable) {
-            $source = $table->getSource();
-            if ($source instanceof AbstractTable) {
-                // Map aliased column names back to original names for index hints
-                $originalCols = [];
-                foreach ($columns as $col) {
-                    $originalCols[] = $table->resolveToOriginal($col);
-                }
-
-                $optimized = OptimizingTable::from($source)
-                    ->withExpectedEqCalls($expectedCalls)
-                    ->withIndexOn(...$originalCols);
-
-                // Re-create AliasTable with optimized source
-                return $table->withSource($optimized);
-            }
-            return $table;
-        }
-
-        // Direct wrapping for AbstractTable
-        if ($table instanceof AbstractTable) {
-            return OptimizingTable::from($table)
-                ->withExpectedEqCalls($expectedCalls)
-                ->withIndexOn(...$columns);
-        }
-
-        return $table;
-    }
-
-    /**
-     * Get columns referenced by predicate (left side of join condition)
-     */
-    private function getPredicateColumns(): array
-    {
-        $cols = [];
-        foreach ($this->bindPredicate->getConditions() as $cond) {
-            if (!$cond['bound']) {
-                $cols[] = $cond['column'];
-            }
-        }
-        return $cols;
-    }
-
-    /**
-     * Invert predicate for swapped join: swap column ↔ bind param
-     *
-     * Original: eqBind('u.id', ':o.user_id') - filter left where u.id = o.user_id
-     * Inverted: eqBind('o.user_id', ':u.id') - filter right where o.user_id = u.id
-     */
-    private function invertPredicate(): Predicate
-    {
-        $inverted = new Predicate();
-
-        foreach ($this->bindPredicate->getConditions() as $cond) {
-            if (!$cond['bound']) {
-                // Swap column and param
-                $newColumn = ltrim($cond['value'], ':');  // ':o.user_id' → 'o.user_id'
-                $newParam = ':' . $cond['column'];        // 'u.id' → ':u.id'
-
-                $inverted = match ($cond['operator']) {
-                    \mini\Table\Types\Operator::Eq => $inverted->eqBind($newColumn, $newParam),
-                    \mini\Table\Types\Operator::Lt => $inverted->gtBind($newColumn, $newParam),  // < inverts to >
-                    \mini\Table\Types\Operator::Lte => $inverted->gteBind($newColumn, $newParam),
-                    \mini\Table\Types\Operator::Gt => $inverted->ltBind($newColumn, $newParam),
-                    \mini\Table\Types\Operator::Gte => $inverted->lteBind($newColumn, $newParam),
-                    default => throw new \RuntimeException("Cannot invert operator: " . $cond['operator']->name),
-                };
-            }
-        }
-
-        return $inverted;
-    }
-
-    /**
-     * Extract binding values from a row using given params
-     */
-    private function extractBindingsFrom(object $row, array $params): array
-    {
-        $bindings = [];
-        foreach ($params as $param) {
-            $colName = ltrim($param, ':');
-            $bindings[$param] = $row->$colName ?? null;
-        }
-        return $bindings;
-    }
-
-    /**
-     * Extract binding values from a right row (original predicate)
-     */
-    private function extractBindings(object $row): array
-    {
-        return $this->extractBindingsFrom($row, $this->bindParams);
-    }
-
-    /**
-     * Merge two rows into a single object
-     */
-    private function mergeRows(object $left, object $right): object
-    {
-        $output = new \stdClass();
-        foreach ($left as $col => $val) {
-            $output->$col = $val;
-        }
-        foreach ($right as $col => $val) {
-            $output->$col = $val;
-        }
-        return $output;
     }
 
     public function order(?string $spec): TableInterface
@@ -299,7 +266,7 @@ class InnerJoinTable extends AbstractTable
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Filter pushdown: apply filters to the appropriate source table
+    // Filter pushdown
     // ─────────────────────────────────────────────────────────────────────────
 
     public function eq(string $column, mixed $value): TableInterface
@@ -339,11 +306,7 @@ class InnerJoinTable extends AbstractTable
 
     public function count(): int
     {
-        $count = 0;
-        foreach ($this as $_) {
-            $count++;
-        }
-        return $count;
+        return iterator_count($this);
     }
 
     /**
@@ -368,12 +331,13 @@ class InnerJoinTable extends AbstractTable
     }
 
     /**
-     * Create new join with filtered source tables, preserving bind and limit/offset
+     * Create new join with filtered source tables
      */
     private function withFilteredSources(TableInterface $left, TableInterface $right): TableInterface
     {
-        // Preserve the bind predicate on the left table
-        $leftWithBind = $left->withProperty('__bind__', $this->bindPredicate);
+        // Recreate the bind predicate
+        $predicate = (new Predicate())->eqBind($this->leftCol, ':' . $this->rightCol);
+        $leftWithBind = $left->withProperty('__bind__', $predicate);
 
         $new = new self($leftWithBind, $right);
         if ($this->getLimit() !== null) {

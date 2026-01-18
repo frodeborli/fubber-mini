@@ -121,15 +121,17 @@ class AliasTable implements TableInterface
 
     public function getIterator(): Traversable
     {
+        // Cache alias map locally to avoid repeated property access
+        $aliasMap = $this->aliasMap;
+
         foreach ($this->source as $id => $row) {
-            // Remap properties to aliased names
-            $aliased = new \stdClass();
-            foreach ($row as $origName => $value) {
-                $aliasedName = $this->aliasMap[$origName]
-                    ?? throw new \RuntimeException("No alias mapping for column '$origName'");
-                $aliased->$aliasedName = $value;
+            // Convert to array, remap keys, convert back to object
+            $arr = (array) $row;
+            $aliased = [];
+            foreach ($arr as $origName => $value) {
+                $aliased[$aliasMap[$origName] ?? $origName] = $value;
             }
-            yield $id => $aliased;
+            yield $id => (object) $aliased;
         }
     }
 
