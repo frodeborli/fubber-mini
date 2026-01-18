@@ -645,6 +645,319 @@ $test = new class extends Test {
 
         $index->close();
     }
+
+    public function testHighCardinalityEntries(): void
+    {
+        $path = $this->indexPath('high-cardinality');
+
+        // Create index with 2 keys, each with 1000 row IDs
+        // This should split entries across multiple leaf entries
+        $index = BTreeIndex::fromGenerator($path, function() {
+            for ($i = 0; $i < 1000; $i++) {
+                yield ['active', $i];
+            }
+            for ($i = 0; $i < 1000; $i++) {
+                yield ['inactive', 1000 + $i];
+            }
+        });
+        $index->close();
+
+        // Reopen and verify all row IDs are retrievable
+        $index = new BTreeIndex($path);
+
+        // Check all 'active' row IDs
+        $activeIds = iterator_to_array($index->eq('active'));
+        sort($activeIds);
+        $this->assertSame(range(0, 999), $activeIds);
+
+        // Check all 'inactive' row IDs
+        $inactiveIds = iterator_to_array($index->eq('inactive'));
+        sort($inactiveIds);
+        $this->assertSame(range(1000, 1999), $inactiveIds);
+
+        // Count should work
+        $this->assertSame(1000, $index->count('active'));
+        $this->assertSame(1000, $index->count('inactive'));
+
+        $index->close();
+    }
+
+    public function testVeryHighCardinalityEntries(): void
+    {
+        $path = $this->indexPath('very-high-cardinality');
+
+        // Create index with 1 key with 5000 row IDs
+        // This should span multiple pages
+        $index = BTreeIndex::fromGenerator($path, function() {
+            for ($i = 0; $i < 5000; $i++) {
+                yield ['mega', $i];
+            }
+        });
+        $index->close();
+
+        // Reopen and verify
+        $index = new BTreeIndex($path);
+
+        // Check count
+        $this->assertSame(5000, $index->count('mega'));
+
+        // Check all row IDs are present
+        $ids = iterator_to_array($index->eq('mega'));
+        sort($ids);
+        $this->assertSame(range(0, 4999), $ids);
+
+        $index->close();
+    }
+
+    // =========================================================================
+    // Order verification
+    // =========================================================================
+
+    public function testRangeYieldsInSortedOrder(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        // Insert in random order
+        $keys = ['delta', 'alpha', 'charlie', 'bravo', 'echo'];
+        foreach ($keys as $i => $key) {
+            $index->insert($key, $i);
+        }
+
+        // Should yield in sorted key order
+        $results = [];
+        foreach ($index->range() as $id) {
+            $results[] = $keys[$id];
+        }
+        $this->assertSame(['alpha', 'bravo', 'charlie', 'delta', 'echo'], $results);
+
+        $index->close();
+    }
+
+    public function testRangeReverseYieldsInReverseSortedOrder(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        $keys = ['delta', 'alpha', 'charlie', 'bravo', 'echo'];
+        foreach ($keys as $i => $key) {
+            $index->insert($key, $i);
+        }
+
+        $results = [];
+        foreach ($index->range(reverse: true) as $id) {
+            $results[] = $keys[$id];
+        }
+        $this->assertSame(['echo', 'delta', 'charlie', 'bravo', 'alpha'], $results);
+
+        $index->close();
+    }
+
+    public function testMultipleRowIdsYieldedInInsertOrder(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        // Insert multiple rowIds for same key
+        $index->insert('key', 100);
+        $index->insert('key', 50);
+        $index->insert('key', 200);
+
+        // RowIds should come out in insertion order
+        $results = iterator_to_array($index->eq('key'));
+        $this->assertSame([100, 50, 200], $results);
+
+        $index->close();
+    }
+
+    // =========================================================================
+    // Duplicate and edge case handling
+    // =========================================================================
+
+    public function testDuplicateRowIdInsert(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        $index->insert('a', 1);
+        $index->insert('a', 1); // Same key+rowId again
+
+        // Should have duplicate (B-tree doesn't dedupe)
+        $results = iterator_to_array($index->eq('a'));
+        $this->assertSame([1, 1], $results);
+        $this->assertSame(2, $index->count('a'));
+
+        $index->close();
+    }
+
+    public function testEmptyKey(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        $index->insert('', 1);
+        $index->insert('a', 2);
+
+        $this->assertSame([1], iterator_to_array($index->eq('')));
+        $this->assertTrue($index->has(''));
+
+        // Empty string sorts before 'a'
+        $results = iterator_to_array($index->range());
+        $this->assertSame([1, 2], $results);
+
+        $index->close();
+    }
+
+    public function testLargeRowIds(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        $large1 = PHP_INT_MAX;
+        $large2 = PHP_INT_MAX - 1;
+        $large3 = 2 ** 53; // Max safe integer in JS, good test value
+
+        $index->insert('a', $large1);
+        $index->insert('b', $large2);
+        $index->insert('c', $large3);
+
+        $this->assertSame([$large1], iterator_to_array($index->eq('a')));
+        $this->assertSame([$large2], iterator_to_array($index->eq('b')));
+        $this->assertSame([$large3], iterator_to_array($index->eq('c')));
+
+        $index->close();
+    }
+
+    public function testRangeBoundsBetweenKeys(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        $index->insert('aa', 1);
+        $index->insert('cc', 2);
+        $index->insert('ee', 3);
+
+        // Range with bounds between existing keys
+        $results = iterator_to_array($index->range(start: 'bb', end: 'dd'));
+        $this->assertSame([2], $results); // Only 'cc' is in range
+
+        // Range with start between keys
+        $results = iterator_to_array($index->range(start: 'bb'));
+        $this->assertSame([2, 3], $results);
+
+        // Range with end between keys
+        $results = iterator_to_array($index->range(end: 'dd'));
+        $this->assertSame([1, 2], $results);
+
+        $index->close();
+    }
+
+    // =========================================================================
+    // Transaction visibility
+    // =========================================================================
+
+    public function testBufferedInsertsVisibleDuringTransaction(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        $index->insert('a', 1);
+
+        $index->begin();
+        $index->insert('b', 2);
+        $index->insert('c', 3);
+
+        // New inserts should be visible via eq()
+        $this->assertSame([2], iterator_to_array($index->eq('b')));
+        $this->assertSame([3], iterator_to_array($index->eq('c')));
+
+        // And via range()
+        $results = iterator_to_array($index->range());
+        $this->assertSame([1, 2, 3], $results);
+
+        $index->commit();
+        $index->close();
+    }
+
+    public function testMixedInsertDeleteInTransaction(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        $index->insert('a', 1);
+        $index->insert('a', 2);
+
+        $index->begin();
+        $index->insert('a', 3);  // Add new rowId
+        $index->delete('a', 1); // Delete existing rowId
+
+        // Should see 2 and 3, not 1
+        $results = iterator_to_array($index->eq('a'));
+        sort($results);
+        $this->assertSame([2, 3], $results);
+
+        $index->commit();
+
+        // After commit, same result
+        $results = iterator_to_array($index->eq('a'));
+        sort($results);
+        $this->assertSame([2, 3], $results);
+
+        $index->close();
+    }
+
+    public function testInsertThenDeleteSameKeyInTransaction(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        $index->begin();
+        $index->insert('a', 1);
+        $index->delete('a', 1);
+
+        // Should not exist
+        $this->assertSame([], iterator_to_array($index->eq('a')));
+        $this->assertFalse($index->has('a'));
+
+        $index->commit();
+
+        // After commit, still doesn't exist
+        $this->assertSame([], iterator_to_array($index->eq('a')));
+
+        $index->close();
+    }
+
+    // =========================================================================
+    // Out-of-order insert verification
+    // =========================================================================
+
+    public function testRandomOrderInsertsYieldSorted(): void
+    {
+        $index = new BTreeIndex($this->indexPath());
+
+        // Insert 100 keys in random order
+        $keys = range(0, 99);
+        shuffle($keys);
+
+        foreach ($keys as $k) {
+            $index->insert(sprintf('%02d', $k), $k);
+        }
+
+        // Range should yield in sorted order
+        $results = iterator_to_array($index->range());
+        $this->assertSame(range(0, 99), $results);
+
+        $index->close();
+    }
+
+    public function testBulkLoadRandomOrderYieldsSorted(): void
+    {
+        // Keys inserted in random order via bulk load
+        $keys = range(0, 99);
+        shuffle($keys);
+
+        $index = BTreeIndex::fromGenerator($this->indexPath(), function() use ($keys) {
+            foreach ($keys as $k) {
+                yield [sprintf('%02d', $k), $k];
+            }
+        });
+
+        // Should be sorted
+        $results = iterator_to_array($index->range());
+        $this->assertSame(range(0, 99), $results);
+
+        $index->close();
+    }
 };
 
 $test->run();

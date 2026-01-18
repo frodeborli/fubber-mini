@@ -14,8 +14,9 @@ use mini\Table\Index\BTreeIndex;
 
 $rows = (int)($argv[1] ?? 100_000);
 $queries = (int)($argv[2] ?? 50_000);
+$dir = $argv[3] ?? getenv('BTREE_BENCH_DIR') ?: '/tmp';
 
-$path = '/tmp/btree_bench_' . getmypid() . '.btree';
+$path = $dir . '/btree_bench_' . getmypid() . '.btree';
 register_shutdown_function(function() use ($path) {
     @unlink($path);
     @unlink($path . '.lock');
@@ -107,7 +108,7 @@ printResult(bench("Full scan reverse", function() use ($index) {
 
 // Incremental inserts
 $insertCount = min(1000, $queries);
-$index2path = '/tmp/btree_bench2_' . getmypid() . '.btree';
+$index2path = $dir . '/btree_bench2_' . getmypid() . '.btree';
 register_shutdown_function(function() use ($index2path) {
     @unlink($index2path);
     @unlink($index2path . '.lock');
