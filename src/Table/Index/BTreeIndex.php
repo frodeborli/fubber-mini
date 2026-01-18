@@ -122,8 +122,7 @@ final class BTreeLeafPage
     }
 
     /**
-     * Serialize entries to binary page format.
-     * Uses $this->entries (flat format) and $this->count.
+     * Serialize to binary page format using precomputed meta.
      */
     public function asString(): string
     {
@@ -132,47 +131,38 @@ final class BTreeLeafPage
             return \pack('Cv', BTreeIndex::PAGE_LEAF, 0);
         }
 
-        // Build entry data and calculate offsets + rowIdCounts
-        $entryData = '';
-        $offsets = [];
-        $rowIdCounts = [];
+        $meta = $this->meta;
+        $entries = $this->entries;
 
-        // Header size: type(1) + count(2) + offsets((n+1) * 2) + rowIdCounts(n * 2)
-        $headerSize = 3 + ($n + 1) * 2 + $n * 2;
-
-        for ($i = 0; $i < $n; $i++) {
-            $entry = $this->entries[$i];
-            $offsets[] = $headerSize + \strlen($entryData);
-            $rowIdCount = \count($entry) - 1;
-            $rowIdCounts[] = $rowIdCount;
-
-            // Entry: rowIds(8 each) + key
-            $entryBytes = '';
-            for ($j = 1; $j <= $rowIdCount; $j++) {
-                $entryBytes .= \pack('P', $entry[$j]);
-            }
-            $entryBytes .= $entry[0]; // key
-            $entryData .= $entryBytes;
-        }
-
-        // End marker offset
-        $offsets[] = $headerSize + \strlen($entryData);
-
-        // Build page: type(1) + count(2) + offsets + rowIdCounts + entries
+        // Build page header: type(1) + count(2) + offsets((n+1) * 2) + rowIdCounts(n * 2)
         $page = \pack('Cv', BTreeIndex::PAGE_LEAF, $n);
-        foreach ($offsets as $off) {
-            $page .= \pack('v', $off);
+
+        // Offsets (1-based in meta: 1..n+1)
+        for ($i = 1; $i <= $n + 1; $i++) {
+            $page .= \pack('v', $meta[$i]);
         }
-        foreach ($rowIdCounts as $cnt) {
-            $page .= \pack('v', $cnt);
+
+        // RowIdCounts (1-based in meta: n+2..2n+1)
+        for ($i = $n + 2; $i <= 2 * $n + 1; $i++) {
+            $page .= \pack('v', $meta[$i]);
         }
-        $page .= $entryData;
+
+        // Entry data: rowIds + key for each entry
+        for ($i = 0; $i < $n; $i++) {
+            $entry = $entries[$i];
+            $rowIdCount = $meta[$n + 2 + $i];
+            for ($j = 1; $j <= $rowIdCount; $j++) {
+                $page .= \pack('P', $entry[$j]);
+            }
+            $page .= $entry[0]; // key
+        }
 
         return $page;
     }
 
     /**
      * Get a leaf page from pool (or create new) and set entries.
+     * Builds meta immediately for consistency.
      * @param array<array<int, string|int>> $entries Flat format [[key, rowId1, ...], ...]
      */
     public static function fromEntries(array $entries): self
@@ -182,9 +172,33 @@ final class BTreeLeafPage
         } else {
             $instance = new self();
         }
+
+        $n = \count($entries);
         $instance->entries = $entries;
-        $instance->count = \count($entries);
+        $instance->count = $n;
         $instance->entriesBuilt = true;
+
+        if ($n === 0) {
+            $instance->meta = [];
+            return $instance;
+        }
+
+        // Build meta: offsets (1..n+1) + rowIdCounts (n+2..2n+1), 1-based
+        // Header size: type(1) + count(2) + offsets((n+1) * 2) + rowIdCounts(n * 2)
+        $headerSize = 3 + ($n + 1) * 2 + $n * 2;
+        $meta = [];
+        $offset = $headerSize;
+
+        for ($i = 0; $i < $n; $i++) {
+            $entry = $entries[$i];
+            $meta[$i + 1] = $offset; // offset at 1-based index
+            $rowIdCount = \count($entry) - 1;
+            $meta[$n + 2 + $i] = $rowIdCount; // rowIdCount at n+2+i
+            $offset += $rowIdCount * 8 + \strlen($entry[0]);
+        }
+        $meta[$n + 1] = $offset; // end marker
+
+        $instance->meta = $meta;
         return $instance;
     }
 }
