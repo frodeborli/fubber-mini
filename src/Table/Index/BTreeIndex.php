@@ -349,6 +349,9 @@ final class BTreeLeafPage
 
         // Header for empty leaf: type(1) + count(2) + offset(2) = 5 bytes
         // Each entry adds: 4 bytes meta (offset + rowIdCount) + rowIdCount*8 + keyLen
+
+        // First pass: collect all entries into batches
+        $batches = [];
         $batchSize = 5;
         $batch = [];
 
@@ -361,9 +364,9 @@ final class BTreeLeafPage
 
             // Single entry too big? Split its rowIds
             if ($entrySize > $maxSize - 5) {
-                // Yield current batch first
+                // Save current batch first
                 if (\count($batch) > 0) {
-                    yield self::fromBatch($batch, $this->parent);
+                    $batches[] = $batch;
                     $batch = [];
                     $batchSize = 5;
                 }
@@ -381,18 +384,18 @@ final class BTreeLeafPage
                     $splitCount = $end - $r;
                     $splitSize = 4 + $splitCount * 8 + $keyLen;
 
-                    // Last chunk goes to batch, others yield immediately
+                    // Last chunk goes to batch, others save immediately
                     if ($end > $rowIdCount) {
                         $batch[] = $splitEntry;
                         $batchSize = 5 + $splitSize;
                     } else {
-                        yield self::fromBatch([$splitEntry], $this->parent);
+                        $batches[] = [$splitEntry];
                     }
                 }
             } else {
                 // Would this entry overflow current batch?
                 if (\count($batch) > 0 && $batchSize + $entrySize > $maxSize) {
-                    yield self::fromBatch($batch, $this->parent);
+                    $batches[] = $batch;
                     $batch = [];
                     $batchSize = 5;
                 }
@@ -401,16 +404,26 @@ final class BTreeLeafPage
                 $batchSize += $entrySize;
             }
         }
+        // Add final batch
+        if (\count($batch) > 0) {
+            $batches[] = $batch;
+        }
 
-        // Remaining entries stay in this leaf - overwrite in place
-        $count = \count($batch);
+        // $this keeps FIRST batch (smallest keys) to preserve position in parent
+        $firstBatch = $batches[0];
+        $count = \count($firstBatch);
         for ($j = 0; $j < $count; $j++) {
-            $this->entries[$j] = $batch[$j];
+            $this->entries[$j] = $firstBatch[$j];
         }
         $this->count = $count;
         $this->entriesBuilt = true;
         $this->rebuildMeta();
         yield $this;
+
+        // Yield new pages for remaining batches (larger keys)
+        for ($b = 1; $b < \count($batches); $b++) {
+            yield self::fromBatch($batches[$b], $this->parent);
+        }
     }
 
     /**
@@ -642,7 +655,7 @@ final class BTreeInternalPage
 
     /**
      * Split this internal page into pages that fit within maxSize.
-     * Yields new internal pages first, then yields $this with remaining children.
+     * $this keeps smallest keys (first batch) to preserve position in parent.
      * If already fits, just yields $this.
      *
      * @param int $maxSize Maximum page size (default 4096)
@@ -662,10 +675,12 @@ final class BTreeInternalPage
         // For c children: 3 + c*4 + c*2 = 3 + 6*c
         // Each additional child adds: 4 (child) + 2 (offset) + keyLen = 6 + keyLen
 
+        // First pass: collect all batches
+        $batches = []; // Each batch is [children[], keys[], promoteKey]
         $batchChildren = [];
         $batchKeys = [];
         $batchSize = 3 + 6; // Header base + first child (no key)
-        $nextPromoteKey = null; // Key that will be promoteKey for next batch
+        $nextPromoteKey = null;
 
         for ($i = 0; $i < $this->childCount; $i++) {
             if ($i === 0) {
@@ -678,13 +693,10 @@ final class BTreeInternalPage
 
                 // Would this entry overflow current batch?
                 if (\count($batchChildren) > 0 && $batchSize + $entrySize > $maxSize) {
-                    // Yield current batch as new internal page
-                    $newPage = self::fromArrays($batchChildren, $batchKeys);
-                    $newPage->parent = $this->parent;
-                    $newPage->promoteKey = $nextPromoteKey; // null for first page
-                    yield $newPage;
+                    // Save current batch
+                    $batches[] = [$batchChildren, $batchKeys, $nextPromoteKey];
 
-                    // The key at split point becomes promoteKey for the NEXT page
+                    // The key at split point becomes promoteKey for the NEXT batch
                     $nextPromoteKey = $key;
 
                     // Start new batch - this child becomes first
@@ -698,16 +710,28 @@ final class BTreeInternalPage
                 }
             }
         }
+        // Add final batch
+        $batches[] = [$batchChildren, $batchKeys, $nextPromoteKey];
 
-        // Remaining children stay in this page - overwrite in place
-        $count = \count($batchChildren);
+        // $this keeps FIRST batch (smallest keys) to preserve position in parent
+        [$firstChildren, $firstKeys, $firstPromoteKey] = $batches[0];
+        $count = \count($firstChildren);
         for ($i = 0; $i < $count; $i++) {
-            $this->children[$i] = $batchChildren[$i];
+            $this->children[$i] = $firstChildren[$i];
         }
-        $this->keys = $batchKeys;
+        $this->keys = $firstKeys;
         $this->childCount = $count;
-        $this->promoteKey = $nextPromoteKey; // promoteKey for the last page (self)
+        $this->promoteKey = $firstPromoteKey; // null for first batch
         yield $this;
+
+        // Yield new pages for remaining batches (larger keys)
+        for ($b = 1; $b < \count($batches); $b++) {
+            [$children, $keys, $promoteKey] = $batches[$b];
+            $newPage = self::fromArrays($children, $keys);
+            $newPage->parent = $this->parent;
+            $newPage->promoteKey = $promoteKey;
+            yield $newPage;
+        }
     }
 }
 

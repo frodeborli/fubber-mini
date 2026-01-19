@@ -521,7 +521,7 @@ $test = new class extends Test {
 
         $sizeAfter = filesize($path);
 
-        // Size should decrease (though not guaranteed to be dramatically smaller)
+        // Size should decrease or stay same (sizeAfter <= sizeBefore)
         $this->assertLessThanOrEqual($sizeBefore, $sizeAfter);
 
         // Verify data is still correct
@@ -1857,8 +1857,8 @@ $test = new class extends Test {
         // Should have multiple pages
         $this->assertTrue(count($pages) > 1, "Should split into multiple pages");
 
-        // Last page should be the original leaf
-        $this->assertSame($leaf, $pages[count($pages) - 1]);
+        // First page should be the original leaf (keeps smallest keys)
+        $this->assertSame($leaf, $pages[0]);
 
         // All pages should fit within page size
         foreach ($pages as $idx => $page) {
@@ -1882,8 +1882,8 @@ $test = new class extends Test {
         sort($sortedKeys);
         $this->assertSame($sortedKeys, $allKeys);
 
-        // Release pages (except original which we'll release separately)
-        for ($i = 0; $i < count($pages) - 1; $i++) {
+        // Release pages (except original at index 0 which we'll release separately)
+        for ($i = 1; $i < count($pages); $i++) {
             $pages[$i]->release();
         }
         $leaf->release();
@@ -1981,8 +1981,8 @@ $test = new class extends Test {
         // Should have multiple pages
         $this->assertTrue(count($pages) > 1, "Should split into multiple pages");
 
-        // Last page should be the original
-        $this->assertSame($internal, $pages[count($pages) - 1]);
+        // First page should be the original (keeps smallest keys)
+        $this->assertSame($internal, $pages[0]);
 
         // All pages should fit within page size
         foreach ($pages as $idx => $page) {
@@ -2054,19 +2054,19 @@ $test = new class extends Test {
         $iter1 = $index->range();
         $iter2 = $index->range(reverse: true);
 
-        // Interleave reads
+        // Interleave reads - current() first since generators start at first yield
         $results1 = [];
         $results2 = [];
         for ($i = 0; $i < 50; $i++) {
-            $iter1->next();
             $results1[] = $iter1->current();
-            $iter2->next();
             $results2[] = $iter2->current();
+            $iter1->next();
+            $iter2->next();
         }
 
-        // Both should have valid, non-overlapping results
-        $this->assertSame(range(1, 50), $results1);
-        $this->assertSame(range(98, 49, -1), $results2);
+        // Both should have valid results from beginning
+        $this->assertSame(range(0, 49), $results1);       // Forward: 0-49
+        $this->assertSame(range(99, 50, -1), $results2);  // Reverse: 99-50
 
         $index->close();
     }
@@ -2313,7 +2313,7 @@ $test = new class extends Test {
 
         $sizeAfter = filesize($path);
 
-        // Should shrink
+        // Should shrink (sizeAfter <= sizeBefore)
         $this->assertLessThanOrEqual($sizeBefore, $sizeAfter);
 
         // Should be empty
@@ -2420,8 +2420,6 @@ $test = new class extends Test {
         $state = [];
 
         // Do 5 transactions of 50 operations each with deterministic pattern
-        // (Reduced from 10x100 to avoid triggering a known edge case bug
-        // with large transactions touching many keys)
         for ($txn = 0; $txn < 5; $txn++) {
             $index->begin();
 
@@ -2743,22 +2741,20 @@ $test = new class extends Test {
     }
 
     // =========================================================================
-    // Known issue regression tests (skip until fixed)
+    // Regression tests for fixed bugs
     // =========================================================================
 
     /**
-     * KNOWN BUG: Large transactions touching many keys can lose data on commit.
+     * Regression test: splitOversized must keep smallest keys in $this.
      *
-     * When 10 transactions of 100 operations each touch all 50 keys with mixed
-     * insert/delete, keys 00, 45, 46, 47, 48 lose all their data after the
-     * final commit.
+     * Before the fix, splitOversized yielded $this with the LARGEST keys,
+     * but $this's position in the parent tree wasn't updated. This caused
+     * lookups to fail for keys that were now in the wrong subtree.
      *
-     * This test is skipped until the bug is fixed. To investigate:
-     * - Run the test manually and observe that after txn 9 commit, some keys
-     *   have 0 rows when they should have 10-12.
-     * - The bug appears to be in the commit logic when many pages are modified.
+     * This test runs 10 transactions of 100 operations each, touching 50 keys
+     * with mixed insert/delete. Before the fix, keys 00, 45-48 lost all data.
      */
-    public function skipLargeTransactionDataLoss(): void
+    public function testLargeTransactionDataLoss(): void
     {
         $index = new BTreeIndex($this->indexPath());
         $state = [];
@@ -2786,9 +2782,9 @@ $test = new class extends Test {
             $index->commit();
         }
 
-        // These keys lose all data due to the bug
-        $buggyKeys = ['00', '45', '46', '47', '48'];
-        foreach ($buggyKeys as $key) {
+        // Keys that were affected by the bug (now should work correctly)
+        $affectedKeys = ['00', '45', '46', '47', '48'];
+        foreach ($affectedKeys as $key) {
             $actual = iterator_to_array($index->eq($key));
             $expected = $state[$key] ?? [];
             sort($actual);
