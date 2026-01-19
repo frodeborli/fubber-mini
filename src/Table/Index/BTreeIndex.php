@@ -1365,14 +1365,9 @@ final class BTreeIndex implements IndexInterface
         // Update entries in place
         $leaf->setEntries($entries);
 
-        // Check if split needed - use entry count threshold to avoid expensive asString()
-        // Only do full size check when entry count suggests we might overflow
-        $needsSplit = false;
-        if ($n > 150) { // ~150 entries with avg 20-byte keys + 1 rowId ≈ 4KB
-            $needsSplit = \strlen($leaf->asString()) > self::PAGE_SIZE;
-        }
-
-        if (!$needsSplit) {
+        // Split when entry count exceeds threshold - keeps leaves small for fast inserts
+        // Actual size check deferred to commit() via splitOversizedPages()
+        if ($n <= 150) { // ~150 entries keeps insert array copying cheap
             // Fits - update parent pointers if needed
             if ($leafPageNum !== null) {
                 $this->updatePath($path, $pathLen - 4, $leafPageNum);
