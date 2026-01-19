@@ -1036,12 +1036,13 @@ $test = new class extends Test {
         // We must pad to a full page because fromRaw() expects it to be in-page layout.
         $PAGE_SIZE = 4096;
 
-        // Entries are 1-based
+        // Entries are list format: [null, entry1, entry2, ...]
         $entries = [
-            1 => ['a', 1, 2, 3],
-            2 => ['b', 10],
-            3 => ["\x00\x01\xff", 999],   // binary-ish key
-            4 => [str_repeat('k', 50), 7, 8],
+            null,
+            ['a', 1, 2, 3],
+            ['b', 10],
+            ["\x00\x01\xff", 999],   // binary-ish key
+            [str_repeat('k', 50), 7, 8],
         ];
 
         $leaf = BTreeLeafPage::fromEntries($entries);
@@ -1053,8 +1054,8 @@ $test = new class extends Test {
 
         $parsed = BTreeLeafPage::fromRaw($page);
 
-        // Basic invariants
-        $this->assertSame(count($entries), $parsed->count);
+        // Basic invariants (count excludes null at [0])
+        $this->assertSame(count($entries) - 1, $parsed->count);
 
         // Validate keys via getKeyAt() (key-only parse path, 1-based)
         for ($i = 1; $i <= $parsed->count; $i++) {
@@ -1080,7 +1081,7 @@ $test = new class extends Test {
     {
         $PAGE_SIZE = 4096;
 
-        // Build using fromArrays(): input is 0-based, converted to 1-based internally
+        // Build using fromArrays(): input is 0-based, converted to list format internally
         $children0 = [11, 22, 33, 44];
         $keys0 = ['b', 'c', 'd']; // n keys => n+1 children
 
@@ -1089,22 +1090,22 @@ $test = new class extends Test {
 
         $page = pack('a' . $PAGE_SIZE, $pageBody);
 
-        // Parse back from raw bytes: both children and keys are 1-based
+        // Parse back from raw bytes: list format [null, v1, v2, ...]
         $parsed = BTreeInternalPage::fromRaw($page);
 
         $this->assertSame(count($children0), $parsed->childCount);
-        // Keys are now 1-based after fromRaw
-        $this->assertSame([1 => 'b', 2 => 'c', 3 => 'd'], $parsed->keys);
+        // Keys are list format after fromRaw
+        $this->assertSame([null, 'b', 'c', 'd'], $parsed->keys);
 
-        // Children from unpack are 1-based
+        // Children are list format [null, c1, c2, ...]
         $this->assertSame($children0[0], $parsed->children[1]);
         $this->assertSame($children0[1], $parsed->children[2]);
         $this->assertSame($children0[2], $parsed->children[3]);
         $this->assertSame($children0[3], $parsed->children[4]);
 
-        // Index 0 should not exist in the unpacked arrays (1-based)
-        $this->assertFalse(isset($parsed->children[0]));
-        $this->assertFalse(isset($parsed->keys[0]));
+        // Index 0 exists but is null (list format)
+        $this->assertNull($parsed->children[0]);
+        $this->assertNull($parsed->keys[0]);
     }
 
     public function testPackPointerSizeAssumptionIsEightBytes(): void
@@ -1118,10 +1119,11 @@ $test = new class extends Test {
     {
         $PAGE_SIZE = 4096;
 
-        // Entries are 1-based
+        // Entries are list format: [null, entry1, entry2, ...]
         $entries = [
-            1 => ['a', 1],
-            2 => ['b', 2],
+            null,
+            ['a', 1],
+            ['b', 2],
         ];
 
         $leaf = BTreeLeafPage::fromEntries($entries);
@@ -1143,6 +1145,77 @@ $test = new class extends Test {
         // end marker meta[n+1] should be <= PAGE_SIZE and >= header
         $this->assertGreaterThanOrEqual($expectedHeaderSize, $parsed->meta[$n + 1]);
         $this->assertLessThanOrEqual($PAGE_SIZE, $parsed->meta[$n + 1]);
+
+        $parsed->release();
+    }
+
+    /**
+     * Test compact with enough keys to create internal nodes.
+     * This tests the rewritePages() iteration over list format children.
+     */
+    public function testCompactWithInternalNodes(): void
+    {
+        $path = $this->indexPath('compact_internal');
+        $index = new BTreeIndex($path);
+
+        // Insert 2000 keys - enough to create multiple internal nodes
+        $index->begin();
+        for ($i = 0; $i < 2000; $i++) {
+            $index->insert(sprintf('%04d', $i), $i);
+        }
+        $index->commit();
+
+        // Delete half the keys to create garbage
+        for ($i = 0; $i < 2000; $i += 2) {
+            $index->delete(sprintf('%04d', $i), $i);
+        }
+
+        // Compact
+        $index->compact();
+
+        // Verify all remaining data is still correct
+        $results = iterator_to_array($index->range());
+        $expected = range(1, 1999, 2); // odd numbers
+        $this->assertSame($expected, $results);
+
+        // Verify point lookups still work
+        $this->assertSame([1], iterator_to_array($index->eq('0001')));
+        $this->assertSame([999], iterator_to_array($index->eq('0999')));
+        $this->assertSame([1999], iterator_to_array($index->eq('1999')));
+
+        // Verify deleted keys are gone
+        $this->assertSame([], iterator_to_array($index->eq('0000')));
+        $this->assertSame([], iterator_to_array($index->eq('1000')));
+
+        $index->close();
+    }
+
+    /**
+     * Test creating an empty leaf page with list format [null].
+     * This is the format used when creating a new empty index.
+     */
+    public function testEmptyLeafPageFromEntries(): void
+    {
+        $PAGE_SIZE = 4096;
+
+        // Empty entries in list format = just [null]
+        $emptyLeaf = BTreeLeafPage::fromEntries([null]);
+
+        $this->assertSame(0, $emptyLeaf->count);
+
+        // Serialize and parse back
+        $pageBody = $emptyLeaf->asString();
+        $emptyLeaf->release();
+
+        $page = pack('a' . $PAGE_SIZE, $pageBody);
+        $parsed = BTreeLeafPage::fromRaw($page);
+
+        $this->assertSame(0, $parsed->count);
+        $this->assertSame([], $parsed->meta);
+
+        // toArray should return [null] (empty list format)
+        $entries = $parsed->toArray();
+        $this->assertSame([null], $entries);
 
         $parsed->release();
     }
