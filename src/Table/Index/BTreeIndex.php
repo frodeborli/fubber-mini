@@ -372,21 +372,14 @@ final class BTreeIndex implements IndexInterface
     private array $deleteBuffer = [];
 
     // Internal node cache (parsed data)
-    // These intervals are for multi-process safety; single-process usage doesn't need frequent checks
+    // This interval is for multi-process safety; single-process usage doesn't need frequent checks
     private const CACHE_CHECK_INTERVAL = 10000; // Check for file changes every N page reads
-    private const HEADER_CHECK_INTERVAL = 10000; // Check header every N queries
 
     /** @var array<int, BTreeInternalPage> Parsed internal page cache */
     private array $pageCache = [];
 
     /** @var int Counter for periodic cache invalidation check */
     private int $cacheReadCount = 0;
-
-    /** @var int Counter for periodic header check */
-    private int $queryCount = 0;
-
-    /** @var int Sequence number when cache was last validated */
-    private int $cacheSequence = 0;
 
     public function __construct(string $path)
     {
@@ -631,7 +624,8 @@ final class BTreeIndex implements IndexInterface
 
     public function eq(string $key): Traversable
     {
-        $this->readHeaderWithLock();
+        // No header check needed - append-only design means old root always
+        // points to valid (immutable) pages. We get snapshot isolation for free.
 
         // If in transaction with buffered data, use merged range
         if ($this->inTransaction && (!empty($this->buffer) || !empty($this->deleteBuffer))) {
@@ -736,7 +730,8 @@ final class BTreeIndex implements IndexInterface
 
     public function range(?string $start = null, ?string $end = null, bool $reverse = false): Traversable
     {
-        $this->readHeaderWithLock();
+        // No header check needed - append-only design means old root always
+        // points to valid (immutable) pages. We get snapshot isolation for free.
 
         // If in transaction with buffered data, merge disk + buffer
         if ($this->inTransaction && (!empty($this->buffer) || !empty($this->deleteBuffer))) {
@@ -904,23 +899,6 @@ final class BTreeIndex implements IndexInterface
         $this->rootPage = $header['rootPage'];
         $this->nextPage = $header['nextPage'];
         $this->sequence = $header['sequence'];
-        $this->cacheSequence = $this->sequence;
-    }
-
-    private function readHeaderWithLock(): void
-    {
-        // Skip header read if we've checked recently (optimization for read-heavy workloads)
-        if (++$this->queryCount < self::HEADER_CHECK_INTERVAL) {
-            return;
-        }
-        $this->queryCount = 0;
-
-        flock($this->lockFile, LOCK_SH);
-        try {
-            $this->readHeader();
-        } finally {
-            flock($this->lockFile, LOCK_UN);
-        }
     }
 
     private function writeHeader(): void
@@ -940,9 +918,8 @@ final class BTreeIndex implements IndexInterface
         fwrite($this->file, pack('a' . self::PAGE_SIZE, $header));
         fflush($this->file);
 
-        // Update cache sequence and clear stale cached pages
+        // Clear stale cached pages after header update
         $this->pageCache = [];
-        $this->cacheSequence = $this->sequence;
     }
 
     private function withWriteLock(callable $fn): void
@@ -1022,7 +999,7 @@ final class BTreeIndex implements IndexInterface
 
         if ($type === self::PAGE_LEAF) {
             // Don't cache leaf nodes - they're accessed once per query
-            return $this->parseLeafPage($page);
+            return BTreeLeafPage::fromRaw($page);
         }
 
         // Cache internal nodes - they're traversed repeatedly
@@ -1033,25 +1010,18 @@ final class BTreeIndex implements IndexInterface
 
     /**
      * Check if file was modified by another process and invalidate cache if so.
+     * Append-only design means we just check if file grew.
      */
     private function checkCacheValidity(): void
     {
-        flock($this->lockFile, LOCK_SH);
-        try {
-            fseek($this->file, 0);
-            $data = fread($this->file, self::HEADER_SIZE);
-            $header = unpack('Vmagic/Cversion/Creserved/vpageSize/ProotPage/PnextPage/Psequence', $data);
+        clearstatcache(true, $this->path);
+        $size = filesize($this->path);
+        $expectedSize = $this->nextPage * self::PAGE_SIZE;
 
-            if ($header['sequence'] !== $this->cacheSequence) {
-                // File changed - invalidate cache and update state
-                $this->pageCache = [];
-                $this->rootPage = $header['rootPage'];
-                $this->nextPage = $header['nextPage'];
-                $this->sequence = $header['sequence'];
-                $this->cacheSequence = $this->sequence;
-            }
-        } finally {
-            flock($this->lockFile, LOCK_UN);
+        if ($size > $expectedSize) {
+            // File grew - another process appended pages. Re-read header.
+            $this->pageCache = [];
+            $this->readHeader();
         }
     }
 
@@ -1066,15 +1036,6 @@ final class BTreeIndex implements IndexInterface
         fflush($this->file);
 
         return $pageNum;
-    }
-
-    // =========================================================================
-    // Leaf page format
-    // =========================================================================
-
-    private function parseLeafPage(string $page): BTreeLeafPage
-    {
-        return BTreeLeafPage::fromRaw($page);
     }
 
     // =========================================================================
