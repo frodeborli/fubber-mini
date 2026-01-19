@@ -518,13 +518,13 @@ final class BTreeIndex implements IndexInterface
                 }
             }
 
-            // Flush all dirty nodes to disk in one pass
+            // Flush all dirty nodes to disk
             $this->flushDirtyNodes();
 
-            // Ensure all data pages are durable before updating header
-            // (flushDirtyNodes syncs dirty nodes, this covers direct appendPage calls)
+            // PRE-PUBLISH BARRIER: ensure all data pages are durable
             fdatasync($this->file);
 
+            // Publish new root via header update (writeHeader does POST-PUBLISH barrier)
             $this->sequence++;
             $this->writeHeader();
         });
@@ -604,16 +604,18 @@ final class BTreeIndex implements IndexInterface
                 $leaf = BTreeLeafPage::fromEntries([[$key, $rowId]]);
                 $this->rootPage = $this->appendPage($leaf->asString());
                 $leaf->release();
-                fdatasync($this->file); // Sync before header update
             } else {
                 // Find path to leaf and insert
                 $path = $this->findPath($key);
                 $this->insertIntoTree($key, $rowId, $path);
-                $this->flushDirtyNodes(); // Syncs pages
+                $this->flushDirtyNodes();
             }
 
+            // PRE-PUBLISH BARRIER
+            fdatasync($this->file);
+
             $this->sequence++;
-            $this->writeHeader(); // Syncs header
+            $this->writeHeader(); // POST-PUBLISH BARRIER
         });
     }
 
@@ -636,8 +638,11 @@ final class BTreeIndex implements IndexInterface
             $this->deleteFromTree($key, $rowId, $path);
             $this->flushDirtyNodes();
 
+            // PRE-PUBLISH BARRIER
+            fdatasync($this->file);
+
             $this->sequence++;
-            $this->writeHeader();
+            $this->writeHeader(); // POST-PUBLISH BARRIER
         });
     }
 
@@ -1061,7 +1066,7 @@ final class BTreeIndex implements IndexInterface
 
         fseek($this->file, $offset);
         fwrite($this->file, \pack('a' . self::PAGE_SIZE, $page));
-        fflush($this->file);
+        // No fflush here - sync at commit boundaries only
 
         return $pageNum;
     }
@@ -1106,7 +1111,7 @@ final class BTreeIndex implements IndexInterface
 
     /**
      * Flush all dirty nodes to disk in correct order.
-     * Must be called within write lock.
+     * Must be called within write lock. Does NOT sync - caller must sync.
      */
     private function flushDirtyNodes(): void
     {
@@ -1118,9 +1123,6 @@ final class BTreeIndex implements IndexInterface
         if ($this->rootPage < 0) {
             $this->rootPage = $this->writeDirtySubtree($this->rootPage);
         }
-
-        // Sync data pages to disk before updating header (crash safety)
-        fdatasync($this->file);
 
         $this->dirtyNodes = [];
         $this->nextTempId = -1;
