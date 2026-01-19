@@ -1,0 +1,72 @@
+#!/usr/bin/env php
+<?php
+/**
+ * Debug eq() lookup - trace a single lookup on a 100k index
+ */
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use mini\Table\Index\BTreeIndex;
+
+$path = '/tmp/debug_eq_' . getmypid() . '.btree';
+register_shutdown_function(function() use ($path) {
+    @unlink($path);
+    @unlink($path . '.lock');
+});
+
+// Build 100k index
+fwrite(STDERR, "Building 100k index...\n");
+$index = BTreeIndex::fromGenerator($path, function() {
+    for ($i = 0; $i < 100_000; $i++) {
+        yield [sprintf('%08d', $i), $i];
+    }
+});
+$index->close();
+fwrite(STDERR, "Built. File size: " . filesize($path) . " bytes\n\n");
+
+// Reopen and do a single lookup
+$index = new BTreeIndex($path);
+
+// First lookup
+$key = sprintf('%08d', 50000); // Middle key
+fwrite(STDERR, "=== First lookup: $key ===\n\n");
+
+$start = hrtime(true);
+$result = [];
+foreach ($index->eq($key) as $rowId) {
+    $result[] = $rowId;
+}
+$elapsed = (hrtime(true) - $start) / 1e6;
+
+fwrite(STDERR, "\nResult: " . implode(', ', $result) . "\n");
+fwrite(STDERR, "Elapsed: {$elapsed}ms\n\n");
+
+// Second lookup (different key, same leaf)
+$key2 = sprintf('%08d', 50001);
+fwrite(STDERR, "=== Second lookup: $key2 ===\n\n");
+
+$start = hrtime(true);
+$result = [];
+foreach ($index->eq($key2) as $rowId) {
+    $result[] = $rowId;
+}
+$elapsed = (hrtime(true) - $start) / 1e6;
+
+fwrite(STDERR, "\nResult: " . implode(', ', $result) . "\n");
+fwrite(STDERR, "Elapsed: {$elapsed}ms\n\n");
+
+// Third lookup (different key, different leaf)
+$key3 = sprintf('%08d', 10000);
+fwrite(STDERR, "=== Third lookup: $key3 ===\n\n");
+
+$start = hrtime(true);
+$result = [];
+foreach ($index->eq($key3) as $rowId) {
+    $result[] = $rowId;
+}
+$elapsed = (hrtime(true) - $start) / 1e6;
+
+fwrite(STDERR, "\nResult: " . implode(', ', $result) . "\n");
+fwrite(STDERR, "Elapsed: {$elapsed}ms\n");
+
+$index->close();
