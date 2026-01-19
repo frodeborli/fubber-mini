@@ -487,7 +487,7 @@ final class BTreeIndex implements IndexInterface
                     }
 
                     if ($this->rootPage === 0) {
-                        // Empty tree - create first leaf
+                        // Empty tree - create first leaf (sync handled below)
                         $leaf = BTreeLeafPage::fromEntries([[$key, $rowId]]);
                         $this->rootPage = $this->appendPage($leaf->asString());
                         $leaf->release();
@@ -521,6 +521,10 @@ final class BTreeIndex implements IndexInterface
             // Flush all dirty nodes to disk in one pass
             $this->flushDirtyNodes();
 
+            // Ensure all data pages are durable before updating header
+            // (flushDirtyNodes syncs dirty nodes, this covers direct appendPage calls)
+            fdatasync($this->file);
+
             $this->sequence++;
             $this->writeHeader();
         });
@@ -553,6 +557,9 @@ final class BTreeIndex implements IndexInterface
 
             // Rebuild tree from merged data
             $this->rebuildTree($merged);
+
+            // Sync all data pages before updating header (crash safety)
+            fdatasync($this->file);
 
             $this->sequence++;
             $this->writeHeader();
@@ -597,15 +604,16 @@ final class BTreeIndex implements IndexInterface
                 $leaf = BTreeLeafPage::fromEntries([[$key, $rowId]]);
                 $this->rootPage = $this->appendPage($leaf->asString());
                 $leaf->release();
+                fdatasync($this->file); // Sync before header update
             } else {
                 // Find path to leaf and insert
                 $path = $this->findPath($key);
                 $this->insertIntoTree($key, $rowId, $path);
-                $this->flushDirtyNodes();
+                $this->flushDirtyNodes(); // Syncs pages
             }
 
             $this->sequence++;
-            $this->writeHeader();
+            $this->writeHeader(); // Syncs header
         });
     }
 
@@ -833,6 +841,8 @@ final class BTreeIndex implements IndexInterface
                 );
                 fwrite($temp, pack('a' . self::PAGE_SIZE, $header));
 
+                // Sync temp file before atomic rename (crash safety)
+                fdatasync($temp);
                 fclose($temp);
 
                 // Atomic rename
@@ -927,7 +937,9 @@ final class BTreeIndex implements IndexInterface
 
         fseek($this->file, 0);
         fwrite($this->file, pack('a' . self::PAGE_SIZE, $header));
-        fflush($this->file);
+
+        // Sync header to disk (crash safety - completes the atomic commit)
+        fdatasync($this->file);
 
         // Clear stale cached pages after header update
         $this->pageCache = [];
@@ -1106,6 +1118,9 @@ final class BTreeIndex implements IndexInterface
         if ($this->rootPage < 0) {
             $this->rootPage = $this->writeDirtySubtree($this->rootPage);
         }
+
+        // Sync data pages to disk before updating header (crash safety)
+        fdatasync($this->file);
 
         $this->dirtyNodes = [];
         $this->nextTempId = -1;
