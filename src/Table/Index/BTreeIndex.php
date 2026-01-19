@@ -805,18 +805,23 @@ final class BTreeIndex implements IndexInterface
     /** @var BTreeLeafPage|BTreeInternalPage|null Current root (from disk or modified in transaction) */
     private BTreeLeafPage|BTreeInternalPage|null $currentRoot = null;
 
-    // Internal node cache (cleared on findLatestRoot when root changes)
-    private const HEADER_CHECK_INTERVAL = 10000; // Check header every N queries
-
     /** @var array<int, BTreeInternalPage> Parsed internal page cache */
     private array $pageCache = [];
 
-    /** @var int Counter for periodic header check */
-    private int $queryCount = 0;
+    /** @var float Max age (seconds) before refreshing root for reads. 0 = always refresh. */
+    private float $maxReadLatency;
 
-    public function __construct(string $path)
+    /** @var float Timestamp of last root refresh */
+    private float $lastRootRefresh = 0.0;
+
+    /**
+     * @param string $path Index file path
+     * @param float $maxReadLatency Max seconds before refreshing root for reads (0 = always fresh)
+     */
+    public function __construct(string $path, float $maxReadLatency = 1.0)
     {
         $this->path = $path;
+        $this->maxReadLatency = $maxReadLatency;
         $this->open();
     }
 
@@ -1193,7 +1198,7 @@ final class BTreeIndex implements IndexInterface
     {
         // Outside transaction, refresh from disk periodically
         if (!$this->inTransaction) {
-            $this->readHeaderWithLock();
+            $this->refreshRootIfStale();
         }
 
         if ($this->currentRoot === null) {
@@ -1314,7 +1319,7 @@ final class BTreeIndex implements IndexInterface
     {
         // Outside transaction, refresh from disk periodically
         if (!$this->inTransaction) {
-            $this->readHeaderWithLock();
+            $this->refreshRootIfStale();
         }
 
         if ($this->currentRoot === null) {
@@ -1554,20 +1559,30 @@ final class BTreeIndex implements IndexInterface
         }
     }
 
-    private function readHeaderWithLock(): void
+    private function refreshRootIfStale(): void
     {
-        // Skip check if we've checked recently (optimization for read-heavy workloads)
-        if (++$this->queryCount < self::HEADER_CHECK_INTERVAL) {
+        $now = \microtime(true);
+
+        // If maxReadLatency > 0, skip refresh if we've refreshed recently
+        if ($this->maxReadLatency > 0 && ($now - $this->lastRootRefresh) < $this->maxReadLatency) {
             return;
         }
-        $this->queryCount = 0;
 
-        flock($this->lockFile, LOCK_SH);
-        try {
+        \clearstatcache(true, $this->path);
+
+        // Append-only design with CRC validation means reads are safe without locks.
+        // Only use locks when maxReadLatency <= 0 (strict consistency mode).
+        if ($this->maxReadLatency <= 0) {
+            flock($this->lockFile, LOCK_SH);
+            try {
+                $this->findLatestRoot();
+            } finally {
+                flock($this->lockFile, LOCK_UN);
+            }
+        } else {
             $this->findLatestRoot();
-        } finally {
-            flock($this->lockFile, LOCK_UN);
         }
+        $this->lastRootRefresh = $now;
     }
 
     private function withWriteLock(callable $fn): void
