@@ -371,6 +371,12 @@ final class BTreeIndex implements IndexInterface
     /** @var array<string, array<int, true>> Buffered deletes: key => [rowId => true] */
     private array $deleteBuffer = [];
 
+    /** @var array<int, BTreeLeafPage|BTreeInternalPage> Dirty nodes awaiting write: tempId => node */
+    private array $dirtyNodes = [];
+
+    /** @var int Next temporary ID for dirty nodes (negative, decrements) */
+    private int $nextTempId = -1;
+
     // Internal node cache (parsed data)
     // This interval is for multi-process safety; single-process usage doesn't need frequent checks
     private const CACHE_CHECK_INTERVAL = 10000; // Check for file changes every N page reads
@@ -512,6 +518,9 @@ final class BTreeIndex implements IndexInterface
                 }
             }
 
+            // Flush all dirty nodes to disk in one pass
+            $this->flushDirtyNodes();
+
             $this->sequence++;
             $this->writeHeader();
         });
@@ -592,6 +601,7 @@ final class BTreeIndex implements IndexInterface
                 // Find path to leaf and insert
                 $path = $this->findPath($key);
                 $this->insertIntoTree($key, $rowId, $path);
+                $this->flushDirtyNodes();
             }
 
             $this->sequence++;
@@ -616,6 +626,7 @@ final class BTreeIndex implements IndexInterface
 
             $path = $this->findPath($key);
             $this->deleteFromTree($key, $rowId, $path);
+            $this->flushDirtyNodes();
 
             $this->sequence++;
             $this->writeHeader();
@@ -982,6 +993,11 @@ final class BTreeIndex implements IndexInterface
      */
     private function getCachedPage(int $pageNum): BTreeLeafPage|BTreeInternalPage
     {
+        // Negative page numbers are dirty (unwritten) nodes
+        if ($pageNum < 0) {
+            return $this->dirtyNodes[$pageNum];
+        }
+
         // Periodic check for file modifications by other processes
         if (++$this->cacheReadCount >= self::CACHE_CHECK_INTERVAL) {
             $this->cacheReadCount = 0;
@@ -1036,6 +1052,63 @@ final class BTreeIndex implements IndexInterface
         fflush($this->file);
 
         return $pageNum;
+    }
+
+    /**
+     * Allocate a dirty (unwritten) page. Returns a negative temp ID.
+     * The node will be written to disk when flushDirtyNodes() is called.
+     */
+    private function allocateDirtyPage(BTreeLeafPage|BTreeInternalPage $node): int
+    {
+        $tempId = $this->nextTempId--;
+        $this->dirtyNodes[$tempId] = $node;
+        return $tempId;
+    }
+
+    /**
+     * Recursively write dirty nodes to disk, children before parents.
+     * Returns the real page number for the given page reference.
+     */
+    private function writeDirtySubtree(int $pageRef): int
+    {
+        if ($pageRef >= 0) {
+            return $pageRef;  // Already on disk
+        }
+
+        $node = $this->dirtyNodes[$pageRef];
+
+        if ($node instanceof BTreeInternalPage) {
+            // Write children first, update pointers to real page numbers
+            $newChildren = [];
+            foreach ($node->children as $child) {
+                $newChildren[] = $this->writeDirtySubtree($child);
+            }
+            $node->children = $newChildren;
+        }
+
+        // Write this node and return real page number
+        $realPage = $this->appendPage($node->asString());
+        $node->release();
+        return $realPage;
+    }
+
+    /**
+     * Flush all dirty nodes to disk in correct order.
+     * Must be called within write lock.
+     */
+    private function flushDirtyNodes(): void
+    {
+        if (empty($this->dirtyNodes)) {
+            return;
+        }
+
+        // Write from root - recursion handles children-first ordering
+        if ($this->rootPage < 0) {
+            $this->rootPage = $this->writeDirtySubtree($this->rootPage);
+        }
+
+        $this->dirtyNodes = [];
+        $this->nextTempId = -1;
     }
 
     // =========================================================================
@@ -1096,7 +1169,7 @@ final class BTreeIndex implements IndexInterface
             }
 
             $path[] = [$pageNum, $lo];
-            $pageNum = $page->children[$lo + 1];
+            $pageNum = $page->children[$lo];
         }
     }
 
@@ -1123,12 +1196,10 @@ final class BTreeIndex implements IndexInterface
 
         // Check if leaf needs splitting
         $leaf = BTreeLeafPage::fromEntries($entries);
-        $newLeaf = $leaf->asString();
 
-        if (strlen($newLeaf) <= self::PAGE_SIZE) {
-            // Fits - just append new leaf and update parent
-            $newLeafNum = $this->appendPage($newLeaf);
-            $leaf->release();
+        if (strlen($leaf->asString()) <= self::PAGE_SIZE) {
+            // Fits - allocate dirty page and update parent
+            $newLeafNum = $this->allocateDirtyPage($leaf);
             $this->updatePath($path, $leafPageNum, $newLeafNum, null, null);
         } else {
             // Split required
@@ -1140,10 +1211,8 @@ final class BTreeIndex implements IndexInterface
             $leftLeaf = BTreeLeafPage::fromEntries($leftEntries);
             $rightLeaf = BTreeLeafPage::fromEntries($rightEntries);
 
-            $leftNum = $this->appendPage($leftLeaf->asString());
-            $rightNum = $this->appendPage($rightLeaf->asString());
-            $leftLeaf->release();
-            $rightLeaf->release();
+            $leftNum = $this->allocateDirtyPage($leftLeaf);
+            $rightNum = $this->allocateDirtyPage($rightLeaf);
 
             // Promote first key of right leaf
             $promoteKey = $rightEntries[0][0];
@@ -1170,10 +1239,9 @@ final class BTreeIndex implements IndexInterface
     private function propagateSplit(array $path, int $_oldChild, int $leftChild, int $rightChild, string $promoteKey): void
     {
         if (empty($path)) {
-            // Create new root
+            // Create new root (as dirty page)
             $root = BTreeInternalPage::fromArrays([$leftChild, $rightChild], [$promoteKey]);
-            $this->rootPage = $this->appendPage($root->asString());
-            $root->release();
+            $this->rootPage = $this->allocateDirtyPage($root);
             return;
         }
 
@@ -1190,12 +1258,10 @@ final class BTreeIndex implements IndexInterface
 
         // Check if internal node needs splitting
         $newParent = BTreeInternalPage::fromArrays($children, $keys);
-        $newParentStr = $newParent->asString();
 
-        if (strlen($newParentStr) <= self::PAGE_SIZE) {
-            // Fits
-            $newParentNum = $this->appendPage($newParentStr);
-            $newParent->release();
+        if (strlen($newParent->asString()) <= self::PAGE_SIZE) {
+            // Fits - allocate dirty page
+            $newParentNum = $this->allocateDirtyPage($newParent);
             $this->updatePath($path, $parentPageNum, $newParentNum, null, null);
         } else {
             // Split internal node
@@ -1210,10 +1276,8 @@ final class BTreeIndex implements IndexInterface
             $leftPage = BTreeInternalPage::fromArrays($leftChildren, $leftKeys);
             $rightPage = BTreeInternalPage::fromArrays($rightChildren, $rightKeys);
 
-            $leftNum = $this->appendPage($leftPage->asString());
-            $rightNum = $this->appendPage($rightPage->asString());
-            $leftPage->release();
-            $rightPage->release();
+            $leftNum = $this->allocateDirtyPage($leftPage);
+            $rightNum = $this->allocateDirtyPage($rightPage);
 
             $this->propagateSplit($path, $parentPageNum, $leftNum, $rightNum, $splitPromoteKey);
         }
@@ -1228,8 +1292,7 @@ final class BTreeIndex implements IndexInterface
             } else {
                 // This shouldn't happen - splits are handled in propagateSplit
                 $root = BTreeInternalPage::fromArrays([$newChild, $extraChild], [$extraKey]);
-                $this->rootPage = $this->appendPage($root->asString());
-                $root->release();
+                $this->rootPage = $this->allocateDirtyPage($root);
             }
             return;
         }
@@ -1249,8 +1312,7 @@ final class BTreeIndex implements IndexInterface
         }
 
         $newParent = BTreeInternalPage::fromArrays($children, $keys);
-        $newParentNum = $this->appendPage($newParent->asString());
-        $newParent->release();
+        $newParentNum = $this->allocateDirtyPage($newParent);
 
         $this->updatePath($path, $parentPageNum, $newParentNum, null, null);
     }
@@ -1302,8 +1364,7 @@ final class BTreeIndex implements IndexInterface
 
         // Create new leaf (even if empty - lazy cleanup via compact)
         $leaf = BTreeLeafPage::fromEntries($entries);
-        $newLeafNum = $this->appendPage($leaf->asString());
-        $leaf->release();
+        $newLeafNum = $this->allocateDirtyPage($leaf);
 
         $this->updatePath($path, $leafPageNum, $newLeafNum, null, null);
     }
