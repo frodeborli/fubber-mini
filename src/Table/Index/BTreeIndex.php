@@ -145,7 +145,7 @@ final class BTreeLeafPage
         }
 
         // Build entry data: rowIds + key for each entry (rowIdCount always >= 1)
-        $entryData = '';
+        $entryParts = [];
         for ($i = 0; $i < $n; $i++) {
             $entry = $entries[$i];
             $rowIdCount = $rowIdCounts[$i];
@@ -153,8 +153,10 @@ final class BTreeLeafPage
             for ($j = 1; $j <= $rowIdCount; $j++) {
                 $rowIds[] = $entry[$j];
             }
-            $entryData .= \pack('P*', ...$rowIds) . $entry[0];
+            $entryParts[] = \pack('P*', ...$rowIds);
+            $entryParts[] = $entry[0];
         }
+        $entryData = \implode('', $entryParts);
 
         // Single pack for header, then append entry data
         return \pack('Cvv' . ($n + 1) . 'v' . $n, BTreeIndex::PAGE_LEAF, $n, ...$offsets, ...$rowIdCounts) . $entryData;
