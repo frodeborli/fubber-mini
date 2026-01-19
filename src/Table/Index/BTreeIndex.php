@@ -511,6 +511,9 @@ final class BTreeIndex implements IndexInterface
                 return;
             }
 
+            // Split any oversized pages before writing
+            $this->splitOversizedPages();
+
             // Write all non-root unwritten pages in order
             ksort($this->unwrittenPages);
             foreach ($this->unwrittenPages as $pageNum => $page) {
@@ -570,6 +573,144 @@ final class BTreeIndex implements IndexInterface
         $this->unwrittenPages = [];
         $this->unwrittenPageCount = 0;
         $this->inTransaction = false;
+    }
+
+    /**
+     * Split any oversized pages before writing to disk.
+     * Traverses tree and splits leaves that exceed PAGE_SIZE.
+     */
+    private function splitOversizedPages(): void
+    {
+        // Keep splitting until no more oversized pages
+        while ($this->splitOversizedPagesOnce()) {
+            // Loop continues until no splits needed
+        }
+    }
+
+    /**
+     * Single pass to find and split one oversized page.
+     * @return bool True if a split was performed
+     */
+    private function splitOversizedPagesOnce(): bool
+    {
+        if ($this->currentRoot === null) {
+            return false;
+        }
+
+        // Check root first
+        if ($this->currentRoot instanceof BTreeLeafPage) {
+            if (\strlen($this->currentRoot->asString()) > self::PAGE_SIZE) {
+                $this->splitLeafAtPath([null, -1]);
+                return true;
+            }
+            return false;
+        }
+
+        // Traverse tree looking for oversized leaves
+        return $this->findAndSplitOversized($this->currentRoot, [null]);
+    }
+
+    /**
+     * Recursively search for oversized leaves and split the first one found.
+     * Only checks pages in unwrittenPages - disk pages are already sized correctly.
+     * @param BTreeInternalPage $node Current internal node
+     * @param array $pathSoFar Path from root to this node
+     * @return bool True if a split was performed
+     */
+    private function findAndSplitOversized(BTreeInternalPage $node, array $pathSoFar): bool
+    {
+        for ($i = 1; $i <= $node->childCount; $i++) {
+            $childNum = $node->children[$i];
+
+            // Only check pages in the overlay - disk pages are already correct size
+            if (!isset($this->unwrittenPages[$childNum])) {
+                continue;
+            }
+
+            $child = $this->unwrittenPages[$childNum];
+
+            // Extend path with this child
+            $childPath = $pathSoFar;
+            $childPath[] = $i; // childIdx
+            $childPath[] = $childNum; // pageNum
+
+            if ($child instanceof BTreeLeafPage) {
+                // Check if oversized
+                if (\strlen($child->asString()) > self::PAGE_SIZE) {
+                    $childPath[] = -1;
+                    $this->splitLeafAtPath($childPath);
+                    return true;
+                }
+            } else {
+                // Recurse into internal node
+                if ($this->findAndSplitOversized($child, $childPath)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Split a leaf at the given path.
+     * @param array $path Path to leaf: [pageNum, childIdx, pageNum, childIdx, ..., leafPageNum, -1]
+     */
+    private function splitLeafAtPath(array $path): void
+    {
+        $pathLen = \count($path);
+        $leafPageNum = $path[$pathLen - 2];
+
+        // Get leaf
+        if ($leafPageNum === null) {
+            $leaf = $this->currentRoot;
+        } else {
+            $leaf = $this->getPageForWrite($leafPageNum);
+        }
+
+        $entries = $leaf->toArray();
+        $n = \count($entries) - 1;
+
+        // Check if we need to split rowIds within a single entry
+        if ($n === 1) {
+            $entry = $entries[1];
+            $entryKey = $entry[0];
+            $rowIdCount = \count($entry) - 1;
+            $mid = ($rowIdCount >> 1) + 1;
+
+            $leftEntry = [$entryKey];
+            $rightEntry = [$entryKey];
+            for ($i = 1; $i <= $rowIdCount; $i++) {
+                if ($i < $mid) {
+                    $leftEntry[] = $entry[$i];
+                } else {
+                    $rightEntry[] = $entry[$i];
+                }
+            }
+            $leftEntries = [null, $leftEntry];
+            $rightEntries = [null, $rightEntry];
+        } else {
+            $mid = $n >> 1;
+            $leftEntries = [null];
+            $rightEntries = [null];
+            for ($i = 1; $i <= $mid; $i++) {
+                $leftEntries[] = $entries[$i];
+            }
+            for ($i = $mid + 1; $i <= $n; $i++) {
+                $rightEntries[] = $entries[$i];
+            }
+        }
+
+        // Reuse left page, create new right page
+        $leaf->setEntries($leftEntries);
+        $leftNum = $leafPageNum ?? $this->allocatePage($leaf);
+
+        $rightLeaf = BTreeLeafPage::fromEntries($rightEntries);
+        $rightNum = $this->allocatePage($rightLeaf);
+
+        // Promote first key of right leaf
+        $promoteKey = $rightEntries[1][0];
+
+        $this->propagateSplit($path, $pathLen - 4, $leftNum, $rightNum, $promoteKey);
     }
 
     // =========================================================================
@@ -1221,60 +1362,66 @@ final class BTreeIndex implements IndexInterface
             $n++;
         }
 
-        // Update entries in place and check if page still fits
+        // Update entries in place
         $leaf->setEntries($entries);
 
-        if (strlen($leaf->asString()) <= self::PAGE_SIZE) {
-            // Fits - page already modified in overlay
+        // Check if split needed - use entry count threshold to avoid expensive asString()
+        // Only do full size check when entry count suggests we might overflow
+        $needsSplit = false;
+        if ($n > 150) { // ~150 entries with avg 20-byte keys + 1 rowId ≈ 4KB
+            $needsSplit = \strlen($leaf->asString()) > self::PAGE_SIZE;
+        }
+
+        if (!$needsSplit) {
+            // Fits - update parent pointers if needed
             if ($leafPageNum !== null) {
-                // Update parent pointers to new page number
                 $this->updatePath($path, $pathLen - 4, $leafPageNum);
             }
-        } else {
-            // Split required - check if we need to split rowIds within a single entry
-            if ($n === 1) {
-                // Single entry with too many rowIds - split the rowIds
-                $entry = $entries[1];
-                $entryKey = $entry[0];
-                $rowIdCount = count($entry) - 1;
-                $mid = ($rowIdCount >> 1) + 1; // Split rowIds in half
+            return;
+        }
 
-                $leftEntry = [$entryKey];
-                $rightEntry = [$entryKey];
-                for ($i = 1; $i <= $rowIdCount; $i++) {
-                    if ($i < $mid) {
-                        $leftEntry[] = $entry[$i];
-                    } else {
-                        $rightEntry[] = $entry[$i];
-                    }
-                }
-                $leftEntries = [null, $leftEntry];
-                $rightEntries = [null, $rightEntry];
-            } else {
-                $mid = $n >> 1;
-                // Split into list format [null, e1, e2, ...]
-                $leftEntries = [null];
-                $rightEntries = [null];
-                for ($i = 1; $i <= $mid; $i++) {
-                    $leftEntries[] = $entries[$i];
-                }
-                for ($i = $mid + 1; $i <= $n; $i++) {
-                    $rightEntries[] = $entries[$i];
+        // Split required
+        if ($n === 1) {
+            // Single entry with too many rowIds - split the rowIds
+            $entry = $entries[1];
+            $entryKey = $entry[0];
+            $rowIdCount = \count($entry) - 1;
+            $mid = ($rowIdCount >> 1) + 1;
+
+            $leftEntry = [$entryKey];
+            $rightEntry = [$entryKey];
+            for ($i = 1; $i <= $rowIdCount; $i++) {
+                if ($i < $mid) {
+                    $leftEntry[] = $entry[$i];
+                } else {
+                    $rightEntry[] = $entry[$i];
                 }
             }
-
-            // Reuse left page (already in overlay), create new right page
-            $leaf->setEntries($leftEntries);
-            $leftNum = $leafPageNum ?? $this->allocatePage($leaf);
-
-            $rightLeaf = BTreeLeafPage::fromEntries($rightEntries);
-            $rightNum = $this->allocatePage($rightLeaf);
-
-            // Promote first key of right leaf (1-based)
-            $promoteKey = $rightEntries[1][0];
-
-            $this->propagateSplit($path, $pathLen - 4, $leftNum, $rightNum, $promoteKey);
+            $leftEntries = [null, $leftEntry];
+            $rightEntries = [null, $rightEntry];
+        } else {
+            $mid = $n >> 1;
+            $leftEntries = [null];
+            $rightEntries = [null];
+            for ($i = 1; $i <= $mid; $i++) {
+                $leftEntries[] = $entries[$i];
+            }
+            for ($i = $mid + 1; $i <= $n; $i++) {
+                $rightEntries[] = $entries[$i];
+            }
         }
+
+        // Reuse left page, create new right page
+        $leaf->setEntries($leftEntries);
+        $leftNum = $leafPageNum ?? $this->allocatePage($leaf);
+
+        $rightLeaf = BTreeLeafPage::fromEntries($rightEntries);
+        $rightNum = $this->allocatePage($rightLeaf);
+
+        // Promote first key of right leaf
+        $promoteKey = $rightEntries[1][0];
+
+        $this->propagateSplit($path, $pathLen - 4, $leftNum, $rightNum, $promoteKey);
     }
 
     /**

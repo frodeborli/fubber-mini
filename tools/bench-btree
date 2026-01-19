@@ -122,5 +122,87 @@ printResult(bench("Single inserts (no txn)", function() use ($index2path, $inser
     $idx->close();
 }, $insertCount));
 
+// Alternating insert + read benchmarks
+$altCount = min(2000, $queries);
+
+$index3path = $dir . '/btree_bench3_' . getmypid() . '.btree';
+register_shutdown_function(function() use ($index3path) {
+    @unlink($index3path);
+    @unlink($index3path . '.lock');
+});
+
+printResult(bench("Insert+read (in txn)", function() use ($index3path, $altCount) {
+    $idx = new BTreeIndex($index3path);
+    $idx->begin();
+    for ($i = 0; $i < $altCount; $i++) {
+        $key = sprintf('%08d', $i);
+        $idx->insert($key, $i);
+        foreach ($idx->eq($key) as $id) {}
+    }
+    $idx->commit();
+    $idx->close();
+}, $altCount));
+
+$index4path = $dir . '/btree_bench4_' . getmypid() . '.btree';
+register_shutdown_function(function() use ($index4path) {
+    @unlink($index4path);
+    @unlink($index4path . '.lock');
+});
+
+printResult(bench("Insert+read (no txn)", function() use ($index4path, $altCount) {
+    $idx = new BTreeIndex($index4path);
+    for ($i = 0; $i < $altCount; $i++) {
+        $key = sprintf('%08d', $i);
+        $idx->insert($key, $i);
+        foreach ($idx->eq($key) as $id) {}
+    }
+    $idx->close();
+}, $altCount));
+
+// Batched: 100 inserts then 100 reads, alternating
+$index5path = $dir . '/btree_bench5_' . getmypid() . '.btree';
+register_shutdown_function(function() use ($index5path) {
+    @unlink($index5path);
+    @unlink($index5path . '.lock');
+});
+
+printResult(bench("100ins+100read (in txn)", function() use ($index5path, $altCount) {
+    $idx = new BTreeIndex($index5path);
+    $idx->begin();
+    $batch = 100;
+    for ($b = 0; $b < $altCount / $batch; $b++) {
+        $base = $b * $batch;
+        for ($i = 0; $i < $batch; $i++) {
+            $idx->insert(sprintf('%08d', $base + $i), $base + $i);
+        }
+        for ($i = 0; $i < $batch; $i++) {
+            foreach ($idx->eq(sprintf('%08d', $base + $i)) as $id) {}
+        }
+    }
+    $idx->commit();
+    $idx->close();
+}, $altCount));
+
+$index6path = $dir . '/btree_bench6_' . getmypid() . '.btree';
+register_shutdown_function(function() use ($index6path) {
+    @unlink($index6path);
+    @unlink($index6path . '.lock');
+});
+
+printResult(bench("100ins+100read (no txn)", function() use ($index6path, $altCount) {
+    $idx = new BTreeIndex($index6path);
+    $batch = 100;
+    for ($b = 0; $b < $altCount / $batch; $b++) {
+        $base = $b * $batch;
+        for ($i = 0; $i < $batch; $i++) {
+            $idx->insert(sprintf('%08d', $base + $i), $base + $i);
+        }
+        for ($i = 0; $i < $batch; $i++) {
+            foreach ($idx->eq(sprintf('%08d', $base + $i)) as $id) {}
+        }
+    }
+    $idx->close();
+}, $altCount));
+
 $index->close();
 echo "\nDone.\n";
