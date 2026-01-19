@@ -290,13 +290,14 @@ final class BTreeInternalPage
         $headerSize = 3 + $c * 8 + $c * 2;
 
         // Build key data and calculate offsets
-        $keyData = '';
+        $keyData = \implode('', $this->keys);
         $offsets = [];
+        $offset = $headerSize;
         foreach ($this->keys as $key) {
-            $offsets[] = $headerSize + \strlen($keyData);
-            $keyData .= $key;
+            $offsets[] = $offset;
+            $offset += \strlen($key);
         }
-        $offsets[] = $headerSize + \strlen($keyData); // End marker
+        $offsets[] = $offset; // End marker
 
         // Single pack for header, then append key data
         return \pack('CvP' . $c . 'v' . $c, BTreeIndex::PAGE_INTERNAL, $n, ...$this->children, ...$offsets) . $keyData;
