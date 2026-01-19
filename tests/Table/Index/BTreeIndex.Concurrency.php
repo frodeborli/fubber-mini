@@ -267,12 +267,13 @@ function readerWorker(
  *
  * With concurrent writers, oplog order != commit order, so we can't verify
  * against the oplog model. Instead we verify:
- * 1. range() yields entries in key-sorted order
- * 2. eq(key) for each key matches what range() yielded for that key
- * 3. count(key) matches eq(key) count
- * 4. has(key) is consistent with eq(key) results
+ * 1. eq/has/count are mutually consistent
+ * 2. range() matches concatenated eq() results in key order
+ * 3. Reverse range matches forward reversed
+ * 4. Close/reopen produces identical results (persistence stability)
+ * 5. Idempotent: multiple range() calls produce same results
  */
-function verify(string $path, string $logPath): int {
+function verify(string $path, string $logPath, int $keyspace = 200): int {
     if (!file_exists($path)) {
         fwrite(STDERR, "Index file missing\n");
         return 1;
@@ -280,23 +281,10 @@ function verify(string $path, string $logPath): int {
 
     $idx = new BTreeIndex($path);
 
-    // 1) Collect all data via range() and build a model
-    $model = []; // key => [rowIds]
-    $totalCount = 0;
-    $lastKey = null;
-
-    foreach ($idx->range() as $rowId) {
-        $totalCount++;
-        // We can't get the key from range() directly, so we'll verify differently
-    }
-
-    // 2) Get all keys via range() by collecting from eq() for each potential key
-    // Since we don't know what keys exist, scan the keyspace
-    global $KEYSPACE;
-    $keyspace = $KEYSPACE ?? 200;
-
-    $rangeData = []; // Rebuild from eq() calls
+    // Phase 1: Build model from eq() calls
+    $rangeData = []; // key => [rowIds]
     $keysFound = [];
+    $eqTotal = 0;
 
     for ($k = 0; $k < $keyspace; $k++) {
         $key = keyFor($k);
@@ -305,8 +293,9 @@ function verify(string $path, string $logPath): int {
         if (count($rows) > 0) {
             $keysFound[] = $key;
             $rangeData[$key] = $rows;
+            $eqTotal += count($rows);
 
-            // Verify count() matches
+            // Verify count() matches eq()
             $c = $idx->count($key);
             if ($c !== count($rows)) {
                 fwrite(STDERR, "count($key) = $c but eq() returned " . count($rows) . " rows\n");
@@ -320,6 +309,14 @@ function verify(string $path, string $logPath): int {
                 $idx->close();
                 return 1;
             }
+
+            // Idempotence: eq() twice should match
+            $rows2 = iterator_to_array($idx->eq($key));
+            if ($rows !== $rows2) {
+                fwrite(STDERR, "eq($key) not idempotent: first call returned " . count($rows) . ", second returned " . count($rows2) . "\n");
+                $idx->close();
+                return 1;
+            }
         } else {
             // Verify has() returns false for empty keys
             if ($idx->has($key)) {
@@ -330,7 +327,7 @@ function verify(string $path, string $logPath): int {
         }
     }
 
-    // 3) Verify range() matches concatenated eq() results in key order
+    // Phase 2: Build expected range from eq() data
     sort($keysFound);
     $expectedRange = [];
     foreach ($keysFound as $key) {
@@ -339,14 +336,18 @@ function verify(string $path, string $logPath): int {
         }
     }
 
-    $actualRange = iterator_to_array($idx->range());
+    // Sanity check: eq() total should match expected range
+    if ($eqTotal !== count($expectedRange)) {
+        fwrite(STDERR, "Internal error: eqTotal $eqTotal != expectedRange count " . count($expectedRange) . "\n");
+        $idx->close();
+        return 1;
+    }
 
+    // Phase 3: Verify range() matches (before close)
+    $actualRange = iterator_to_array($idx->range());
     if ($actualRange !== $expectedRange) {
         fwrite(STDERR, "range() doesn't match concatenated eq() results\n");
-        fwrite(STDERR, "Expected count: " . count($expectedRange) . "\n");
-        fwrite(STDERR, "Actual count: " . count($actualRange) . "\n");
-
-        // Find first divergence
+        fwrite(STDERR, "Expected count: " . count($expectedRange) . ", Actual count: " . count($actualRange) . "\n");
         $n = min(count($expectedRange), count($actualRange), 100);
         for ($i = 0; $i < $n; $i++) {
             if ($expectedRange[$i] !== $actualRange[$i]) {
@@ -358,14 +359,45 @@ function verify(string $path, string $logPath): int {
         return 1;
     }
 
-    // 4) Verify reverse range matches forward range reversed
+    // Idempotence: range() twice should match
+    $actualRange2 = iterator_to_array($idx->range());
+    if ($actualRange !== $actualRange2) {
+        fwrite(STDERR, "range() not idempotent\n");
+        $idx->close();
+        return 1;
+    }
+
+    // Phase 4: Verify reverse range
     $reverseRange = iterator_to_array($idx->range(reverse: true));
     $expectedReverse = array_reverse($actualRange);
-
     if ($reverseRange !== $expectedReverse) {
         fwrite(STDERR, "range(reverse: true) doesn't match reversed forward range\n");
         $idx->close();
         return 1;
+    }
+
+    // Phase 5: Close and reopen - persistence stability
+    $idx->close();
+    $idx = new BTreeIndex($path);
+
+    $afterReopenRange = iterator_to_array($idx->range());
+    if ($afterReopenRange !== $expectedRange) {
+        fwrite(STDERR, "range() after reopen doesn't match original\n");
+        fwrite(STDERR, "Before: " . count($expectedRange) . " rows, After: " . count($afterReopenRange) . " rows\n");
+        $idx->close();
+        return 1;
+    }
+
+    // Spot check some eq() calls after reopen
+    $spotChecks = min(50, count($keysFound));
+    for ($i = 0; $i < $spotChecks; $i++) {
+        $key = $keysFound[$i];
+        $rows = iterator_to_array($idx->eq($key));
+        if ($rows !== $rangeData[$key]) {
+            fwrite(STDERR, "eq($key) after reopen doesn't match original\n");
+            $idx->close();
+            return 1;
+        }
     }
 
     fwrite(STDERR, "Verified: " . count($keysFound) . " keys, " . count($actualRange) . " total rows\n");
@@ -421,12 +453,61 @@ if ($exitBad) {
 }
 
 // Final verification pass
-$rc = verify($path, $LOG);
+$rc = verify($path, $LOG, $KEYSPACE);
 
-if ($rc === 0 && !$exitBad) {
-    fwrite(STDOUT, "OK: concurrency fuzz run completed and verified.\n");
-    exit(0);
+if ($rc !== 0) {
+    fwrite(STDERR, "FAIL: verification failed.\n");
+    exit(1);
 }
 
-fwrite(STDERR, "FAIL: verification or worker signaled issues.\n");
-exit(1);
+if ($exitBad) {
+    fwrite(STDERR, "FAIL: worker signaled issues.\n");
+    exit(1);
+}
+
+// Phase 2: Hammer reopen test - repeatedly open/query/close to catch state leaks
+fwrite(STDERR, "Running hammer reopen test...\n");
+$hammerEnd = microtime(true) + 3; // 3 seconds of hammering
+$hammerOps = 0;
+$hammerErrors = 0;
+
+while (microtime(true) < $hammerEnd) {
+    try {
+        $idx = new BTreeIndex($path);
+
+        // Random queries
+        for ($q = 0; $q < 50; $q++) {
+            $k = random_int(0, $KEYSPACE - 1);
+            $key = keyFor($k);
+
+            $op = random_int(0, 3);
+            switch ($op) {
+                case 0: iterator_to_array($idx->eq($key)); break;
+                case 1: $idx->has($key); break;
+                case 2: $idx->count($key); break;
+                case 3:
+                    // Bounded range
+                    $k2 = random_int(0, $KEYSPACE - 1);
+                    if ($k > $k2) [$k, $k2] = [$k2, $k];
+                    iterator_to_array($idx->range(keyFor($k), keyFor($k2)));
+                    break;
+            }
+            $hammerOps++;
+        }
+
+        $idx->close();
+    } catch (Throwable $e) {
+        fwrite(STDERR, "Hammer error: {$e->getMessage()}\n");
+        $hammerErrors++;
+    }
+}
+
+fwrite(STDERR, "Hammer test: $hammerOps ops, $hammerErrors errors\n");
+
+if ($hammerErrors > 0) {
+    fwrite(STDERR, "FAIL: hammer test encountered errors.\n");
+    exit(1);
+}
+
+fwrite(STDOUT, "OK: concurrency fuzz run completed and verified.\n");
+exit(0);
