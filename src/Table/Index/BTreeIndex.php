@@ -175,6 +175,31 @@ final class BTreeLeafPage
     }
 
     /**
+     * Calculate the size this page will have when serialized.
+     * Avoids the overhead of actually packing the data.
+     */
+    public function calculateSize(): int
+    {
+        $n = $this->count;
+        if ($n === 0) {
+            return 3; // type(1) + count(2)
+        }
+
+        $this->buildEntries();
+
+        // Header: type(1) + count(2) + offsets((n+1)*2) + rowIdCounts(n*2)
+        $size = 3 + ($n + 1) * 2 + $n * 2;
+
+        // Entry data: rowIds(8 each) + key for each entry
+        for ($i = 1; $i <= $n; $i++) {
+            $entry = $this->entries[$i];
+            $size += (\count($entry) - 1) * 8 + \strlen($entry[0]);
+        }
+
+        return $size;
+    }
+
+    /**
      * Get a leaf page from pool (or create new) and set entries.
      * Builds meta immediately for consistency.
      * @param array $entries List [null, [key, rowId1, ...], ...]
@@ -599,7 +624,7 @@ final class BTreeIndex implements IndexInterface
 
         // Check root first
         if ($this->currentRoot instanceof BTreeLeafPage) {
-            if (\strlen($this->currentRoot->asString()) > self::PAGE_SIZE) {
+            if ($this->currentRoot->calculateSize() > self::PAGE_SIZE) {
                 $this->splitLeafAtPath([null, -1]);
                 return true;
             }
@@ -636,7 +661,7 @@ final class BTreeIndex implements IndexInterface
 
             if ($child instanceof BTreeLeafPage) {
                 // Check if oversized
-                if (\strlen($child->asString()) > self::PAGE_SIZE) {
+                if ($child->calculateSize() > self::PAGE_SIZE) {
                     $childPath[] = -1;
                     $this->splitLeafAtPath($childPath);
                     return true;
@@ -1365,10 +1390,8 @@ final class BTreeIndex implements IndexInterface
         // Update entries in place
         $leaf->setEntries($entries);
 
-        // Split when entry count exceeds threshold - keeps leaves small for fast inserts
-        // Actual size check deferred to commit() via splitOversizedPages()
-        if ($n <= 150) { // ~150 entries keeps insert array copying cheap
-            // Fits - update parent pointers if needed
+        // Check if page fits - if so, just update parent pointers
+        if ($leaf->calculateSize() <= self::PAGE_SIZE) {
             if ($leafPageNum !== null) {
                 $this->updatePath($path, $pathLen - 4, $leafPageNum);
             }

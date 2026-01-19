@@ -1219,6 +1219,49 @@ $test = new class extends Test {
 
         $parsed->release();
     }
+
+    /**
+     * Test that sorted and shuffled inserts produce identical range scans.
+     */
+    public function testSortedVsShuffledInserts(): void
+    {
+        $n = 5000;
+        $keys = [];
+        for ($i = 0; $i < $n; $i++) {
+            $keys[] = sprintf('%06d', $i);
+        }
+
+        // Build index with sorted keys
+        $sortedPath = $this->indexPath('sorted_insert');
+        $sortedIndex = new BTreeIndex($sortedPath);
+        $sortedIndex->begin();
+        foreach ($keys as $i => $key) {
+            $sortedIndex->insert($key, $i);
+        }
+        $sortedIndex->commit();
+
+        // Build index with shuffled keys
+        $shuffledKeys = $keys;
+        shuffle($shuffledKeys);
+
+        $shuffledPath = $this->indexPath('shuffled_insert');
+        $shuffledIndex = new BTreeIndex($shuffledPath);
+        $shuffledIndex->begin();
+        foreach ($shuffledKeys as $key) {
+            // Use original index as rowId to match sorted index
+            $shuffledIndex->insert($key, (int)$key);
+        }
+        $shuffledIndex->commit();
+
+        // Compare forward range scans
+        $sortedResults = iterator_to_array($sortedIndex->range());
+        $shuffledResults = iterator_to_array($shuffledIndex->range());
+
+        $this->assertSame($sortedResults, $shuffledResults);
+
+        $sortedIndex->close();
+        $shuffledIndex->close();
+    }
 };
 
 $test->run();
