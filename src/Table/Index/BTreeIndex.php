@@ -53,7 +53,7 @@ final class BTreeLeafPage
 
     /**
      * Build and cache all entries for efficient scan iteration.
-     * Use $leaf->count to bound iteration, not count($entries).
+     * Entries are 1-based: $entries[1] through $entries[$count].
      */
     public function buildEntries(): void
     {
@@ -63,11 +63,10 @@ final class BTreeLeafPage
         $n = $this->count;
         $meta = $this->meta;
         $data = $this->data;
-        for ($i = 0; $i < $n; $i++) {
-            $j = $i + 1; // 1-based index into meta
-            $pos = $meta[$j];
-            $rowIdCount = $meta[$n + 1 + $j];
-            $keyLen = $meta[$j + 1] - $pos - ($rowIdCount << 3);
+        for ($i = 1; $i <= $n; $i++) {
+            $pos = $meta[$i];
+            $rowIdCount = $meta[$n + 1 + $i];
+            $keyLen = $meta[$i + 1] - $pos - ($rowIdCount << 3);
             $entry = \unpack('P' . $rowIdCount, $data, $pos);
             $entry[0] = \substr($data, $pos + ($rowIdCount << 3), $keyLen);
             $this->entries[$i] = $entry;
@@ -76,13 +75,18 @@ final class BTreeLeafPage
     }
 
     /**
-     * Get entries as array (for modification in insert/delete).
-     * @return array<array<int, string|int>>
+     * Get entries as 1-based array (for modification in insert/delete).
+     * @return array<int, array<int, string|int>> 1-based: [1 => [key, id1, ...], ...]
      */
     public function toArray(): array
     {
         $this->buildEntries();
-        return \array_slice($this->entries, 0, $this->count);
+        // Return 1-based slice
+        $result = [];
+        for ($i = 1; $i <= $this->count; $i++) {
+            $result[$i] = $this->entries[$i];
+        }
+        return $result;
     }
 
     /**
@@ -91,6 +95,11 @@ final class BTreeLeafPage
      */
     public function getKeyAt(int $i): string
     {
+        // Pages from fromEntries()/setEntries() have entries already built (1-based)
+        if ($this->entriesBuilt) {
+            return $this->entries[$i][0];
+        }
+
         $n = $this->count;
         $pos = $this->meta[$i];
         $rowIdCount = $this->meta[$n + 1 + $i];
@@ -104,6 +113,11 @@ final class BTreeLeafPage
      */
     public function getEntry(int $i): array
     {
+        // Pages from fromEntries()/setEntries() have entries already built (1-based)
+        if ($this->entriesBuilt) {
+            return $this->entries[$i];
+        }
+
         $n = $this->count;
         $pos = $this->meta[$i];
         $nextPos = $this->meta[$i + 1];
@@ -123,6 +137,7 @@ final class BTreeLeafPage
 
     /**
      * Serialize to binary page format using precomputed meta.
+     * Entries and meta are 1-based.
      */
     public function asString(): string
     {
@@ -140,15 +155,15 @@ final class BTreeLeafPage
         for ($i = 1; $i <= $n + 1; $i++) {
             $offsets[] = $meta[$i];
         }
-        for ($i = $n + 2; $i <= 2 * $n + 1; $i++) {
-            $rowIdCounts[] = $meta[$i];
+        for ($i = 1; $i <= $n; $i++) {
+            $rowIdCounts[] = $meta[$n + 1 + $i];
         }
 
-        // Build entry data: rowIds + key for each entry (rowIdCount always >= 1)
+        // Build entry data: rowIds + key for each entry (entries are 1-based)
         $entryParts = [];
-        for ($i = 0; $i < $n; $i++) {
+        for ($i = 1; $i <= $n; $i++) {
             $entry = $entries[$i];
-            $rowIdCount = $rowIdCounts[$i];
+            $rowIdCount = $rowIdCounts[$i - 1]; // rowIdCounts is 0-based here
             $rowIds = [];
             for ($j = 1; $j <= $rowIdCount; $j++) {
                 $rowIds[] = $entry[$j];
@@ -165,7 +180,7 @@ final class BTreeLeafPage
     /**
      * Get a leaf page from pool (or create new) and set entries.
      * Builds meta immediately for consistency.
-     * @param array<array<int, string|int>> $entries Flat format [[key, rowId1, ...], ...]
+     * @param array<int, array<int, string|int>> $entries 1-based: [1 => [key, rowId1, ...], ...]
      */
     public static function fromEntries(array $entries): self
     {
@@ -174,15 +189,25 @@ final class BTreeLeafPage
         } else {
             $instance = new self();
         }
+        $instance->setEntries($entries);
+        return $instance;
+    }
 
+    /**
+     * Update entries in place (for overlay modification).
+     * Rebuilds meta from entries.
+     * @param array<int, array<int, string|int>> $entries 1-based: [1 => [key, rowId1, ...], ...]
+     */
+    public function setEntries(array $entries): void
+    {
         $n = \count($entries);
-        $instance->entries = $entries;
-        $instance->count = $n;
-        $instance->entriesBuilt = true;
+        $this->entries = $entries;
+        $this->count = $n;
+        $this->entriesBuilt = true;
 
         if ($n === 0) {
-            $instance->meta = [];
-            return $instance;
+            $this->meta = [];
+            return;
         }
 
         // Build meta: offsets (1..n+1) + rowIdCounts (n+2..2n+1), 1-based
@@ -191,17 +216,16 @@ final class BTreeLeafPage
         $meta = [];
         $offset = $headerSize;
 
-        for ($i = 0; $i < $n; $i++) {
+        for ($i = 1; $i <= $n; $i++) {
             $entry = $entries[$i];
-            $meta[$i + 1] = $offset; // offset at 1-based index
+            $meta[$i] = $offset; // offset at 1-based index
             $rowIdCount = \count($entry) - 1;
-            $meta[$n + 2 + $i] = $rowIdCount; // rowIdCount at n+2+i
+            $meta[$n + 1 + $i] = $rowIdCount; // rowIdCount at n+1+i (so n+2 to 2n+1)
             $offset += $rowIdCount * 8 + \strlen($entry[0]);
         }
         $meta[$n + 1] = $offset; // end marker
 
-        $instance->meta = $meta;
-        return $instance;
+        $this->meta = $meta;
     }
 }
 
@@ -209,50 +233,43 @@ final class BTreeLeafPage
  * Parsed internal page - children are page numbers, keys are separators.
  *
  * Page format:
- * - Header: type(1) + count(2) + children((n+1) * 8) + offsets((n+1) * 2)
+ * - Header: type(1) + count(2) + children((n+1) * 4) + offsets((n+1) * 2)
  * - Key data: keys concatenated (keyLen = offsets[i+1] - offsets[i])
  *
+ * Children are 32-bit page numbers (supports up to 16TB with 4KB pages).
  * Keys are parsed eagerly since internal pages are cached and reused.
  *
  * @internal
  */
 final class BTreeInternalPage
 {
-    /** @var self[] */
-    private static array $pool = [];
-    private static int $poolCount = 0;
-
     /** Number of children */
     public int $childCount;
     /** @var array<int, int> Child page numbers (1-based from unpack, 0-based when building) */
     public array $children;
-    /** @var string[] Separator keys (0-based) */
+    /** @var string[] Separator keys (1-based) */
     public array $keys;
 
     public static function fromRaw(string $data): self
     {
-        if (self::$poolCount > 0) {
-            $instance = self::$pool[--self::$poolCount];
-        } else {
-            $instance = new self();
-        }
+        $instance = new self();
 
         $n = \ord($data[1]) | (\ord($data[2]) << 8);
         $childCount = $n + 1;
         $instance->childCount = $childCount;
-        $instance->children = \unpack('P' . $childCount, $data, 3);
+        $instance->children = \unpack('V' . $childCount, $data, 3);
 
         if ($n === 0) {
             $instance->keys = [];
         } else {
             // Read n+1 offsets (last is end marker) in one unpack call
-            $offsetsStart = 3 + $childCount * 8;
+            $offsetsStart = 3 + $childCount * 4;
             $offsets = \unpack('v' . ($n + 1), $data, $offsetsStart);
 
-            // Read keys: keyLen = offsets[i+1] - offsets[i]
+            // Read keys (1-based): keyLen = offsets[i+1] - offsets[i]
             $instance->keys = [];
             for ($i = 1; $i <= $n; $i++) {
-                $instance->keys[] = \substr($data, $offsets[$i], $offsets[$i + 1] - $offsets[$i]);
+                $instance->keys[$i] = \substr($data, $offsets[$i], $offsets[$i + 1] - $offsets[$i]);
             }
         }
 
@@ -261,51 +278,68 @@ final class BTreeInternalPage
 
     /**
      * Get an internal page from pool (or create new) and set children/keys.
-     * @param int[] $children 0-based array of child page numbers
-     * @param string[] $keys 0-based array of separator keys
+     * @param int[] $children 0-based array of child page numbers (converted to 1-based)
+     * @param string[] $keys 0-based array of separator keys (converted to 1-based)
      */
     public static function fromArrays(array $children, array $keys): self
     {
-        if (self::$poolCount > 0) {
-            $instance = self::$pool[--self::$poolCount];
-        } else {
-            $instance = new self();
-        }
-        $instance->children = $children;
+        $instance = new self();
+        // Convert 0-based input to 1-based storage
+        $instance->children = \array_combine(\range(1, \count($children)), $children);
         $instance->childCount = \count($children);
-        $instance->keys = $keys;
+        $instance->keys = $keys ? \array_combine(\range(1, \count($keys)), $keys) : [];
         return $instance;
     }
 
     /**
+     * Update children and keys in place (for overlay modification).
+     * @param int[] $children 0-based array of child page numbers (converted to 1-based)
+     * @param string[] $keys 0-based array of separator keys (converted to 1-based)
+     */
+    public function setChildrenAndKeys(array $children, array $keys): void
+    {
+        // Convert 0-based input to 1-based storage
+        $this->children = \array_combine(\range(1, \count($children)), $children);
+        $this->childCount = \count($children);
+        $this->keys = $keys ? \array_combine(\range(1, \count($keys)), $keys) : [];
+    }
+
+    /**
      * Serialize to binary page format.
-     * Children must be 0-based when building (not 1-based from unpack).
+     * Children and keys are 1-based arrays.
      */
     public function asString(): string
     {
-        $n = \count($this->keys);
-        $c = $n + 1; // child/offset count
+        $n = $this->childCount - 1; // key count = child count - 1
+        $c = $this->childCount;
 
-        // Header size: type(1) + count(2) + children((n+1)*8) + offsets((n+1)*2)
-        $headerSize = 3 + $c * 8 + $c * 2;
+        // Header size: type(1) + count(2) + children((n+1)*4) + offsets((n+1)*2)
+        $headerSize = 3 + $c * 4 + $c * 2;
 
-        // Build key data and calculate offsets
-        $keyData = \implode('', $this->keys);
+        // Build key data and calculate offsets (keys are 1-based)
+        $keyData = '';
         $offsets = [];
         $offset = $headerSize;
-        foreach ($this->keys as $key) {
+        for ($i = 1; $i <= $n; $i++) {
             $offsets[] = $offset;
+            $key = $this->keys[$i];
+            $keyData .= $key;
             $offset += \strlen($key);
         }
         $offsets[] = $offset; // End marker
 
-        // Single pack for header, then append key data
-        return \pack('CvP' . $c . 'v' . $c, BTreeIndex::PAGE_INTERNAL, $n, ...$this->children, ...$offsets) . $keyData;
+        // Single pack for header, then append key data (children are 1-based)
+        return \pack('CvV' . $c . 'v' . $c, BTreeIndex::PAGE_INTERNAL, $n, ...$this->children, ...$offsets) . $keyData;
     }
 
-    public function release(): void
+    public function __debugInfo(): array
     {
-        self::$pool[self::$poolCount++] = $this;
+        return [
+            'childCount' => $this->childCount,
+            'children' => $this->children,
+            'children_keys' => array_keys($this->children),
+            'keys' => $this->keys,
+        ];
     }
 }
 
@@ -343,6 +377,11 @@ final class BTreeIndex implements IndexInterface
     // Page types (public for BTreeLeafPage/BTreeInternalPage::asString())
     public const PAGE_INTERNAL = 0x01;
     public const PAGE_LEAF = 0x02;
+    public const PAGE_INTERNAL_ROOT = 0x81;  // Internal + root marker (high bit)
+    public const PAGE_LEAF_ROOT = 0x82;      // Leaf + root marker
+
+    // CRC is stored in last 4 bytes of root pages
+    private const CRC_OFFSET = self::PAGE_SIZE - 4;
 
     /** @var resource|null File handle */
     private $file = null;
@@ -365,27 +404,23 @@ final class BTreeIndex implements IndexInterface
     /** @var bool Whether in transaction mode */
     private bool $inTransaction = false;
 
-    /** @var array<string, string> Buffered inserts: key => packed rowIds */
-    private array $buffer = [];
+    /** @var array<int, BTreeLeafPage|BTreeInternalPage> Uncommitted non-root pages (keyed by future page number) */
+    private array $unwrittenPages = [];
 
-    /** @var array<string, array<int, true>> Buffered deletes: key => [rowId => true] */
-    private array $deleteBuffer = [];
+    /** @var int Count of allocated unwritten non-root pages */
+    private int $unwrittenPageCount = 0;
 
-    /** @var array<int, BTreeLeafPage|BTreeInternalPage> Dirty nodes awaiting write: tempId => node */
-    private array $dirtyNodes = [];
+    /** @var BTreeLeafPage|BTreeInternalPage|null Current root (from disk or modified in transaction) */
+    private BTreeLeafPage|BTreeInternalPage|null $currentRoot = null;
 
-    /** @var int Next temporary ID for dirty nodes (negative, decrements) */
-    private int $nextTempId = -1;
-
-    // Internal node cache (parsed data)
-    // This interval is for multi-process safety; single-process usage doesn't need frequent checks
-    private const CACHE_CHECK_INTERVAL = 10000; // Check for file changes every N page reads
+    // Internal node cache (cleared on findLatestRoot when root changes)
+    private const HEADER_CHECK_INTERVAL = 10000; // Check header every N queries
 
     /** @var array<int, BTreeInternalPage> Parsed internal page cache */
     private array $pageCache = [];
 
-    /** @var int Counter for periodic cache invalidation check */
-    private int $cacheReadCount = 0;
+    /** @var int Counter for periodic header check */
+    private int $queryCount = 0;
 
     public function __construct(string $path)
     {
@@ -430,8 +465,8 @@ final class BTreeIndex implements IndexInterface
 
     public function __destruct()
     {
-        // Auto-commit pending changes
-        if ($this->inTransaction && (!empty($this->buffer) || !empty($this->deleteBuffer))) {
+        // Auto-commit pending changes (root may have been modified even if unwrittenPages is empty)
+        if ($this->inTransaction) {
             $this->commit();
         }
         $this->close();
@@ -443,21 +478,23 @@ final class BTreeIndex implements IndexInterface
 
     /**
      * Begin a transaction for bulk operations.
-     * Changes are buffered in memory until commit().
+     * Acquires exclusive lock and refreshes root from disk.
      */
     public function begin(): void
     {
         if ($this->inTransaction) {
             throw new \RuntimeException("Already in transaction");
         }
+        // Lock file for duration of transaction
+        flock($this->lockFile, LOCK_EX);
+        $this->findLatestRoot(); // Always sets $currentRoot (empty leaf if new)
         $this->inTransaction = true;
-        $this->buffer = [];
-        $this->deleteBuffer = [];
+        $this->unwrittenPages = [];
+        $this->unwrittenPageCount = 0;
     }
 
     /**
-     * Commit buffered changes to disk incrementally.
-     * Applies inserts and deletes one by one to avoid loading entire tree.
+     * Commit unwritten pages to disk.
      */
     public function commit(): void
     {
@@ -465,109 +502,55 @@ final class BTreeIndex implements IndexInterface
             throw new \RuntimeException("Not in transaction");
         }
 
-        if (empty($this->buffer) && empty($this->deleteBuffer)) {
-            $this->inTransaction = false;
-            return;
-        }
-
-        $this->withWriteLock(function() {
-            $this->readHeader();
-
-            // Sort buffer by key to optimize disk seek patterns
-            ksort($this->buffer, SORT_STRING);
-
-            // Apply inserts incrementally (generates COW pages)
-            foreach ($this->buffer as $key => $packed) {
-                // Skip if all rowIds for this key were also deleted
-                $deletedIds = $this->deleteBuffer[$key] ?? [];
-
-                foreach (unpack('P*', $packed) as $rowId) {
-                    if (isset($deletedIds[$rowId])) {
-                        continue; // Skip - inserted then deleted in same transaction
-                    }
-
-                    if ($this->rootPage === 0) {
-                        // Empty tree - create first leaf (sync handled below)
-                        $leaf = BTreeLeafPage::fromEntries([[$key, $rowId]]);
-                        $this->rootPage = $this->appendPage($leaf->asString());
-                        $leaf->release();
-                    } else {
-                        $path = $this->findPath($key);
-                        $this->insertIntoTree($key, $rowId, $path);
-                    }
-                }
+        try {
+            if (empty($this->unwrittenPages) && $this->currentRoot === null) {
+                return;
             }
 
-            // Apply deletes incrementally (skip ones that were just inserted)
-            foreach ($this->deleteBuffer as $key => $rowIds) {
-                if ($this->rootPage === 0) {
-                    continue; // Nothing to delete from empty tree
-                }
-
-                foreach (array_keys($rowIds) as $rowId) {
-                    // Check if this was a newly inserted rowId
-                    if (isset($this->buffer[$key])) {
-                        $insertedIds = unpack('P*', $this->buffer[$key]);
-                        if (in_array($rowId, $insertedIds, true)) {
-                            continue; // Already skipped during insert
-                        }
-                    }
-
-                    $path = $this->findPath($key);
-                    $this->deleteFromTree($key, $rowId, $path);
-                }
+            // Write all non-root unwritten pages in order
+            ksort($this->unwrittenPages);
+            foreach ($this->unwrittenPages as $pageNum => $page) {
+                $offset = $pageNum * self::PAGE_SIZE;
+                fseek($this->file, $offset);
+                fwrite($this->file, pack('a' . self::PAGE_SIZE, $page->asString()));
             }
+            $this->nextPage += $this->unwrittenPageCount;
 
-            // Flush all dirty nodes to disk
-            $this->flushDirtyNodes();
-
-            // PRE-PUBLISH BARRIER: ensure all data pages are durable
+            // Sync non-root pages to disk
             fdatasync($this->file);
 
-            // Publish new root via header update (writeHeader does POST-PUBLISH barrier)
-            $this->sequence++;
-            $this->writeHeader();
-        });
+            // Write root with CRC (makes the transaction visible)
+            if ($this->currentRoot !== null) {
+                $this->writeRootWithCrc($this->currentRoot);
+            }
 
-        $this->buffer = [];
-        $this->deleteBuffer = [];
-        $this->inTransaction = false;
+            // Final sync
+            fdatasync($this->file);
+            $this->sequence++;
+
+            // Move pages from overlay: internal nodes to cache, leaf nodes released to pool
+            foreach ($this->unwrittenPages as $pageNum => $page) {
+                if ($page instanceof BTreeInternalPage) {
+                    $this->pageCache[$pageNum] = $page;
+                } else {
+                    $page->release();
+                }
+            }
+        } finally {
+            $this->unwrittenPages = [];
+            $this->unwrittenPageCount = 0;
+            $this->inTransaction = false;
+            flock($this->lockFile, LOCK_UN);
+        }
     }
 
     /**
      * Commit with bulk rebuild - use for initial loading only.
-     * Loads entire tree into memory, merges, and rebuilds optimally.
+     * Now identical to commit() since overlay handles incremental structure building.
      */
     public function commitBulk(): void
     {
-        if (!$this->inTransaction) {
-            throw new \RuntimeException("Not in transaction");
-        }
-
-        if (empty($this->buffer) && empty($this->deleteBuffer)) {
-            $this->inTransaction = false;
-            return;
-        }
-
-        $this->withWriteLock(function() {
-            $this->readHeader();
-
-            // Merge buffer with existing data (loads entire tree)
-            $merged = $this->mergeBufferWithTree();
-
-            // Rebuild tree from merged data
-            $this->rebuildTree($merged);
-
-            // Sync all data pages before updating header (crash safety)
-            fdatasync($this->file);
-
-            $this->sequence++;
-            $this->writeHeader();
-        });
-
-        $this->buffer = [];
-        $this->deleteBuffer = [];
-        $this->inTransaction = false;
+        $this->commit();
     }
 
     /**
@@ -575,8 +558,13 @@ final class BTreeIndex implements IndexInterface
      */
     public function rollback(): void
     {
-        $this->buffer = [];
-        $this->deleteBuffer = [];
+        if ($this->inTransaction) {
+            // Restore root from disk
+            $this->findLatestRoot();
+            flock($this->lockFile, LOCK_UN);
+        }
+        $this->unwrittenPages = [];
+        $this->unwrittenPageCount = 0;
         $this->inTransaction = false;
     }
 
@@ -590,97 +578,91 @@ final class BTreeIndex implements IndexInterface
             throw new \InvalidArgumentException("Key exceeds maximum length of " . self::MAX_KEY_LENGTH);
         }
 
-        if ($this->inTransaction) {
-            // Buffer the insert
-            $this->buffer[$key] = ($this->buffer[$key] ?? '') . pack('P', $rowId);
-            return;
+        $autoCommit = false;
+        if (!$this->inTransaction) {
+            $this->begin();
+            $autoCommit = true;
         }
 
-        $this->withWriteLock(function() use ($key, $rowId) {
-            $this->readHeader(); // Re-read header under lock
+        try {
+            // begin() guarantees $currentRoot is never null
+            $path = $this->findPath($key);
+            $this->insertIntoTree($key, $rowId, $path);
 
-            if ($this->rootPage === 0) {
-                // Empty tree - create first leaf
-                $leaf = BTreeLeafPage::fromEntries([[$key, $rowId]]);
-                $this->rootPage = $this->appendPage($leaf->asString());
-                $leaf->release();
-            } else {
-                // Find path to leaf and insert
-                $path = $this->findPath($key);
-                $this->insertIntoTree($key, $rowId, $path);
-                $this->flushDirtyNodes();
+            if ($autoCommit) {
+                $this->commit();
             }
-
-            // PRE-PUBLISH BARRIER
-            fdatasync($this->file);
-
-            $this->sequence++;
-            $this->writeHeader(); // POST-PUBLISH BARRIER
-        });
+        } catch (\Throwable $e) {
+            if ($autoCommit) {
+                $this->rollback();
+            }
+            throw $e;
+        }
     }
 
     public function delete(string $key, int $rowId): void
     {
-        if ($this->inTransaction) {
-            // Buffer the delete
-            $this->deleteBuffer[$key][$rowId] = true;
-            return;
+        $autoCommit = false;
+        if (!$this->inTransaction) {
+            $this->begin();
+            $autoCommit = true;
         }
 
-        $this->withWriteLock(function() use ($key, $rowId) {
-            $this->readHeader();
-
-            if ($this->rootPage === 0) {
-                return; // Empty tree
+        try {
+            if ($this->currentRoot === null) {
+                // Empty tree - nothing to delete
+                if ($autoCommit) {
+                    $this->rollback();
+                }
+                return;
             }
 
             $path = $this->findPath($key);
             $this->deleteFromTree($key, $rowId, $path);
-            $this->flushDirtyNodes();
 
-            // PRE-PUBLISH BARRIER
-            fdatasync($this->file);
-
-            $this->sequence++;
-            $this->writeHeader(); // POST-PUBLISH BARRIER
-        });
+            if ($autoCommit) {
+                $this->commit();
+            }
+        } catch (\Throwable $e) {
+            if ($autoCommit) {
+                $this->rollback();
+            }
+            throw $e;
+        }
     }
 
     public function eq(string $key): Traversable
     {
-        // No header check needed - append-only design means old root always
-        // points to valid (immutable) pages. We get snapshot isolation for free.
-
-        // If in transaction with buffered data, use merged range
-        if ($this->inTransaction && (!empty($this->buffer) || !empty($this->deleteBuffer))) {
-            yield from $this->rangeMerged($key, $key, false);
-            return;
+        // Outside transaction, refresh from disk periodically
+        if (!$this->inTransaction) {
+            $this->readHeaderWithLock();
         }
 
-        if ($this->rootPage === 0) {
+        if ($this->currentRoot === null) {
             return;
         }
 
         // Navigate to leaf containing the key
-        $pageNum = $this->rootPage;
+        $page = $this->currentRoot;
         $stack = [];
+        $stackTop = 0;
+        $leafPageNum = null; // null = root is the leaf, don't release
 
-        while (true) {
-            $page = $this->getCachedPage($pageNum);
-            if ($page instanceof BTreeLeafPage) {
-                $leaf = $page;
-                break;
-            }
-            $childIdx = $this->findChildIndex($page->keys, $key);
-            $stack[] = [$pageNum, $childIdx, $page];
-            $pageNum = $page->children[$childIdx + 1];
+        while (!($page instanceof BTreeLeafPage)) {
+            $childIdx = $this->findChildIndex($page->keys, $page->childCount - 1, $key);
+            $leafPageNum = $page->children[$childIdx];
+            $stack[$stackTop++] = $leafPageNum;
+            $stack[$stackTop++] = $childIdx;
+            $stack[$stackTop++] = $page;
+            $page = $this->getPage($leafPageNum);
         }
+        $leaf = $page;
 
         // Binary search within leaf using getKeyAt() - no rowId unpacking for probes
         while (true) {
             $n = $leaf->count;
             if ($n === 0) {
-                $leaf->release();
+                if ($leafPageNum !== null) $this->releaseLeaf($leaf, $leafPageNum);
                 return;
             }
 
@@ -700,7 +682,7 @@ final class BTreeIndex implements IndexInterface
             for ($i = $lo; $i <= $n; $i++) {
                 $cmp = strcmp($leaf->getKeyAt($i), $key);
                 if ($cmp > 0) {
-                    $leaf->release();
+                    if ($leafPageNum !== null) $this->releaseLeaf($leaf, $leafPageNum);
                     return; // Past our key
                 }
                 if ($cmp === 0) {
@@ -713,24 +695,30 @@ final class BTreeIndex implements IndexInterface
             }
 
             // Key might continue on next leaf - backtrack to find it
-            $leaf->release();
+            if ($leafPageNum !== null) $this->releaseLeaf($leaf, $leafPageNum);
             $found = false;
 
-            while (!empty($stack)) {
-                [$parentNum, $childIdx, $parentPage] = array_pop($stack);
-                if ($childIdx + 1 < $parentPage->childCount) {
+            while ($stackTop > 0) {
+                $parentPage = $stack[--$stackTop];
+                $childIdx = $stack[--$stackTop];
+                $parentNum = $stack[--$stackTop];
+                if ($childIdx < $parentPage->childCount) {
                     $childIdx++;
-                    $stack[] = [$parentNum, $childIdx, $parentPage];
-                    $pageNum = $parentPage->children[$childIdx + 1];
+                    $stack[$stackTop++] = $parentNum;
+                    $stack[$stackTop++] = $childIdx;
+                    $stack[$stackTop++] = $parentPage;
+                    $leafPageNum = $parentPage->children[$childIdx];
 
                     while (true) {
-                        $page = $this->getCachedPage($pageNum);
+                        $page = $this->getPage($leafPageNum);
                         if ($page instanceof BTreeLeafPage) {
                             $leaf = $page;
                             break;
                         }
-                        $stack[] = [$pageNum, 0, $page];
-                        $pageNum = $page->children[1];
+                        $stack[$stackTop++] = $leafPageNum;
+                        $stack[$stackTop++] = 1;
+                        $stack[$stackTop++] = $page;
+                        $leafPageNum = $page->children[1];
                     }
 
                     // Check if first entry matches (duplicates can span pages)
@@ -741,7 +729,7 @@ final class BTreeIndex implements IndexInterface
                             break;
                         }
                     }
-                    $leaf->release();
+                    $this->releaseLeaf($leaf, $leafPageNum);
                     return; // Next leaf starts with different key
                 }
             }
@@ -754,16 +742,12 @@ final class BTreeIndex implements IndexInterface
 
     public function range(?string $start = null, ?string $end = null, bool $reverse = false): Traversable
     {
-        // No header check needed - append-only design means old root always
-        // points to valid (immutable) pages. We get snapshot isolation for free.
-
-        // If in transaction with buffered data, merge disk + buffer
-        if ($this->inTransaction && (!empty($this->buffer) || !empty($this->deleteBuffer))) {
-            yield from $this->rangeMerged($start, $end, $reverse);
-            return;
+        // Outside transaction, refresh from disk periodically
+        if (!$this->inTransaction) {
+            $this->readHeaderWithLock();
         }
 
-        if ($this->rootPage === 0) {
+        if ($this->currentRoot === null) {
             return;
         }
 
@@ -810,7 +794,7 @@ final class BTreeIndex implements IndexInterface
     public function compact(): void
     {
         $this->withWriteLock(function() {
-            $this->readHeader();
+            $this->findLatestRoot();
 
             if ($this->rootPage === 0) {
                 return; // Nothing to compact
@@ -823,31 +807,28 @@ final class BTreeIndex implements IndexInterface
             }
 
             try {
-                // Write header placeholder (full page for alignment)
-                fwrite($temp, pack('@' . self::PAGE_SIZE));
+                // Write minimal header (page 0)
+                $header = pack('VCC', self::MAGIC, self::VERSION, 0);
+                fwrite($temp, pack('a' . self::PAGE_SIZE, $header));
 
                 // Rewrite all reachable pages
                 $pageMap = []; // old page => new page
                 $newNextPage = 1;
 
-                $this->rewritePages($temp, $this->rootPage, $pageMap, $newNextPage);
+                $newRoot = $this->rewritePages($temp, $this->rootPage, $pageMap, $newNextPage);
 
-                // Write final header (page 0)
-                fseek($temp, 0);
-                $newRoot = $pageMap[$this->rootPage] ?? 0;
-                $header = pack('VCCvPPP',
-                    self::MAGIC,
-                    self::VERSION,
-                    0, // reserved
-                    self::PAGE_SIZE,
-                    $newRoot,
-                    $newNextPage,
-                    $this->sequence + 1
-                );
-                fwrite($temp, pack('a' . self::PAGE_SIZE, $header));
+                // Mark root with CRC
+                fseek($temp, $newRoot * self::PAGE_SIZE);
+                $page = fread($temp, self::PAGE_SIZE);
+                $type = ord($page[0]);
+                $page[0] = chr($type | 0x80);
+                $crc = crc32(substr($page, 0, self::CRC_OFFSET));
+                $page = substr($page, 0, self::CRC_OFFSET) . pack('V', $crc);
 
-                // Sync temp file before atomic rename (crash safety)
-                fdatasync($temp);
+                // Append root with CRC as final page
+                fseek($temp, $newNextPage * self::PAGE_SIZE);
+                fwrite($temp, $page);
+
                 fclose($temp);
 
                 // Atomic rename
@@ -887,67 +868,133 @@ final class BTreeIndex implements IndexInterface
             throw new \RuntimeException("Failed to open lock file: {$this->path}.lock");
         }
 
-        // Check if file is empty or has valid header
+        // Check if file is empty
         fseek($this->file, 0, SEEK_END);
         $size = ftell($this->file);
 
         if ($size === 0) {
-            // New file - initialize header
+            // New file - write minimal header (page 0 with just magic/version)
             $this->rootPage = 0;
             $this->nextPage = 1;
             $this->sequence = 0;
-            $this->writeHeader();
+            $this->writeFileHeader();
         } else {
-            // Existing file - read header
-            $this->readHeader();
+            // Existing file - find latest root by scanning backwards
+            $this->findLatestRoot();
         }
     }
 
-    private function readHeader(): void
+    /**
+     * Write minimal file header (page 0) - just magic and version.
+     * Root is found by scanning for latest valid root page.
+     */
+    private function writeFileHeader(): void
     {
-        fseek($this->file, 0);
-        $data = fread($this->file, self::HEADER_SIZE);
-
-        if (strlen($data) < self::HEADER_SIZE) {
-            throw new \RuntimeException("Corrupted index: header too short");
-        }
-
-        $header = unpack('Vmagic/Cversion/Creserved/vpageSize/ProotPage/PnextPage/Psequence', $data);
-
-        if ($header['magic'] !== self::MAGIC) {
-            throw new \RuntimeException("Invalid index file: wrong magic number");
-        }
-
-        if ($header['version'] !== self::VERSION) {
-            throw new \RuntimeException("Unsupported index version: {$header['version']}");
-        }
-
-        $this->rootPage = $header['rootPage'];
-        $this->nextPage = $header['nextPage'];
-        $this->sequence = $header['sequence'];
-    }
-
-    private function writeHeader(): void
-    {
-        // Header occupies entire page 0 (4KB aligned for disk I/O)
-        $header = pack('VCCvPPP',
-            self::MAGIC,
-            self::VERSION,
-            0, // reserved
-            self::PAGE_SIZE,
-            $this->rootPage,
-            $this->nextPage,
-            $this->sequence
-        );
-
+        $header = pack('VCC', self::MAGIC, self::VERSION, 0);
         fseek($this->file, 0);
         fwrite($this->file, pack('a' . self::PAGE_SIZE, $header));
+        fflush($this->file);
+    }
 
-        // Sync header to disk (crash safety - completes the atomic commit)
-        fdatasync($this->file);
+    /**
+     * Append root page with root marker and CRC.
+     * Reads current root, marks it as root, computes CRC, appends as new page.
+     */
+    /**
+     * Write root page object with CRC marker (for new overlay approach).
+     */
+    private function writeRootWithCrc(BTreeLeafPage|BTreeInternalPage $root): void
+    {
+        $page = pack('a' . self::PAGE_SIZE, $root->asString());
 
-        // Clear stale cached pages after header update
-        $this->pageCache = [];
+        // Set root marker (high bit in type byte)
+        $type = ord($page[0]);
+        $page[0] = chr($type | 0x80);
+
+        // Compute and store CRC (last 4 bytes)
+        $crc = crc32(substr($page, 0, self::CRC_OFFSET));
+        $page = substr($page, 0, self::CRC_OFFSET) . pack('V', $crc);
+
+        // Append as new page
+        $this->rootPage = $this->nextPage++;
+        fseek($this->file, $this->rootPage * self::PAGE_SIZE);
+        fwrite($this->file, $page);
+        fflush($this->file);
+    }
+
+    /**
+     * Find the latest valid root page by scanning backwards from file end.
+     * Root pages have high bit set in type byte and valid CRC in last 4 bytes.
+     * Clears page cache if root changed.
+     */
+    private function findLatestRoot(): void
+    {
+        fseek($this->file, 0, SEEK_END);
+        $size = ftell($this->file);
+        $numPages = (int)($size / self::PAGE_SIZE);
+        $oldRoot = $this->rootPage;
+
+        // Scan backwards for root page with valid CRC
+        for ($pageNum = $numPages - 1; $pageNum >= 1; $pageNum--) {
+            fseek($this->file, $pageNum * self::PAGE_SIZE);
+            $page = fread($this->file, self::PAGE_SIZE);
+
+            if (strlen($page) < self::PAGE_SIZE) {
+                continue;
+            }
+
+            $type = ord($page[0]);
+
+            // Check if this is a root page (high bit set)
+            if ($type !== self::PAGE_INTERNAL_ROOT && $type !== self::PAGE_LEAF_ROOT) {
+                continue;
+            }
+
+            // Validate CRC (stored in last 4 bytes)
+            $storedCrc = unpack('V', $page, self::CRC_OFFSET)[1];
+            $dataCrc = crc32(substr($page, 0, self::CRC_OFFSET));
+
+            if ($storedCrc === $dataCrc) {
+                // Valid root found - next write overwrites any garbage after root
+                $this->rootPage = $pageNum;
+                $this->nextPage = $pageNum + 1;
+                // Load root page object
+                $baseType = $type & 0x7F;
+                $this->currentRoot = ($baseType === self::PAGE_LEAF)
+                    ? BTreeLeafPage::fromRaw($page)
+                    : BTreeInternalPage::fromRaw($page);
+                if ($oldRoot !== $pageNum) {
+                    $this->sequence++;
+                    $this->pageCache = [];
+                }
+                return;
+            }
+        }
+
+        // No valid root found - create empty leaf as root
+        $this->rootPage = 0;
+        $this->nextPage = 1;
+        $this->currentRoot = BTreeLeafPage::fromEntries([]);
+        if ($oldRoot !== 0) {
+            $this->sequence++;
+            $this->pageCache = [];
+        }
+    }
+
+    private function readHeaderWithLock(): void
+    {
+        // Skip check if we've checked recently (optimization for read-heavy workloads)
+        if (++$this->queryCount < self::HEADER_CHECK_INTERVAL) {
+            return;
+        }
+        $this->queryCount = 0;
+
+        flock($this->lockFile, LOCK_SH);
+        try {
+            $this->findLatestRoot();
+        } finally {
+            flock($this->lockFile, LOCK_UN);
+        }
     }
 
     private function withWriteLock(callable $fn): void
@@ -982,150 +1029,75 @@ final class BTreeIndex implements IndexInterface
     }
 
     /**
-     * Get parsed leaf page with caching.
+     * Load a page from unwritten overlay, cache, or disk.
      */
-    private function getLeafPage(int $pageNum): BTreeLeafPage
+    private function getPage(int $pageNum): BTreeLeafPage|BTreeInternalPage
     {
-        $page = $this->getCachedPage($pageNum);
-        if (!$page instanceof BTreeLeafPage) {
-            throw new \RuntimeException("Page $pageNum is not a leaf");
-        }
-        return $page;
-    }
-
-    /**
-     * Get parsed internal page with caching.
-     */
-    private function getInternalPage(int $pageNum): BTreeInternalPage
-    {
-        $page = $this->getCachedPage($pageNum);
-        if (!$page instanceof BTreeInternalPage) {
-            throw new \RuntimeException("Page $pageNum is not internal");
-        }
-        return $page;
-    }
-
-    /**
-     * Get parsed page, caching internal nodes only.
-     */
-    private function getCachedPage(int $pageNum): BTreeLeafPage|BTreeInternalPage
-    {
-        // Negative page numbers are dirty (unwritten) nodes
-        if ($pageNum < 0) {
-            return $this->dirtyNodes[$pageNum];
+        // Check uncommitted pages (transaction overlay)
+        if (isset($this->unwrittenPages[$pageNum])) {
+            return $this->unwrittenPages[$pageNum];
         }
 
-        // Periodic check for file modifications by other processes
-        if (++$this->cacheReadCount >= self::CACHE_CHECK_INTERVAL) {
-            $this->cacheReadCount = 0;
-            $this->checkCacheValidity();
-        }
-
-        // Check cache (internal nodes only)
+        // Check cache (committed internal nodes)
         if (isset($this->pageCache[$pageNum])) {
             return $this->pageCache[$pageNum];
         }
 
-        // Read and parse
-        $page = $this->readPageRaw($pageNum);
-        $type = ord($page[0]);
+        // Read from disk
+        $data = $this->readPageRaw($pageNum);
+        $type = ord($data[0]) & 0x7F; // Mask off root marker bit
 
         if ($type === self::PAGE_LEAF) {
-            // Don't cache leaf nodes - they're accessed once per query
-            return BTreeLeafPage::fromRaw($page);
+            return BTreeLeafPage::fromRaw($data);
         }
 
-        // Cache internal nodes - they're traversed repeatedly
-        $parsed = BTreeInternalPage::fromRaw($page);
-        $this->pageCache[$pageNum] = $parsed;
-        return $parsed;
+        $page = BTreeInternalPage::fromRaw($data);
+        $this->pageCache[$pageNum] = $page;
+        return $page;
     }
 
     /**
-     * Check if file was modified by another process and invalidate cache if so.
-     * Append-only design means we just check if file grew.
+     * Allocate a new page in the overlay. Returns the page number.
+     * Used when creating new pages (e.g., splits).
      */
-    private function checkCacheValidity(): void
+    private function allocatePage(BTreeLeafPage|BTreeInternalPage $page): int
     {
-        clearstatcache(true, $this->path);
-        $size = filesize($this->path);
-        $expectedSize = $this->nextPage * self::PAGE_SIZE;
-
-        if ($size > $expectedSize) {
-            // File grew - another process appended pages. Re-read header.
-            $this->pageCache = [];
-            $this->readHeader();
-        }
-    }
-
-    private function appendPage(string $page): int
-    {
-        $pageNum = $this->nextPage++;
-        // Page 0 is the header page, data pages start at 1
-        $offset = $pageNum * self::PAGE_SIZE;
-
-        fseek($this->file, $offset);
-        fwrite($this->file, \pack('a' . self::PAGE_SIZE, $page));
-        // No fflush here - sync at commit boundaries only
-
+        $pageNum = $this->nextPage + $this->unwrittenPageCount++;
+        $this->unwrittenPages[$pageNum] = $page;
         return $pageNum;
     }
 
     /**
-     * Allocate a dirty (unwritten) page. Returns a negative temp ID.
-     * The node will be written to disk when flushDirtyNodes() is called.
+     * Get a page for modification. If from disk/cache, moves to overlay.
+     * Updates $pageNum by reference to the new page number in overlay.
      */
-    private function allocateDirtyPage(BTreeLeafPage|BTreeInternalPage $node): int
+    private function getPageForWrite(int &$pageNum): BTreeLeafPage|BTreeInternalPage
     {
-        $tempId = $this->nextTempId--;
-        $this->dirtyNodes[$tempId] = $node;
-        return $tempId;
+        // Already in overlay - return as-is
+        if (isset($this->unwrittenPages[$pageNum])) {
+            return $this->unwrittenPages[$pageNum];
+        }
+
+        // Remove from cache if present (avoid double reference)
+        $oldPageNum = $pageNum;
+        unset($this->pageCache[$oldPageNum]);
+
+        // Move to overlay with new page number
+        $page = $this->getPage($oldPageNum);
+        $pageNum = $this->nextPage + $this->unwrittenPageCount++;
+        $this->unwrittenPages[$pageNum] = $page;
+        return $page;
     }
 
     /**
-     * Recursively write dirty nodes to disk, children before parents.
-     * Returns the real page number for the given page reference.
+     * Release a leaf page back to pool, but only if it's not in the overlay.
+     * Pages from unwrittenPages must not be released - they're still needed.
      */
-    private function writeDirtySubtree(int $pageRef): int
+    private function releaseLeaf(BTreeLeafPage $leaf, int $pageNum): void
     {
-        if ($pageRef >= 0) {
-            return $pageRef;  // Already on disk
+        if (!isset($this->unwrittenPages[$pageNum])) {
+            $leaf->release();
         }
-
-        $node = $this->dirtyNodes[$pageRef];
-
-        if ($node instanceof BTreeInternalPage) {
-            // Write children first, update pointers to real page numbers
-            $newChildren = [];
-            foreach ($node->children as $child) {
-                $newChildren[] = $this->writeDirtySubtree($child);
-            }
-            $node->children = $newChildren;
-        }
-
-        // Write this node and return real page number
-        $realPage = $this->appendPage($node->asString());
-        $node->release();
-        return $realPage;
-    }
-
-    /**
-     * Flush all dirty nodes to disk in correct order.
-     * Must be called within write lock. Does NOT sync - caller must sync.
-     */
-    private function flushDirtyNodes(): void
-    {
-        if (empty($this->dirtyNodes)) {
-            return;
-        }
-
-        // Write from root - recursion handles children-first ordering
-        if ($this->rootPage < 0) {
-            $this->rootPage = $this->writeDirtySubtree($this->rootPage);
-        }
-
-        $this->dirtyNodes = [];
-        $this->nextTempId = -1;
     }
 
     // =========================================================================
@@ -1134,13 +1106,14 @@ final class BTreeIndex implements IndexInterface
 
     /**
      * Find child index for given key in internal node.
-     * Returns the index into $children array (not the page number).
+     * Returns 1-based index into $children array.
+     * Keys array is 1-based.
      */
-    private function findChildIndex(array $keys, string $key): int
+    private function findChildIndex(array $keys, int $keyCount, string $key): int
     {
-        // Binary search for first key >= $key
-        $lo = 0;
-        $hi = count($keys);
+        // Binary search for first key >= $key (keys are 1-based)
+        $lo = 1;
+        $hi = $keyCount + 1;
         while ($lo < $hi) {
             $mid = ($lo + $hi) >> 1;
             if (strcmp($keys[$mid], $key) < 0) {
@@ -1149,7 +1122,7 @@ final class BTreeIndex implements IndexInterface
                 $hi = $mid;
             }
         }
-        return $lo;
+        return $lo; // 1-based child index
     }
 
     // =========================================================================
@@ -1158,24 +1131,34 @@ final class BTreeIndex implements IndexInterface
 
     /**
      * Find path from root to leaf for given key.
-     * @return array<array{int, int}> [[pageNum, childIndex], ...] where leaf has childIndex=-1
+     *
+     * Returns flat array: [pageNum, childIdx, pageNum, childIdx, ...]
+     * - pageNum: null for root, otherwise actual page number
+     * - childIdx: -1 for leaf, otherwise which child was followed (1-based)
+     *
+     * Example paths:
+     * - [null, -1] - root is a leaf
+     * - [null, 2, 5, -1] - root is internal, followed child[2], leaf is page 5
+     * - [null, 1, 3, 1, 7, -1] - two internal levels before leaf
      */
     private function findPath(string $key): array
     {
         $path = [];
-        $pageNum = $this->rootPage;
+        $page = $this->currentRoot;
+        $pageNum = null; // null = root, then becomes actual page number
 
         while (true) {
-            $page = $this->getCachedPage($pageNum);
-
             if ($page instanceof BTreeLeafPage) {
-                $path[] = [$pageNum, -1];
+                $path[] = $pageNum;
+                $path[] = -1;
                 return $path;
             }
 
-            // Find child index via binary search
-            $lo = 0;
-            $hi = count($page->keys);
+            // Find child index via binary search (keys are 1-based)
+            // Finds first key > target, result is 1-based child index
+            $keyCount = $page->childCount - 1;
+            $lo = 1;
+            $hi = $keyCount + 1;
             while ($lo < $hi) {
                 $mid = ($lo + $hi) >> 1;
                 if (strcmp($page->keys[$mid], $key) <= 0) {
@@ -1185,8 +1168,13 @@ final class BTreeIndex implements IndexInterface
                 }
             }
 
-            $path[] = [$pageNum, $lo];
-            $pageNum = $page->children[$lo];
+            $path[] = $pageNum;
+            $path[] = $lo; // 1-based child index
+
+            // Descend to child - children array is 1-based
+            $childPageNum = $page->children[$lo];
+            $pageNum = $childPageNum; // Now actual page number, not null
+            $page = $this->getPage($childPageNum);
         }
     }
 
@@ -1196,52 +1184,104 @@ final class BTreeIndex implements IndexInterface
 
     private function insertIntoTree(string $key, int $rowId, array $path): void
     {
-        // Get leaf from path
-        [$leafPageNum, $_] = array_pop($path);
-        $entries = $this->getLeafPage($leafPageNum)->toArray();
+        // Get leaf from path - last two elements are [leafPageNum, -1]
+        $pathLen = count($path);
+        $leafPageNum = $path[$pathLen - 2];
 
-        // Find position and insert/update
-        $pos = $this->findInsertPosition($entries, $key);
+        // Get leaf for modification - either root or from overlay
+        if ($leafPageNum === null) {
+            $leaf = $this->currentRoot;
+        } else {
+            $leaf = $this->getPageForWrite($leafPageNum); // $leafPageNum updated to new page number
+        }
+        $entries = $leaf->toArray(); // 1-based array
+        $n = count($entries);
 
-        if ($pos < count($entries) && $entries[$pos][0] === $key) {
+        // Find position (1-based) and insert/update
+        $pos = $this->findInsertPosition($entries, $n, $key);
+
+        if ($pos <= $n && $entries[$pos][0] === $key) {
             // Key exists - append rowId (flat format: [key, id1, id2, ...])
             $entries[$pos][] = $rowId;
         } else {
-            // New key - insert at position (flat format: [key, rowId])
-            array_splice($entries, $pos, 0, [[$key, $rowId]]);
+            // New key - insert at position (1-based array insert)
+            $newEntries = [];
+            for ($i = 1; $i < $pos; $i++) {
+                $newEntries[$i] = $entries[$i];
+            }
+            $newEntries[$pos] = [$key, $rowId];
+            for ($i = $pos; $i <= $n; $i++) {
+                $newEntries[$i + 1] = $entries[$i];
+            }
+            $entries = $newEntries;
+            $n++;
         }
 
-        // Check if leaf needs splitting
-        $leaf = BTreeLeafPage::fromEntries($entries);
+        // Update entries in place and check if page still fits
+        $leaf->setEntries($entries);
 
         if (strlen($leaf->asString()) <= self::PAGE_SIZE) {
-            // Fits - allocate dirty page and update parent
-            $newLeafNum = $this->allocateDirtyPage($leaf);
-            $this->updatePath($path, $leafPageNum, $newLeafNum, null, null);
+            // Fits - page already modified in overlay
+            if ($leafPageNum !== null) {
+                // Update parent pointers to new page number
+                $this->updatePath($path, $pathLen - 4, $leafPageNum);
+            }
         } else {
-            // Split required
-            $leaf->release();
-            $mid = count($entries) >> 1;
-            $leftEntries = array_slice($entries, 0, $mid);
-            $rightEntries = array_slice($entries, $mid);
+            // Split required - check if we need to split rowIds within a single entry
+            if ($n === 1) {
+                // Single entry with too many rowIds - split the rowIds
+                $entry = $entries[1];
+                $entryKey = $entry[0];
+                $rowIdCount = count($entry) - 1;
+                $mid = ($rowIdCount >> 1) + 1; // Split rowIds in half
 
-            $leftLeaf = BTreeLeafPage::fromEntries($leftEntries);
+                $leftEntry = [$entryKey];
+                $rightEntry = [$entryKey];
+                for ($i = 1; $i <= $rowIdCount; $i++) {
+                    if ($i < $mid) {
+                        $leftEntry[] = $entry[$i];
+                    } else {
+                        $rightEntry[] = $entry[$i];
+                    }
+                }
+                $leftEntries = [1 => $leftEntry];
+                $rightEntries = [1 => $rightEntry];
+            } else {
+                $mid = $n >> 1;
+                // Split into 1-based left and right arrays
+                $leftEntries = [];
+                $rightEntries = [];
+                for ($i = 1; $i <= $mid; $i++) {
+                    $leftEntries[$i] = $entries[$i];
+                }
+                $j = 1;
+                for ($i = $mid + 1; $i <= $n; $i++) {
+                    $rightEntries[$j++] = $entries[$i];
+                }
+            }
+
+            // Reuse left page (already in overlay), create new right page
+            $leaf->setEntries($leftEntries);
+            $leftNum = $leafPageNum ?? $this->allocatePage($leaf);
+
             $rightLeaf = BTreeLeafPage::fromEntries($rightEntries);
+            $rightNum = $this->allocatePage($rightLeaf);
 
-            $leftNum = $this->allocateDirtyPage($leftLeaf);
-            $rightNum = $this->allocateDirtyPage($rightLeaf);
+            // Promote first key of right leaf (1-based)
+            $promoteKey = $rightEntries[1][0];
 
-            // Promote first key of right leaf
-            $promoteKey = $rightEntries[0][0];
-
-            $this->propagateSplit($path, $leafPageNum, $leftNum, $rightNum, $promoteKey);
+            $this->propagateSplit($path, $pathLen - 4, $leftNum, $rightNum, $promoteKey);
         }
     }
 
-    private function findInsertPosition(array $entries, string $key): int
+    /**
+     * Find insert position in 1-based entries array.
+     * Returns 1-based position where key should be inserted.
+     */
+    private function findInsertPosition(array $entries, int $n, string $key): int
     {
-        $lo = 0;
-        $hi = count($entries);
+        $lo = 1;
+        $hi = $n + 1;
         while ($lo < $hi) {
             $mid = ($lo + $hi) >> 1;
             if (strcmp($entries[$mid][0], $key) < 0) {
@@ -1253,85 +1293,141 @@ final class BTreeIndex implements IndexInterface
         return $lo;
     }
 
-    private function propagateSplit(array $path, int $_oldChild, int $leftChild, int $rightChild, string $promoteKey): void
+    /**
+     * Propagate a split up the tree.
+     * Called after a leaf or internal node split to insert the new child pointer.
+     * @param int $pathIdx Index of parent entry in path (pageNum at $pathIdx, childIdx at $pathIdx+1)
+     */
+    private function propagateSplit(array $path, int $pathIdx, int $leftChild, int $rightChild, string $promoteKey): void
     {
-        if (empty($path)) {
-            // Create new root (as dirty page)
-            $root = BTreeInternalPage::fromArrays([$leftChild, $rightChild], [$promoteKey]);
-            $this->rootPage = $this->allocateDirtyPage($root);
+        if ($pathIdx < 0) {
+            // Create new root with the two children
+            $this->currentRoot = BTreeInternalPage::fromArrays([$leftChild, $rightChild], [$promoteKey]);
             return;
         }
 
-        // Pop parent from path
-        [$parentPageNum, $childIndex] = array_pop($path);
-        $parent = $this->getInternalPage($parentPageNum);
-        $children = \array_values($parent->children);
-        $keys = $parent->keys;
+        // Get parent from path (flat: pageNum, childIndex - childIndex is 1-based)
+        $parentPageNum = $path[$pathIdx];
+        $childIndex = $path[$pathIdx + 1]; // 1-based
 
-        // Replace old child with left, insert right after
-        $children[$childIndex] = $leftChild;
-        array_splice($children, $childIndex + 1, 0, [$rightChild]);
-        array_splice($keys, $childIndex, 0, [$promoteKey]);
+        // Get parent for modification
+        if ($parentPageNum === null) {
+            $parent = $this->currentRoot;
+        } else {
+            $parent = $this->getPageForWrite($parentPageNum); // $parentPageNum updated
+        }
 
-        // Check if internal node needs splitting
-        $newParent = BTreeInternalPage::fromArrays($children, $keys);
+        // Insert new child and key (1-based arrays)
+        $oldChildCount = $parent->childCount;
+        $oldKeyCount = $oldChildCount - 1;
+        $newChildren = [];
+        $newKeys = [];
 
-        if (strlen($newParent->asString()) <= self::PAGE_SIZE) {
-            // Fits - allocate dirty page
-            $newParentNum = $this->allocateDirtyPage($newParent);
-            $this->updatePath($path, $parentPageNum, $newParentNum, null, null);
+        // Copy children up to split point, replacing split child with left
+        for ($i = 1; $i < $childIndex; $i++) {
+            $newChildren[$i] = $parent->children[$i];
+        }
+        $newChildren[$childIndex] = $leftChild;
+        $newChildren[$childIndex + 1] = $rightChild;
+        for ($i = $childIndex + 1; $i <= $oldChildCount; $i++) {
+            $newChildren[$i + 1] = $parent->children[$i];
+        }
+
+        // Copy keys, inserting promoteKey at position childIndex
+        for ($i = 1; $i < $childIndex; $i++) {
+            $newKeys[$i] = $parent->keys[$i];
+        }
+        $newKeys[$childIndex] = $promoteKey;
+        for ($i = $childIndex; $i <= $oldKeyCount; $i++) {
+            $newKeys[$i + 1] = $parent->keys[$i];
+        }
+
+        // Update parent with 1-based arrays
+        $parent->children = $newChildren;
+        $parent->childCount = $oldChildCount + 1;
+        $parent->keys = $newKeys;
+
+        if (strlen($parent->asString()) <= self::PAGE_SIZE) {
+            // Fits - page already modified in overlay
+            if ($parentPageNum !== null) {
+                // Update grandparent pointers to new page number
+                $this->updatePath($path, $pathIdx - 2, $parentPageNum);
+            }
         } else {
             // Split internal node
-            $newParent->release();
-            $mid = count($keys) >> 1;
-            $leftKeys = array_slice($keys, 0, $mid);
-            $rightKeys = array_slice($keys, $mid + 1);
-            $leftChildren = array_slice($children, 0, $mid + 1);
-            $rightChildren = array_slice($children, $mid + 1);
-            $splitPromoteKey = $keys[$mid];
+            $newKeyCount = $oldKeyCount + 1;
+            $mid = $newKeyCount >> 1; // 1-based mid key
 
-            $leftPage = BTreeInternalPage::fromArrays($leftChildren, $leftKeys);
-            $rightPage = BTreeInternalPage::fromArrays($rightChildren, $rightKeys);
+            // Left: keys 1..mid-1, children 1..mid
+            // Right: keys mid+1..n, children mid+1..n+1
+            $leftChildren = [];
+            $leftKeys = [];
+            for ($i = 1; $i <= $mid; $i++) {
+                $leftChildren[$i] = $newChildren[$i];
+            }
+            for ($i = 1; $i < $mid; $i++) {
+                $leftKeys[$i] = $newKeys[$i];
+            }
 
-            $leftNum = $this->allocateDirtyPage($leftPage);
-            $rightNum = $this->allocateDirtyPage($rightPage);
+            $rightChildren = [];
+            $rightKeys = [];
+            $j = 1;
+            for ($i = $mid + 1; $i <= $oldChildCount + 1; $i++) {
+                $rightChildren[$j++] = $newChildren[$i];
+            }
+            $j = 1;
+            for ($i = $mid + 1; $i <= $newKeyCount; $i++) {
+                $rightKeys[$j++] = $newKeys[$i];
+            }
 
-            $this->propagateSplit($path, $parentPageNum, $leftNum, $rightNum, $splitPromoteKey);
+            $splitPromoteKey = $newKeys[$mid];
+
+            // Reuse left page (already in overlay), create new right page
+            $parent->children = $leftChildren;
+            $parent->childCount = count($leftChildren);
+            $parent->keys = $leftKeys;
+            $leftNum = $parentPageNum ?? $this->allocatePage($parent);
+
+            $rightPage = new BTreeInternalPage();
+            $rightPage->children = $rightChildren;
+            $rightPage->childCount = count($rightChildren);
+            $rightPage->keys = $rightKeys;
+            $rightNum = $this->allocatePage($rightPage);
+
+            $this->propagateSplit($path, $pathIdx - 2, $leftNum, $rightNum, $splitPromoteKey);
         }
     }
 
-    private function updatePath(array $path, int $_oldChild, int $newChild, ?int $extraChild, ?string $extraKey): void
+    /**
+     * Update parent pointers after a child was replaced.
+     * Walks up the path, updating each internal node's child pointer.
+     * @param int $pathIdx Index of first parent entry to update
+     */
+    private function updatePath(array $path, int $pathIdx, int $newChild): void
     {
-        if (empty($path)) {
-            // We've reached the root level
-            if ($extraChild === null) {
-                $this->rootPage = $newChild;
+        while ($pathIdx >= 0) {
+            $parentPageNum = $path[$pathIdx];
+            $childIndex = $path[$pathIdx + 1]; // 1-based
+
+            // Get parent for modification
+            if ($parentPageNum === null) {
+                $parent = $this->currentRoot;
             } else {
-                // This shouldn't happen - splits are handled in propagateSplit
-                $root = BTreeInternalPage::fromArrays([$newChild, $extraChild], [$extraKey]);
-                $this->rootPage = $this->allocateDirtyPage($root);
+                $parent = $this->getPageForWrite($parentPageNum); // $parentPageNum updated
             }
-            return;
+
+            // Replace child pointer directly (1-based array)
+            $parent->children[$childIndex] = $newChild;
+
+            if ($parentPageNum === null) {
+                // Root modified in place, done
+                return;
+            }
+
+            // Continue up with new page number
+            $newChild = $parentPageNum;
+            $pathIdx -= 2;
         }
-
-        // Pop parent
-        [$parentPageNum, $childIndex] = array_pop($path);
-        $parent = $this->getInternalPage($parentPageNum);
-        $children = \array_values($parent->children);
-        $keys = $parent->keys;
-
-        // Replace child pointer
-        $children[$childIndex] = $newChild;
-
-        if ($extraChild !== null) {
-            array_splice($children, $childIndex + 1, 0, [$extraChild]);
-            array_splice($keys, $childIndex, 0, [$extraKey]);
-        }
-
-        $newParent = BTreeInternalPage::fromArrays($children, $keys);
-        $newParentNum = $this->allocateDirtyPage($newParent);
-
-        $this->updatePath($path, $parentPageNum, $newParentNum, null, null);
     }
 
     // =========================================================================
@@ -1340,13 +1436,24 @@ final class BTreeIndex implements IndexInterface
 
     private function deleteFromTree(string $key, int $rowId, array $path): void
     {
-        // Get leaf from path
-        [$leafPageNum, $_] = array_pop($path);
-        $entries = $this->getLeafPage($leafPageNum)->toArray();
+        // Get leaf from path - last two elements are [leafPageNum, -1]
+        $pathLen = count($path);
+        $leafPageNum = $path[$pathLen - 2];
 
-        // Find key and remove rowId (flat format: [key, id1, id2, ...])
+        // Get leaf for modification
+        if ($leafPageNum === null) {
+            $leaf = $this->currentRoot;
+        } else {
+            $leaf = $this->getPageForWrite($leafPageNum); // $leafPageNum updated
+        }
+        $entries = $leaf->toArray(); // 1-based
+        $n = count($entries);
+
+        // Find key and remove rowId (1-based entries, each entry: [key, id1, id2, ...])
         $found = false;
-        foreach ($entries as $i => $entry) {
+        $removeIdx = 0;
+        for ($i = 1; $i <= $n; $i++) {
+            $entry = $entries[$i];
             if ($entry[0] === $key) {
                 // Search for rowId in positions 1, 2, 3...
                 $rowIdCount = count($entry) - 1;
@@ -1361,8 +1468,8 @@ final class BTreeIndex implements IndexInterface
                         }
 
                         if (count($newEntry) === 1) {
-                            // No more rowIds - remove entire entry
-                            array_splice($entries, $i, 1);
+                            // No more rowIds - mark for removal
+                            $removeIdx = $i;
                         } else {
                             $entries[$i] = $newEntry;
                         }
@@ -1379,510 +1486,24 @@ final class BTreeIndex implements IndexInterface
             return; // Key/rowId not found, nothing to do
         }
 
-        // Create new leaf (even if empty - lazy cleanup via compact)
-        $leaf = BTreeLeafPage::fromEntries($entries);
-        $newLeafNum = $this->allocateDirtyPage($leaf);
-
-        $this->updatePath($path, $leafPageNum, $newLeafNum, null, null);
-    }
-
-    // =========================================================================
-    // Transaction support helpers
-    // =========================================================================
-
-    /**
-     * Merge buffer with existing tree data.
-     * @return array<string, int[]> Merged key => rowIds
-     */
-    private function mergeBufferWithTree(): array
-    {
-        $merged = [];
-
-        // First, collect all data from disk
-        if ($this->rootPage !== 0) {
-            $this->collectAllEntries($this->rootPage, $merged);
-        }
-
-        // Apply deletes
-        foreach ($this->deleteBuffer as $key => $rowIds) {
-            if (isset($merged[$key])) {
-                $merged[$key] = array_values(array_diff($merged[$key], array_keys($rowIds)));
-                if (empty($merged[$key])) {
-                    unset($merged[$key]);
+        // Remove entry if marked (rebuild 1-based array)
+        if ($removeIdx > 0) {
+            $newEntries = [];
+            $j = 1;
+            for ($i = 1; $i <= $n; $i++) {
+                if ($i !== $removeIdx) {
+                    $newEntries[$j++] = $entries[$i];
                 }
             }
+            $entries = $newEntries;
         }
 
-        // Apply inserts
-        foreach ($this->buffer as $key => $packed) {
-            $rowIds = array_values(unpack('P*', $packed));
-            // Remove any that were also deleted in same transaction
-            if (isset($this->deleteBuffer[$key])) {
-                $rowIds = array_values(array_diff($rowIds, array_keys($this->deleteBuffer[$key])));
-            }
-            if (!empty($rowIds)) {
-                $merged[$key] = array_merge($merged[$key] ?? [], $rowIds);
-            }
-        }
-
-        return $merged;
-    }
-
-    /**
-     * Recursively collect all entries from the tree.
-     */
-    private function collectAllEntries(int $pageNum, array &$merged): void
-    {
-        $page = $this->getCachedPage($pageNum);
-
-        if ($page instanceof BTreeLeafPage) {
-            // Flat format: [0 => key, 1 => id1, 2 => id2, ...]
-            $page->buildEntries();
-            $entries = $page->entries;
-            $entryCount = $page->count;
-
-            for ($e = 0; $e < $entryCount; $e++) {
-                $entry = $entries[$e];
-                $key = $entry[0];
-                $rowIdCount = count($entry) - 1;
-                if (!isset($merged[$key])) {
-                    $merged[$key] = [];
-                }
-                for ($i = 1; $i <= $rowIdCount; $i++) {
-                    $merged[$key][] = $entry[$i];
-                }
-            }
-            return;
-        }
-
-        // Internal node - recurse into children
-        foreach ($page->children as $child) {
-            $this->collectAllEntries($child, $merged);
-        }
-    }
-
-    /**
-     * Rebuild tree from merged data using bulk loading.
-     * @param array<string, int[]> $data key => rowIds
-     */
-    private function rebuildTree(array $data): void
-    {
-        if (empty($data)) {
-            $this->rootPage = 0;
-            return;
-        }
-
-        // Sort keys
-        ksort($data, SORT_STRING);
-
-        // Convert to flat entries format: [key, rowId1, rowId2, ...]
-        $entries = [];
-        foreach ($data as $key => $rowIds) {
-            $entries[] = [$key, ...$rowIds];
-        }
-
-        // Build tree bottom-up for optimal structure
-        $this->rootPage = $this->bulkBuildTree($entries);
-    }
-
-    /**
-     * Build balanced B-tree from sorted entries using bulk loading.
-     * @param array<array<int, string|int>> $entries Sorted flat format [[key, rowId1, ...], ...]
-     * @return int Root page number
-     */
-    private function bulkBuildTree(array $entries): int
-    {
-        // First, split any entries that have too many rowIds to fit in a page
-        // Max rowIds per entry: (PAGE_SIZE - header - key overhead) / 8 bytes per rowId
-        // Conservative: ~400 rowIds per entry to leave room for key and page overhead
-        $maxRowIdsPerEntry = 400;
-        $splitEntries = [];
-
-        foreach ($entries as $entry) {
-            $key = $entry[0];
-            $rowIdCount = count($entry) - 1;
-            if ($rowIdCount <= $maxRowIdsPerEntry) {
-                $splitEntries[] = $entry;
-            } else {
-                // Split into multiple entries with same key
-                for ($i = 1; $i <= $rowIdCount; $i += $maxRowIdsPerEntry) {
-                    $chunk = [$key];
-                    for ($j = $i; $j < $i + $maxRowIdsPerEntry && $j <= $rowIdCount; $j++) {
-                        $chunk[] = $entry[$j];
-                    }
-                    $splitEntries[] = $chunk;
-                }
-            }
-        }
-        $entries = $splitEntries;
-
-        // Calculate max entries per leaf (approximate)
-        // Leave some headroom for variable-length keys
-        $maxPerLeaf = 50; // Conservative estimate
-
-        // Create leaf pages
-        $leafPages = [];
-        $leafKeys = []; // First key of each leaf (for building internal nodes)
-
-        for ($i = 0; $i < count($entries); $i += $maxPerLeaf) {
-            $chunk = array_slice($entries, $i, $maxPerLeaf);
-
-            // Check if chunk fits in a page, split if needed
-            $leaf = BTreeLeafPage::fromEntries($chunk);
-            $page = $leaf->asString();
-            while (strlen($page) > self::PAGE_SIZE && count($chunk) > 1) {
-                $leaf->release();
-                $chunk = array_slice($chunk, 0, (int)(count($chunk) * 0.8));
-                $leaf = BTreeLeafPage::fromEntries($chunk);
-                $page = $leaf->asString();
-            }
-
-            $pageNum = $this->appendPage($page);
-            $leaf->release();
-            $leafPages[] = $pageNum;
-            $leafKeys[] = $chunk[0][0];
-
-            // Adjust i to account for actual chunk size
-            $i = $i + count($chunk) - $maxPerLeaf;
-        }
-
-        if (count($leafPages) === 1) {
-            return $leafPages[0];
-        }
-
-        // Build internal nodes bottom-up
-        return $this->buildInternalLevels($leafPages, $leafKeys);
-    }
-
-    /**
-     * Build internal node levels from child pages.
-     * @param int[] $children Child page numbers
-     * @param string[] $keys First key of each child (same length as $children)
-     */
-    private function buildInternalLevels(array $children, array $keys): int
-    {
-        while (count($children) > 1) {
-            $newChildren = [];
-            $newKeys = [];
-
-            // Max keys per internal node (approximate)
-            $maxPerNode = 100;
-
-            for ($i = 0; $i < count($children);) {
-                $nodeFirstKey = $keys[$i]; // First key of this subtree
-                $nodeChildren = [$children[$i]];
-                $nodeKeys = [];
-                $i++;
-
-                while ($i < count($children) && count($nodeKeys) < $maxPerNode) {
-                    // Separator key is the first key of the next child
-                    $nodeKeys[] = $keys[$i];
-                    $nodeChildren[] = $children[$i];
-                    $i++;
-
-                    // Check if page fits
-                    $node = BTreeInternalPage::fromArrays($nodeChildren, $nodeKeys);
-                    $pageStr = $node->asString();
-                    if (strlen($pageStr) > self::PAGE_SIZE) {
-                        // Back up one
-                        $node->release();
-                        array_pop($nodeChildren);
-                        array_pop($nodeKeys);
-                        $i--;
-                        break;
-                    }
-                    $node->release();
-                }
-
-                $node = BTreeInternalPage::fromArrays($nodeChildren, $nodeKeys);
-                $pageNum = $this->appendPage($node->asString());
-                $node->release();
-                $newChildren[] = $pageNum;
-                $newKeys[] = $nodeFirstKey; // Propagate first key of this subtree
-            }
-
-            $children = $newChildren;
-            $keys = $newKeys;
-        }
-
-        return $children[0];
-    }
-
-    /**
-     * Range query merging disk and buffer data with streaming merge.
-     * Does not load entire result set into memory.
-     */
-    private function rangeMerged(?string $start, ?string $end, bool $reverse): \Generator
-    {
-        // Create disk iterator with delete filtering
-        $diskIter = $this->diskRangeIterator($start, $end, $reverse);
-
-        // Create buffer iterator (sorted)
-        $bufferIter = $this->bufferRangeIterator($start, $end, $reverse);
-
-        // Streaming merge of two sorted iterators
-        yield from $this->mergeIterators($diskIter, $bufferIter, $reverse);
-    }
-
-    /**
-     * Iterator over disk entries with delete filtering.
-     */
-    private function diskRangeIterator(?string $start, ?string $end, bool $reverse): \Generator
-    {
-        if ($this->rootPage === 0) {
-            return;
-        }
-
-        $source = $reverse
-            ? $this->rangeReverseWithKeys($start, $end)
-            : $this->rangeForwardWithKeys($start, $end);
-
-        foreach ($source as [$key, $id]) {
-            // Filter deletes from buffer
-            if (!isset($this->deleteBuffer[$key][$id])) {
-                yield [$key, $id];
-            }
-        }
-    }
-
-    /**
-     * Iterator over buffer entries in sorted order.
-     */
-    private function bufferRangeIterator(?string $start, ?string $end, bool $reverse): \Generator
-    {
-        // Get keys in range, sorted
-        $keys = array_keys($this->buffer);
-        sort($keys, SORT_STRING);
-        if ($reverse) {
-            $keys = array_reverse($keys);
-        }
-
-        foreach ($keys as $key) {
-            if ($start !== null && strcmp($key, $start) < 0) continue;
-            if ($end !== null && strcmp($key, $end) > 0) continue;
-
-            $rowIds = array_values(unpack('P*', $this->buffer[$key]));
-            $deletedIds = $this->deleteBuffer[$key] ?? [];
-
-            if ($reverse) {
-                $rowIds = array_reverse($rowIds);
-            }
-
-            foreach ($rowIds as $id) {
-                if (!isset($deletedIds[$id])) {
-                    yield [$key, $id];
-                }
-            }
-        }
-    }
-
-    /**
-     * Merge two sorted [key, id] iterators maintaining sort order.
-     */
-    private function mergeIterators(\Generator $a, \Generator $b, bool $reverse): \Generator
-    {
-        $aValid = $a->valid();
-        $bValid = $b->valid();
-
-        while ($aValid && $bValid) {
-            $aVal = $a->current();
-            $bVal = $b->current();
-
-            // Compare [key, id] tuples
-            $cmp = strcmp($aVal[0], $bVal[0]);
-            if ($cmp === 0) {
-                $cmp = $aVal[1] <=> $bVal[1];
-            }
-            if ($reverse) {
-                $cmp = -$cmp;
-            }
-
-            if ($cmp <= 0) {
-                yield $aVal[1];
-                $a->next();
-                $aValid = $a->valid();
-            } else {
-                yield $bVal[1];
-                $b->next();
-                $bValid = $b->valid();
-            }
-        }
-
-        // Drain remaining from either iterator
-        while ($aValid) {
-            yield $a->current()[1];
-            $a->next();
-            $aValid = $a->valid();
-        }
-
-        while ($bValid) {
-            yield $b->current()[1];
-            $b->next();
-            $bValid = $b->valid();
-        }
-    }
-
-    /**
-     * Range forward yielding [key, rowId] pairs for internal use.
-     */
-    private function rangeForwardWithKeys(?string $start, ?string $end): \Generator
-    {
-        $startKey = $start ?? '';
-        $pageNum = $this->rootPage;
-        $stack = [];
-
-        while (true) {
-            $page = $this->getCachedPage($pageNum);
-            if ($page instanceof BTreeLeafPage) {
-                $leaf = $page;
-                break;
-            }
-
-            $childIdx = $this->findChildIndex($page->keys, $startKey);
-            $stack[] = [$pageNum, $childIdx, $page];
-            $pageNum = $page->children[$childIdx + 1];
-        }
-
-        while (true) {
-            $leaf->buildEntries();
-            $entries = $leaf->entries;
-            $entryCount = $leaf->count;
-
-            for ($e = 0; $e < $entryCount; $e++) {
-                $entry = $entries[$e];
-                $key = $entry[0];
-                if ($start !== null && strcmp($key, $start) < 0) {
-                    continue;
-                }
-                if ($end !== null && strcmp($key, $end) > 0) {
-                    $leaf->release();
-                    return;
-                }
-
-                $rowIdCount = count($entry) - 1;
-                for ($i = 1; $i <= $rowIdCount; $i++) {
-                    yield [$key, $entry[$i]];
-                }
-            }
-
-            $leaf->release();
-
-            $found = false;
-            while (!empty($stack)) {
-                [$parentNum, $childIdx, $parentPage] = array_pop($stack);
-
-                if ($childIdx + 1 < $parentPage->childCount) {
-                    $childIdx++;
-                    $stack[] = [$parentNum, $childIdx, $parentPage];
-                    $pageNum = $parentPage->children[$childIdx + 1];
-
-                    while (true) {
-                        $page = $this->getCachedPage($pageNum);
-                        if ($page instanceof BTreeLeafPage) {
-                            $leaf = $page;
-                            break;
-                        }
-
-                        $stack[] = [$pageNum, 0, $page];
-                        $pageNum = $page->children[1];
-                    }
-
-                    $found = true;
-                    break;
-                }
-            }
-
-            if (!$found) {
-                return;
-            }
-        }
-    }
-
-    /**
-     * Range reverse yielding [key, rowId] pairs for internal use.
-     */
-    private function rangeReverseWithKeys(?string $start, ?string $end): \Generator
-    {
-        $pageNum = $this->rootPage;
-        $stack = [];
-
-        // Navigate to last relevant leaf
-        while (true) {
-            $page = $this->getCachedPage($pageNum);
-            if ($page instanceof BTreeLeafPage) {
-                $leaf = $page;
-                break;
-            }
-
-            // Find rightmost child that could contain keys <= end
-            $childIdx = $page->childCount - 1;
-            if ($end !== null) {
-                for ($i = count($page->keys) - 1; $i >= 0; $i--) {
-                    if (strcmp($page->keys[$i], $end) <= 0) {
-                        $childIdx = $i + 1;
-                        break;
-                    }
-                    $childIdx = $i;
-                }
-            }
-
-            $stack[] = [$pageNum, $childIdx, $page];
-            $pageNum = $page->children[$childIdx + 1];
-        }
-
-        while (true) {
-            $leaf->buildEntries();
-            $entries = $leaf->entries;
-            $entryCount = $leaf->count;
-
-            for ($e = $entryCount - 1; $e >= 0; $e--) {
-                $entry = $entries[$e];
-                $key = $entry[0];
-                if ($end !== null && strcmp($key, $end) > 0) {
-                    continue;
-                }
-                if ($start !== null && strcmp($key, $start) < 0) {
-                    $leaf->release();
-                    return;
-                }
-
-                $rowIdCount = count($entry) - 1;
-                for ($j = $rowIdCount; $j >= 1; $j--) {
-                    yield [$key, $entry[$j]];
-                }
-            }
-
-            $leaf->release();
-
-            $found = false;
-            while (!empty($stack)) {
-                [$parentNum, $childIdx, $parentPage] = array_pop($stack);
-
-                if ($childIdx > 0) {
-                    $childIdx--;
-                    $stack[] = [$parentNum, $childIdx, $parentPage];
-                    $pageNum = $parentPage->children[$childIdx + 1];
-
-                    while (true) {
-                        $page = $this->getCachedPage($pageNum);
-                        if ($page instanceof BTreeLeafPage) {
-                            $leaf = $page;
-                            break;
-                        }
-
-                        $lastChild = $page->childCount - 1;
-                        $stack[] = [$pageNum, $lastChild, $page];
-                        $pageNum = $page->children[$lastChild + 1];
-                    }
-
-                    $found = true;
-                    break;
-                }
-            }
-
-            if (!$found) {
-                return;
-            }
+        // Update leaf in place
+        $leaf->setEntries($entries);
+
+        if ($leafPageNum !== null) {
+            // Update parent pointers to new page number
+            $this->updatePath($path, $pathLen - 4, $leafPageNum);
         }
     }
 
@@ -1893,36 +1514,36 @@ final class BTreeIndex implements IndexInterface
     private function rangeForward(?string $start, ?string $end): \Generator
     {
         $startKey = $start ?? "\x00";
-        $pageNum = $this->rootPage;
+        $page = $this->currentRoot;
         $stack = [];
+        $stackTop = 0;
+        $leafPageNum = null; // null = root is the leaf, don't release
 
-        // Navigate to first relevant leaf
-        while (true) {
-            $page = $this->getCachedPage($pageNum);
-            if ($page instanceof BTreeLeafPage) {
-                $leaf = $page;
-                break;
-            }
-
-            $childIdx = $this->findChildIndex($page->keys, $startKey);
-            $stack[] = [$pageNum, $childIdx, $page];
-            $pageNum = $page->children[$childIdx + 1];
+        // Navigate to first relevant leaf (childIdx is 1-based)
+        while (!($page instanceof BTreeLeafPage)) {
+            $childIdx = $this->findChildIndex($page->keys, $page->childCount - 1, $startKey);
+            $leafPageNum = $page->children[$childIdx];
+            $stack[$stackTop++] = $leafPageNum;
+            $stack[$stackTop++] = $childIdx;
+            $stack[$stackTop++] = $page;
+            $page = $this->getPage($leafPageNum);
         }
+        $leaf = $page;
 
-        // Iterate through leaves (flat format: [key, id1, id2, ...])
+        // Iterate through leaves (entries are 1-based: [1 => [key, id1, ...], ...])
         while (true) {
             $leaf->buildEntries();
             $entries = $leaf->entries;
             $entryCount = $leaf->count;
 
-            for ($e = 0; $e < $entryCount; $e++) {
+            for ($e = 1; $e <= $entryCount; $e++) {
                 $entry = $entries[$e];
                 $key = $entry[0];
                 if ($start !== null && strcmp($key, $start) < 0) {
                     continue;
                 }
                 if ($end !== null && strcmp($key, $end) > 0) {
-                    $leaf->release();
+                    if ($leafPageNum !== null) $this->releaseLeaf($leaf, $leafPageNum);
                     return;
                 }
 
@@ -1933,28 +1554,34 @@ final class BTreeIndex implements IndexInterface
             }
 
             // Release current leaf before getting next
-            $leaf->release();
+            if ($leafPageNum !== null) $this->releaseLeaf($leaf, $leafPageNum);
 
-            // Find next leaf via backtracking
+            // Find next leaf via backtracking (childIdx is 1-based)
             $found = false;
-            while (!empty($stack)) {
-                [$parentNum, $childIdx, $parentPage] = array_pop($stack);
+            while ($stackTop > 0) {
+                $parentPage = $stack[--$stackTop];
+                $childIdx = $stack[--$stackTop];
+                $parentNum = $stack[--$stackTop];
 
-                if ($childIdx + 1 < $parentPage->childCount) {
+                if ($childIdx < $parentPage->childCount) {
                     $childIdx++;
-                    $stack[] = [$parentNum, $childIdx, $parentPage];
-                    $pageNum = $parentPage->children[$childIdx + 1];
+                    $stack[$stackTop++] = $parentNum;
+                    $stack[$stackTop++] = $childIdx;
+                    $stack[$stackTop++] = $parentPage;
+                    $leafPageNum = $parentPage->children[$childIdx];
 
                     // Navigate down to leftmost leaf
                     while (true) {
-                        $page = $this->getCachedPage($pageNum);
+                        $page = $this->getPage($leafPageNum);
                         if ($page instanceof BTreeLeafPage) {
                             $leaf = $page;
                             break;
                         }
 
-                        $stack[] = [$pageNum, 0, $page];
-                        $pageNum = $page->children[1];
+                        $stack[$stackTop++] = $leafPageNum;
+                        $stack[$stackTop++] = 1;
+                        $stack[$stackTop++] = $page;
+                        $leafPageNum = $page->children[1];
                     }
 
                     $found = true;
@@ -1970,21 +1597,18 @@ final class BTreeIndex implements IndexInterface
 
     private function rangeReverse(?string $start, ?string $end): \Generator
     {
-        $pageNum = $this->rootPage;
+        $page = $this->currentRoot;
         $stack = [];
+        $stackTop = 0;
+        $leafPageNum = null; // null = root is the leaf, don't release
 
-        // Navigate to last relevant leaf
-        while (true) {
-            $page = $this->getCachedPage($pageNum);
-            if ($page instanceof BTreeLeafPage) {
-                $leaf = $page;
-                break;
-            }
-
+        // Navigate to last relevant leaf (childIdx is 1-based)
+        while (!($page instanceof BTreeLeafPage)) {
             // Find rightmost child that could contain keys <= end
-            $childIdx = $page->childCount - 1;
+            $childIdx = $page->childCount; // Start with rightmost (1-based)
             if ($end !== null) {
-                for ($i = count($page->keys) - 1; $i >= 0; $i--) {
+                $keyCount = $page->childCount - 1;
+                for ($i = $keyCount; $i >= 1; $i--) {
                     if (strcmp($page->keys[$i], $end) <= 0) {
                         $childIdx = $i + 1;
                         break;
@@ -1993,24 +1617,28 @@ final class BTreeIndex implements IndexInterface
                 }
             }
 
-            $stack[] = [$pageNum, $childIdx, $page];
-            $pageNum = $page->children[$childIdx + 1];
+            $leafPageNum = $page->children[$childIdx];
+            $stack[$stackTop++] = $leafPageNum;
+            $stack[$stackTop++] = $childIdx;
+            $stack[$stackTop++] = $page;
+            $page = $this->getPage($leafPageNum);
         }
+        $leaf = $page;
 
-        // Iterate through leaves in reverse (flat format: [key, id1, id2, ...])
+        // Iterate through leaves in reverse (entries are 1-based)
         while (true) {
             $leaf->buildEntries();
             $entries = $leaf->entries;
             $entryCount = $leaf->count;
 
-            for ($e = $entryCount - 1; $e >= 0; $e--) {
+            for ($e = $entryCount; $e >= 1; $e--) {
                 $entry = $entries[$e];
                 $key = $entry[0];
                 if ($end !== null && strcmp($key, $end) > 0) {
                     continue;
                 }
                 if ($start !== null && strcmp($key, $start) < 0) {
-                    $leaf->release();
+                    if ($leafPageNum !== null) $this->releaseLeaf($leaf, $leafPageNum);
                     return;
                 }
 
@@ -2021,29 +1649,35 @@ final class BTreeIndex implements IndexInterface
             }
 
             // Release current leaf before getting next
-            $leaf->release();
+            if ($leafPageNum !== null) $this->releaseLeaf($leaf, $leafPageNum);
 
-            // Find previous leaf via backtracking
+            // Find previous leaf via backtracking (childIdx is 1-based)
             $found = false;
-            while (!empty($stack)) {
-                [$parentNum, $childIdx, $parentPage] = array_pop($stack);
+            while ($stackTop > 0) {
+                $parentPage = $stack[--$stackTop];
+                $childIdx = $stack[--$stackTop];
+                $parentNum = $stack[--$stackTop];
 
-                if ($childIdx > 0) {
+                if ($childIdx > 1) {
                     $childIdx--;
-                    $stack[] = [$parentNum, $childIdx, $parentPage];
-                    $pageNum = $parentPage->children[$childIdx + 1];
+                    $stack[$stackTop++] = $parentNum;
+                    $stack[$stackTop++] = $childIdx;
+                    $stack[$stackTop++] = $parentPage;
+                    $leafPageNum = $parentPage->children[$childIdx];
 
                     // Navigate down to rightmost leaf
                     while (true) {
-                        $page = $this->getCachedPage($pageNum);
+                        $page = $this->getPage($leafPageNum);
                         if ($page instanceof BTreeLeafPage) {
                             $leaf = $page;
                             break;
                         }
 
-                        $lastChild = $page->childCount - 1;
-                        $stack[] = [$pageNum, $lastChild, $page];
-                        $pageNum = $page->children[$lastChild + 1];
+                        $lastChild = $page->childCount; // 1-based last child
+                        $stack[$stackTop++] = $leafPageNum;
+                        $stack[$stackTop++] = $lastChild;
+                        $stack[$stackTop++] = $page;
+                        $leafPageNum = $page->children[$lastChild];
                     }
 
                     $found = true;
@@ -2075,7 +1709,7 @@ final class BTreeIndex implements IndexInterface
             return $pageMap[$pageNum];
         }
 
-        $page = $this->getCachedPage($pageNum);
+        $page = $this->getPage($pageNum);
 
         if ($page instanceof BTreeLeafPage) {
             // Leaf - copy raw bytes directly
@@ -2105,7 +1739,6 @@ final class BTreeIndex implements IndexInterface
         $offset = $newPageNum * self::PAGE_SIZE;
         fseek($temp, $offset);
         fwrite($temp, pack('a' . self::PAGE_SIZE, $newNode->asString()));
-        $newNode->release();
 
         return $newPageNum;
     }

@@ -7,6 +7,8 @@ require __DIR__ . '/../../../ensure-autoloader.php';
 
 use mini\Test;
 use mini\Table\Index\BTreeIndex;
+use mini\Table\Index\BTreeLeafPage;
+use mini\Table\Index\BTreeInternalPage;
 
 $test = new class extends Test {
 
@@ -709,6 +711,71 @@ $test = new class extends Test {
         $index->close();
     }
 
+    public function testHighCardinalityIncrementalCommit(): void
+    {
+        // This tests the incremental commit path (not bulk load)
+        // which had a bug causing duplicate/missing entries at ~3000+ rowIds
+        $path = $this->indexPath('high-card-incremental');
+
+        $index = new BTreeIndex($path);
+        $index->begin();
+        for ($i = 0; $i < 3500; $i++) {
+            $index->insert('single_key', $i);
+        }
+        $index->commit();
+
+        $result = iterator_to_array($index->eq('single_key'));
+        $unique = array_unique($result);
+
+        // Must have exactly 3500 unique values
+        $this->assertSame(3500, count($result), "Total count mismatch");
+        $this->assertSame(3500, count($unique), "Unique count mismatch - duplicates detected");
+
+        // Verify all expected values are present
+        sort($result);
+        $this->assertSame(range(0, 3499), $result);
+
+        $index->close();
+    }
+
+    public function testHighCardinalityIncrementalCommitVariousSizes(): void
+    {
+        // Test multiple sizes to catch edge cases around page splits
+        foreach ([500, 1000, 2000, 3000, 3010, 4000, 5000] as $n) {
+            $path = $this->indexPath("high-card-$n");
+
+            $index = new BTreeIndex($path);
+            $index->begin();
+            for ($i = 0; $i < $n; $i++) {
+                $index->insert('key', $i);
+            }
+            $index->commit();
+
+            $result = iterator_to_array($index->eq('key'));
+            $this->assertSame($n, count($result), "Size $n: total count mismatch");
+            $this->assertSame($n, count(array_unique($result)), "Size $n: duplicates detected");
+
+            $index->close();
+        }
+    }
+
+    public function testHighCardinalitySingleWriteMode(): void
+    {
+        // Test single-write mode (no explicit transaction) with high cardinality
+        $path = $this->indexPath('high-card-single-write');
+
+        $index = new BTreeIndex($path);
+        for ($i = 0; $i < 1000; $i++) {
+            $index->insert('key', $i);
+        }
+
+        $result = iterator_to_array($index->eq('key'));
+        $this->assertSame(1000, count($result));
+        $this->assertSame(1000, count(array_unique($result)));
+
+        $index->close();
+    }
+
     // =========================================================================
     // Order verification
     // =========================================================================
@@ -957,6 +1024,127 @@ $test = new class extends Test {
         $this->assertSame(range(0, 99), $results);
 
         $index->close();
+    }
+
+    // =========================================================================
+    // Binary format round-trip tests
+    // =========================================================================
+
+    public function testLeafPageBinaryRoundTrip(): void
+    {
+        // NOTE: we intentionally test the leaf format directly to catch header packing bugs.
+        // We must pad to a full page because fromRaw() expects it to be in-page layout.
+        $PAGE_SIZE = 4096;
+
+        // Entries are 1-based
+        $entries = [
+            1 => ['a', 1, 2, 3],
+            2 => ['b', 10],
+            3 => ["\x00\x01\xff", 999],   // binary-ish key
+            4 => [str_repeat('k', 50), 7, 8],
+        ];
+
+        $leaf = BTreeLeafPage::fromEntries($entries);
+        $pageBody = $leaf->asString();
+        $leaf->release();
+
+        // Pad to full page like appendPage() does
+        $page = pack('a' . $PAGE_SIZE, $pageBody);
+
+        $parsed = BTreeLeafPage::fromRaw($page);
+
+        // Basic invariants
+        $this->assertSame(count($entries), $parsed->count);
+
+        // Validate keys via getKeyAt() (key-only parse path, 1-based)
+        for ($i = 1; $i <= $parsed->count; $i++) {
+            $this->assertSame($entries[$i][0], $parsed->getKeyAt($i));
+        }
+
+        // Validate full entries (rowIds + key) via getEntry() (1-based)
+        for ($i = 1; $i <= $parsed->count; $i++) {
+            $entry = $parsed->getEntry($i);
+
+            $this->assertSame($entries[$i][0], $entry[0]);
+
+            $expectedRowIds = array_slice($entries[$i], 1);
+            $actualRowIds = [];
+            for ($j = 1; $j <= count($entry) - 1; $j++) {
+                $actualRowIds[] = $entry[$j];
+            }
+            $this->assertSame($expectedRowIds, $actualRowIds);
+        }
+    }
+
+    public function testInternalPageBinaryRoundTripAndIndexingSemantics(): void
+    {
+        $PAGE_SIZE = 4096;
+
+        // Build using fromArrays(): input is 0-based, converted to 1-based internally
+        $children0 = [11, 22, 33, 44];
+        $keys0 = ['b', 'c', 'd']; // n keys => n+1 children
+
+        $node = BTreeInternalPage::fromArrays($children0, $keys0);
+        $pageBody = $node->asString();
+
+        $page = pack('a' . $PAGE_SIZE, $pageBody);
+
+        // Parse back from raw bytes: both children and keys are 1-based
+        $parsed = BTreeInternalPage::fromRaw($page);
+
+        $this->assertSame(count($children0), $parsed->childCount);
+        // Keys are now 1-based after fromRaw
+        $this->assertSame([1 => 'b', 2 => 'c', 3 => 'd'], $parsed->keys);
+
+        // Children from unpack are 1-based
+        $this->assertSame($children0[0], $parsed->children[1]);
+        $this->assertSame($children0[1], $parsed->children[2]);
+        $this->assertSame($children0[2], $parsed->children[3]);
+        $this->assertSame($children0[3], $parsed->children[4]);
+
+        // Index 0 should not exist in the unpacked arrays (1-based)
+        $this->assertFalse(isset($parsed->children[0]));
+        $this->assertFalse(isset($parsed->keys[0]));
+    }
+
+    public function testPackPointerSizeAssumptionIsEightBytes(): void
+    {
+        // Your page layout math assumes 8 bytes per rowId/child.
+        // This is only safe if pack('P', ...) is 8 bytes on this platform.
+        $this->assertSame(8, strlen(pack('P', 1)));
+    }
+
+    public function testLeafHeaderOffsetsMatchExpectedHeaderSize(): void
+    {
+        $PAGE_SIZE = 4096;
+
+        // Entries are 1-based
+        $entries = [
+            1 => ['a', 1],
+            2 => ['b', 2],
+        ];
+
+        $leaf = BTreeLeafPage::fromEntries($entries);
+        $pageBody = $leaf->asString();
+        $leaf->release();
+
+        $page = pack('a' . $PAGE_SIZE, $pageBody);
+
+        $parsed = BTreeLeafPage::fromRaw($page);
+
+        $n = $parsed->count;
+
+        // Header is: type(1) + count(2) + offsets((n+1)*2) + rowIdCounts(n*2)
+        $expectedHeaderSize = 3 + ($n + 1) * 2 + $n * 2;
+
+        // meta[1] is the first entry offset; it should point exactly to header end
+        $this->assertSame($expectedHeaderSize, $parsed->meta[1]);
+
+        // end marker meta[n+1] should be <= PAGE_SIZE and >= header
+        $this->assertGreaterThanOrEqual($expectedHeaderSize, $parsed->meta[$n + 1]);
+        $this->assertLessThanOrEqual($PAGE_SIZE, $parsed->meta[$n + 1]);
+
+        $parsed->release();
     }
 };
 
