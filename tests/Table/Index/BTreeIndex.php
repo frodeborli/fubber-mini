@@ -39,6 +39,22 @@ $test = new class extends Test {
         return $this->testDir . '/' . $name . '-' . self::$testNum . '.btree';
     }
 
+    /**
+     * Helper to create a leaf page from entries for testing.
+     */
+    private function leafFromEntries(array $inputEntries): BTreeLeafPage
+    {
+        $leaf = BTreeLeafPage::fromPool();
+        $n = count($inputEntries);
+        for ($i = 0; $i < $n; $i++) {
+            $leaf->entries[$i] = $inputEntries[$i];
+        }
+        $leaf->count = $n;
+        $leaf->entriesBuilt = true;
+        $leaf->rebuildMeta();
+        return $leaf;
+    }
+
     // =========================================================================
     // Basic operations
     // =========================================================================
@@ -1038,14 +1054,13 @@ $test = new class extends Test {
 
         // Entries are list format: [null, entry1, entry2, ...]
         $entries = [
-            null,
             ['a', 1, 2, 3],
             ['b', 10],
             ["\x00\x01\xff", 999],   // binary-ish key
             [str_repeat('k', 50), 7, 8],
         ];
 
-        $leaf = BTreeLeafPage::fromEntries($entries);
+        $leaf = $this->leafFromEntries($entries);
         $pageBody = $leaf->asString();
         $leaf->release();
 
@@ -1054,16 +1069,16 @@ $test = new class extends Test {
 
         $parsed = BTreeLeafPage::fromRaw($page);
 
-        // Basic invariants (count excludes null at [0])
-        $this->assertSame(count($entries) - 1, $parsed->count);
+        // Basic invariants (0-based)
+        $this->assertSame(count($entries), $parsed->count);
 
-        // Validate keys via getKeyAt() (key-only parse path, 1-based)
-        for ($i = 1; $i <= $parsed->count; $i++) {
+        // Validate keys via getKeyAt() (key-only parse path, 0-based)
+        for ($i = 0; $i < $parsed->count; $i++) {
             $this->assertSame($entries[$i][0], $parsed->getKeyAt($i));
         }
 
-        // Validate full entries (rowIds + key) via getEntry() (1-based)
-        for ($i = 1; $i <= $parsed->count; $i++) {
+        // Validate full entries (rowIds + key) via getEntry() (0-based)
+        for ($i = 0; $i < $parsed->count; $i++) {
             $entry = $parsed->getEntry($i);
 
             $this->assertSame($entries[$i][0], $entry[0]);
@@ -1081,7 +1096,7 @@ $test = new class extends Test {
     {
         $PAGE_SIZE = 4096;
 
-        // Build using fromArrays(): input is 0-based, converted to list format internally
+        // Build using fromArrays(): input is 0-based
         $children0 = [11, 22, 33, 44];
         $keys0 = ['b', 'c', 'd']; // n keys => n+1 children
 
@@ -1090,22 +1105,20 @@ $test = new class extends Test {
 
         $page = pack('a' . $PAGE_SIZE, $pageBody);
 
-        // Parse back from raw bytes: list format [null, v1, v2, ...]
+        // Parse back from raw bytes (0-based ArrayObject)
         $parsed = BTreeInternalPage::fromRaw($page);
 
         $this->assertSame(count($children0), $parsed->childCount);
-        // Keys are list format after fromRaw
-        $this->assertSame([null, 'b', 'c', 'd'], $parsed->keys);
+        // Keys are 0-based after fromRaw
+        $this->assertSame('b', $parsed->keys[0]);
+        $this->assertSame('c', $parsed->keys[1]);
+        $this->assertSame('d', $parsed->keys[2]);
 
-        // Children are list format [null, c1, c2, ...]
-        $this->assertSame($children0[0], $parsed->children[1]);
-        $this->assertSame($children0[1], $parsed->children[2]);
-        $this->assertSame($children0[2], $parsed->children[3]);
-        $this->assertSame($children0[3], $parsed->children[4]);
-
-        // Index 0 exists but is null (list format)
-        $this->assertNull($parsed->children[0]);
-        $this->assertNull($parsed->keys[0]);
+        // Children are 0-based
+        $this->assertSame($children0[0], $parsed->children[0]);
+        $this->assertSame($children0[1], $parsed->children[1]);
+        $this->assertSame($children0[2], $parsed->children[2]);
+        $this->assertSame($children0[3], $parsed->children[3]);
     }
 
     public function testPackPointerSizeAssumptionIsEightBytes(): void
@@ -1119,14 +1132,13 @@ $test = new class extends Test {
     {
         $PAGE_SIZE = 4096;
 
-        // Entries are list format: [null, entry1, entry2, ...]
+        // Entries are 0-based
         $entries = [
-            null,
             ['a', 1],
             ['b', 2],
         ];
 
-        $leaf = BTreeLeafPage::fromEntries($entries);
+        $leaf = $this->leafFromEntries($entries);
         $pageBody = $leaf->asString();
         $leaf->release();
 
@@ -1139,12 +1151,12 @@ $test = new class extends Test {
         // Header is: type(1) + count(2) + offsets((n+1)*2) + rowIdCounts(n*2)
         $expectedHeaderSize = 3 + ($n + 1) * 2 + $n * 2;
 
-        // meta[1] is the first entry offset; it should point exactly to header end
-        $this->assertSame($expectedHeaderSize, $parsed->meta[1]);
+        // meta[0] is the first entry offset; it should point exactly to header end
+        $this->assertSame($expectedHeaderSize, $parsed->meta[0]);
 
-        // end marker meta[n+1] should be <= PAGE_SIZE and >= header
-        $this->assertGreaterThanOrEqual($expectedHeaderSize, $parsed->meta[$n + 1]);
-        $this->assertLessThanOrEqual($PAGE_SIZE, $parsed->meta[$n + 1]);
+        // end marker meta[n] should be <= PAGE_SIZE and >= header
+        $this->assertGreaterThanOrEqual($expectedHeaderSize, $parsed->meta[$n]);
+        $this->assertLessThanOrEqual($PAGE_SIZE, $parsed->meta[$n]);
 
         $parsed->release();
     }
@@ -1191,15 +1203,15 @@ $test = new class extends Test {
     }
 
     /**
-     * Test creating an empty leaf page with list format [null].
+     * Test creating an empty leaf page with 0-based format [].
      * This is the format used when creating a new empty index.
      */
     public function testEmptyLeafPageFromEntries(): void
     {
         $PAGE_SIZE = 4096;
 
-        // Empty entries in list format = just [null]
-        $emptyLeaf = BTreeLeafPage::fromEntries([null]);
+        // Empty entries = empty 0-based array
+        $emptyLeaf = $this->leafFromEntries([]);
 
         $this->assertSame(0, $emptyLeaf->count);
 
@@ -1211,11 +1223,10 @@ $test = new class extends Test {
         $parsed = BTreeLeafPage::fromRaw($page);
 
         $this->assertSame(0, $parsed->count);
-        $this->assertSame([], $parsed->meta);
 
-        // toArray should return [null] (empty list format)
-        $entries = $parsed->toArray();
-        $this->assertSame([null], $entries);
+        // Empty page should have no entries (count is authoritative, not ArrayObject size)
+        $parsed->buildEntries();
+        $this->assertSame(0, $parsed->count);
 
         $parsed->release();
     }

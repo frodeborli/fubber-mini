@@ -12,6 +12,7 @@ use Traversable;
  * - Entry: rowIds(8 each) + key - no per-entry metadata
  *
  * All header metadata unpacked in single call for efficiency.
+ * Uses 0-based indexing: offsets at 0..n, rowIdCounts at n+1..2n.
  *
  * @internal
  */
@@ -25,14 +26,12 @@ final class BTreeLeafPage
     public string $data;
     /** Entry count */
     public int $count;
-    /** @var array Header metadata: offsets (1..n+1) + rowIdCounts (n+2..2n+1), 1-based */
-    public array $meta;
-    /** @var array<array<int, string|int>> Cached entries for scans */
+    /** @var int[] Header metadata: offsets (0..n) + rowIdCounts (n+1..2n), 0-based */
+    public array $meta = [];
+    /** @var array<array<int, string|int>> Cached entries for scans, 0-based */
     public array $entries = [];
     /** Whether entries array is valid for current page data */
     public bool $entriesBuilt = false;
-
-    private function __construct() {}
 
     public static function fromRaw(string $data): self
     {
@@ -42,18 +41,18 @@ final class BTreeLeafPage
             $instance = new self();
         }
         $instance->data = $data;
-        $instance->count = \ord($data[1]) | (\ord($data[2]) << 8);
-        // Single unpack: n+1 offsets + n rowIdCounts = 2n+1 uint16 values (1-based)
-        $instance->meta = $instance->count > 0
-            ? \unpack('v' . (2 * $instance->count + 1), $data, 3)
-            : [];
+        $n = \ord($data[1]) | (\ord($data[2]) << 8);
+        $instance->count = $n;
+        // Single unpack: n+1 offsets + n rowIdCounts = 2n+1 uint16 values
+        // unpack returns 1-based, array_values converts to 0-based
+        $instance->meta = $n > 0 ? \array_values(\unpack('v' . (2 * $n + 1), $data, 3)) : [];
         $instance->entriesBuilt = false;
         return $instance;
     }
 
     /**
      * Build and cache all entries for efficient scan iteration.
-     * Entries are list [null, e1, e2, ...] for array_is_list().
+     * Entries are 0-based: entries[0], entries[1], ...
      */
     public function buildEntries(): void
     {
@@ -63,36 +62,22 @@ final class BTreeLeafPage
         $n = $this->count;
         $meta = $this->meta;
         $data = $this->data;
-        $this->entries = [null]; // Start with null at [0]
-        for ($i = 1; $i <= $n; $i++) {
+        for ($i = 0; $i < $n; $i++) {
             $pos = $meta[$i];
             $rowIdCount = $meta[$n + 1 + $i];
             $keyLen = $meta[$i + 1] - $pos - ($rowIdCount << 3);
-            $entry = \unpack('P' . $rowIdCount, $data, $pos);
-            $entry[0] = \substr($data, $pos + ($rowIdCount << 3), $keyLen);
-            $this->entries[] = $entry; // Append to list
+            $this->entries[$i] = [\substr($data, $pos + ($rowIdCount << 3), $keyLen), ...\unpack('P' . $rowIdCount, $data, $pos)];
         }
         $this->entriesBuilt = true;
     }
 
     /**
-     * Get entries as list with null at [0] (for modification in insert/delete).
-     * @return array<int, array<int, string|int>|null> List: [null, [key, id1, ...], ...]
-     */
-    public function toArray(): array
-    {
-        $this->buildEntries();
-        // Return copy of the list (already in correct format)
-        return \array_slice($this->entries, 0, $this->count + 1);
-    }
-
-    /**
-     * Get just the key at 1-based index (for binary search comparisons).
+     * Get just the key at 0-based index (for binary search comparisons).
      * Avoids unpacking rowIds - much faster for probes.
      */
     public function getKeyAt(int $i): string
     {
-        // Pages from fromEntries()/setEntries() have entries already built (1-based)
+        // Pages with entriesBuilt=true have entries populated directly (0-based)
         if ($this->entriesBuilt) {
             return $this->entries[$i][0];
         }
@@ -105,12 +90,12 @@ final class BTreeLeafPage
     }
 
     /**
-     * Get single entry by 1-based index (for yielding rowIds after match).
+     * Get single entry by 0-based index (for yielding rowIds after match).
      * @return array<int, string|int> Flat: [0 => key, 1 => rowId1, ...]
      */
     public function getEntry(int $i): array
     {
-        // Pages from fromEntries()/setEntries() have entries already built (1-based)
+        // Pages with entriesBuilt=true have entries populated directly (0-based)
         if ($this->entriesBuilt) {
             return $this->entries[$i];
         }
@@ -134,7 +119,7 @@ final class BTreeLeafPage
 
     /**
      * Serialize to binary page format using precomputed meta.
-     * Entries and meta are 1-based.
+     * Entries and meta are 0-based.
      */
     public function asString(): string
     {
@@ -146,21 +131,21 @@ final class BTreeLeafPage
         $meta = $this->meta;
         $entries = $this->entries;
 
-        // Extract offsets (n+1) and rowIdCounts (n) from 1-based meta
+        // Extract offsets (n+1) and rowIdCounts (n) from 0-based meta
         $offsets = [];
         $rowIdCounts = [];
-        for ($i = 1; $i <= $n + 1; $i++) {
+        for ($i = 0; $i <= $n; $i++) {
             $offsets[] = $meta[$i];
         }
-        for ($i = 1; $i <= $n; $i++) {
+        for ($i = 0; $i < $n; $i++) {
             $rowIdCounts[] = $meta[$n + 1 + $i];
         }
 
-        // Build entry data: rowIds + key for each entry (entries are 1-based)
+        // Build entry data: rowIds + key for each entry (entries are 0-based)
         $entryParts = [];
-        for ($i = 1; $i <= $n; $i++) {
+        for ($i = 0; $i < $n; $i++) {
             $entry = $entries[$i];
-            $rowIdCount = $rowIdCounts[$i - 1]; // rowIdCounts is 0-based here
+            $rowIdCount = $rowIdCounts[$i];
             $rowIds = [];
             for ($j = 1; $j <= $rowIdCount; $j++) {
                 $rowIds[] = $entry[$j];
@@ -190,8 +175,8 @@ final class BTreeLeafPage
         // Header: type(1) + count(2) + offsets((n+1)*2) + rowIdCounts(n*2)
         $size = 3 + ($n + 1) * 2 + $n * 2;
 
-        // Entry data: rowIds(8 each) + key for each entry
-        for ($i = 1; $i <= $n; $i++) {
+        // Entry data: rowIds(8 each) + key for each entry (0-based)
+        for ($i = 0; $i < $n; $i++) {
             $entry = $this->entries[$i];
             $size += (\count($entry) - 1) * 8 + \strlen($entry[0]);
         }
@@ -200,54 +185,40 @@ final class BTreeLeafPage
     }
 
     /**
-     * Get a leaf page from pool (or create new) and set entries.
-     * Builds meta immediately for consistency.
-     * @param array $entries List [null, [key, rowId1, ...], ...]
+     * Get a leaf page from pool (or create new).
      */
-    public static function fromEntries(array $entries): self
+    public static function fromPool(): self
     {
         if (self::$poolCount > 0) {
-            $instance = self::$pool[--self::$poolCount];
-        } else {
-            $instance = new self();
+            return self::$pool[--self::$poolCount];
         }
-        $instance->setEntries($entries);
-        return $instance;
+        return new self();
     }
 
     /**
-     * Update entries in place (for overlay modification).
-     * Rebuilds meta from entries.
-     * @param array $entries List [null, [key, rowId1, ...], ...]
+     * Rebuild meta from current entries array.
+     * Call after modifying entries directly.
      */
-    public function setEntries(array $entries): void
+    public function rebuildMeta(): void
     {
-        $n = \count($entries) - 1; // Subtract 1 for null at [0]
-        $this->entries = $entries;
-        $this->count = $n;
-        $this->entriesBuilt = true;
-
+        $n = $this->count;
         if ($n === 0) {
-            $this->meta = [];
             return;
         }
 
-        // Build meta: offsets (1..n+1) + rowIdCounts (n+2..2n+1), 1-based
+        // Build meta: offsets (0..n) + rowIdCounts (n+1..2n), 0-based
         // Header size: type(1) + count(2) + offsets((n+1) * 2) + rowIdCounts(n * 2)
         $headerSize = 3 + ($n + 1) * 2 + $n * 2;
-        $meta = [];
         $offset = $headerSize;
 
-        for ($i = 1; $i <= $n; $i++) {
-            $entry = $entries[$i];
-            $meta[$i] = $offset; // offset at 1-based index
+        for ($i = 0; $i < $n; $i++) {
+            $entry = $this->entries[$i];
+            $this->meta[$i] = $offset;
             $rowIdCount = \count($entry) - 1;
-            $meta[$n + 1 + $i] = $rowIdCount; // rowIdCount at n+1+i (so n+2 to 2n+1)
+            $this->meta[$n + 1 + $i] = $rowIdCount;
             $offset += $rowIdCount * 8 + \strlen($entry[0]);
         }
-        $meta[$n + 1] = $offset; // end marker
-
-        $this->meta = $meta;
+        $this->meta[$n] = $offset; // end marker
     }
 }
 
@@ -260,6 +231,7 @@ final class BTreeLeafPage
  *
  * Children are 32-bit page numbers (supports up to 16TB with 4KB pages).
  * Keys are parsed eagerly since internal pages are cached and reused.
+ * Uses 0-based indexing: children[0..n], keys[0..n-1].
  *
  * @internal
  */
@@ -267,10 +239,10 @@ final class BTreeInternalPage
 {
     /** Number of children */
     public int $childCount;
-    /** @var array<int, int> Child page numbers - list with null at [0], children at [1..n] */
-    public array $children;
-    /** @var string[] Separator keys - list with null at [0], keys at [1..n] */
-    public array $keys;
+    /** @var int[] Child page numbers - 0-based: children[0..n-1] */
+    public array $children = [];
+    /** @var string[] Separator keys - 0-based: keys[0..n-2] (one less than children) */
+    public array $keys = [];
 
     public static function fromRaw(string $data): self
     {
@@ -280,42 +252,36 @@ final class BTreeInternalPage
         $childCount = $n + 1;
         $instance->childCount = $childCount;
 
-        // unpack returns 1-based, convert to list [null, c1, c2, ...] for array_is_list()
-        $unpacked = \unpack('V' . $childCount, $data, 3);
-        $instance->children = [null];
-        for ($i = 1; $i <= $childCount; $i++) {
-            $instance->children[] = $unpacked[$i];
-        }
+        // unpack returns 1-based, array_values converts to 0-based
+        $instance->children = \array_values(\unpack('V' . $childCount, $data, 3));
 
-        if ($n === 0) {
-            $instance->keys = [null];
-        } else {
+        if ($n > 0) {
             // Read n+1 offsets (last is end marker) in one unpack call
             $offsetsStart = 3 + $childCount * 4;
             $offsets = \unpack('v' . ($n + 1), $data, $offsetsStart);
 
-            // Read keys as list [null, k1, k2, ...] for array_is_list()
-            $instance->keys = [null];
-            for ($i = 1; $i <= $n; $i++) {
-                $instance->keys[] = \substr($data, $offsets[$i], $offsets[$i + 1] - $offsets[$i]);
+            // Read keys as 0-based array
+            $keys = [];
+            for ($i = 0; $i < $n; $i++) {
+                $keys[$i] = \substr($data, $offsets[$i + 1], $offsets[$i + 2] - $offsets[$i + 1]);
             }
+            $instance->keys = $keys;
         }
 
         return $instance;
     }
 
     /**
-     * Get an internal page from pool (or create new) and set children/keys.
+     * Get an internal page and set children/keys.
      * @param int[] $children 0-based input array
      * @param string[] $keys 0-based input array
      */
     public static function fromArrays(array $children, array $keys): self
     {
         $instance = new self();
-        // Convert to list [null, c1, c2, ...] for array_is_list()
-        $instance->children = [null, ...$children];
         $instance->childCount = \count($children);
-        $instance->keys = [null, ...$keys];
+        $instance->children = $children;
+        $instance->keys = $keys;
         return $instance;
     }
 
@@ -326,15 +292,14 @@ final class BTreeInternalPage
      */
     public function setChildrenAndKeys(array $children, array $keys): void
     {
-        // Convert to list [null, c1, c2, ...] for array_is_list()
-        $this->children = [null, ...$children];
         $this->childCount = \count($children);
-        $this->keys = [null, ...$keys];
+        $this->children = $children;
+        $this->keys = $keys;
     }
 
     /**
      * Serialize to binary page format.
-     * Children and keys are lists with null at [0].
+     * Children and keys are 0-based.
      */
     public function asString(): string
     {
@@ -344,11 +309,11 @@ final class BTreeInternalPage
         // Header size: type(1) + count(2) + children((n+1)*4) + offsets((n+1)*2)
         $headerSize = 3 + $c * 4 + $c * 2;
 
-        // Build key data and calculate offsets (skip null at keys[0])
+        // Build key data and calculate offsets (0-based)
         $keyData = '';
         $offsets = [];
         $offset = $headerSize;
-        for ($i = 1; $i <= $n; $i++) {
+        for ($i = 0; $i < $n; $i++) {
             $offsets[] = $offset;
             $key = $this->keys[$i];
             $keyData .= $key;
@@ -356,9 +321,12 @@ final class BTreeInternalPage
         }
         $offsets[] = $offset; // End marker
 
-        // Pack children from [1..c] (skip null at [0])
-        $childrenData = \array_slice($this->children, 1);
-        return \pack('CvV' . $c . 'v' . $c, BTreeIndex::PAGE_INTERNAL, $n, ...$childrenData, ...$offsets) . $keyData;
+        // Pack children from 0-based array
+        $childrenArr = [];
+        for ($i = 0; $i < $c; $i++) {
+            $childrenArr[] = $this->children[$i];
+        }
+        return \pack('CvV' . $c . 'v' . $c, BTreeIndex::PAGE_INTERNAL, $n, ...$childrenArr, ...$offsets) . $keyData;
     }
 
     public function __debugInfo(): array
@@ -366,7 +334,6 @@ final class BTreeInternalPage
         return [
             'childCount' => $this->childCount,
             'children' => $this->children,
-            'children_keys' => array_keys($this->children),
             'keys' => $this->keys,
         ];
     }
@@ -644,7 +611,7 @@ final class BTreeIndex implements IndexInterface
      */
     private function findAndSplitOversized(BTreeInternalPage $node, array $pathSoFar): bool
     {
-        for ($i = 1; $i <= $node->childCount; $i++) {
+        for ($i = 0; $i < $node->childCount; $i++) {
             $childNum = $node->children[$i];
 
             // Only check pages in the overlay - disk pages are already correct size
@@ -654,9 +621,9 @@ final class BTreeIndex implements IndexInterface
 
             $child = $this->unwrittenPages[$childNum];
 
-            // Extend path with this child
+            // Extend path with this child (0-based childIdx)
             $childPath = $pathSoFar;
-            $childPath[] = $i; // childIdx
+            $childPath[] = $i; // childIdx (0-based)
             $childPath[] = $childNum; // pageNum
 
             if ($child instanceof BTreeLeafPage) {
@@ -692,12 +659,12 @@ final class BTreeIndex implements IndexInterface
             $leaf = $this->getPageForWrite($leafPageNum);
         }
 
-        $entries = $leaf->toArray();
-        $n = \count($entries) - 1;
+        $leaf->buildEntries();
+        $n = $leaf->count;
 
         // Check if we need to split rowIds within a single entry
         if ($n === 1) {
-            $entry = $entries[1];
+            $entry = $leaf->entries[0];
             $entryKey = $entry[0];
             $rowIdCount = \count($entry) - 1;
             $mid = ($rowIdCount >> 1) + 1;
@@ -711,29 +678,43 @@ final class BTreeIndex implements IndexInterface
                     $rightEntry[] = $entry[$i];
                 }
             }
-            $leftEntries = [null, $leftEntry];
-            $rightEntries = [null, $rightEntry];
+
+            // Update left page with single entry
+            $leaf->entries[0] = $leftEntry;
+            $leaf->count = 1;
+            $leaf->rebuildMeta();
+            $leftNum = $leafPageNum ?? $this->allocatePage($leaf);
+
+            // Create right page with single entry
+            $rightLeaf = BTreeLeafPage::fromPool();
+            $rightLeaf->entries[0] = $rightEntry;
+            $rightLeaf->count = 1;
+            $rightLeaf->entriesBuilt = true;
+            $rightLeaf->rebuildMeta();
+            $rightNum = $this->allocatePage($rightLeaf);
+
+            $promoteKey = $entryKey;
         } else {
             $mid = $n >> 1;
-            $leftEntries = [null];
-            $rightEntries = [null];
-            for ($i = 1; $i <= $mid; $i++) {
-                $leftEntries[] = $entries[$i];
+
+            // Create right page - copy entries directly
+            $rightLeaf = BTreeLeafPage::fromPool();
+            $rightCount = $n - $mid;
+            for ($i = 0; $i < $rightCount; $i++) {
+                $rightLeaf->entries[$i] = $leaf->entries[$mid + $i];
             }
-            for ($i = $mid + 1; $i <= $n; $i++) {
-                $rightEntries[] = $entries[$i];
-            }
+            $rightLeaf->count = $rightCount;
+            $rightLeaf->entriesBuilt = true;
+            $rightLeaf->rebuildMeta();
+            $rightNum = $this->allocatePage($rightLeaf);
+
+            $promoteKey = $leaf->entries[$mid][0];
+
+            // Update left page - just truncate
+            $leaf->count = $mid;
+            $leaf->rebuildMeta();
+            $leftNum = $leafPageNum ?? $this->allocatePage($leaf);
         }
-
-        // Reuse left page, create new right page
-        $leaf->setEntries($leftEntries);
-        $leftNum = $leafPageNum ?? $this->allocatePage($leaf);
-
-        $rightLeaf = BTreeLeafPage::fromEntries($rightEntries);
-        $rightNum = $this->allocatePage($rightLeaf);
-
-        // Promote first key of right leaf
-        $promoteKey = $rightEntries[1][0];
 
         $this->propagateSplit($path, $pathLen - 4, $leftNum, $rightNum, $promoteKey);
     }
@@ -812,7 +793,7 @@ final class BTreeIndex implements IndexInterface
             return;
         }
 
-        // Navigate to leaf containing the key
+        // Navigate to leaf containing the key (0-based)
         $page = $this->currentRoot;
         $stack = [];
         $stackTop = 0;
@@ -836,8 +817,8 @@ final class BTreeIndex implements IndexInterface
                 return;
             }
 
-            // Binary search for first entry >= key (key-only comparison)
-            $lo = 1;
+            // Binary search for first entry >= key (0-based)
+            $lo = 0;
             $hi = $n;
             while ($lo < $hi) {
                 $mid = ($lo + $hi) >> 1;
@@ -848,8 +829,8 @@ final class BTreeIndex implements IndexInterface
                 }
             }
 
-            // Yield matching entries - only unpack rowIds for actual matches
-            for ($i = $lo; $i <= $n; $i++) {
+            // Yield matching entries - only unpack rowIds for actual matches (0-based)
+            for ($i = $lo; $i < $n; $i++) {
                 $cmp = strcmp($leaf->getKeyAt($i), $key);
                 if ($cmp > 0) {
                     if ($leafPageNum !== null) $this->releaseLeaf($leaf, $leafPageNum);
@@ -872,7 +853,7 @@ final class BTreeIndex implements IndexInterface
                 $parentPage = $stack[--$stackTop];
                 $childIdx = $stack[--$stackTop];
                 $parentNum = $stack[--$stackTop];
-                if ($childIdx < $parentPage->childCount) {
+                if ($childIdx < $parentPage->childCount - 1) {
                     $childIdx++;
                     $stack[$stackTop++] = $parentNum;
                     $stack[$stackTop++] = $childIdx;
@@ -886,14 +867,14 @@ final class BTreeIndex implements IndexInterface
                             break;
                         }
                         $stack[$stackTop++] = $leafPageNum;
-                        $stack[$stackTop++] = 1;
+                        $stack[$stackTop++] = 0;
                         $stack[$stackTop++] = $page;
-                        $leafPageNum = $page->children[1];
+                        $leafPageNum = $page->children[0];
                     }
 
                     // Check if first entry matches (duplicates can span pages)
                     if ($leaf->count > 0) {
-                        $firstEntry = $leaf->getEntry(1);
+                        $firstEntry = $leaf->getEntry(0);
                         if ($firstEntry[0] === $key) {
                             $found = true;
                             break;
@@ -1144,7 +1125,10 @@ final class BTreeIndex implements IndexInterface
         // No valid root found - create empty leaf as root
         $this->rootPage = 0;
         $this->nextPage = 1;
-        $this->currentRoot = BTreeLeafPage::fromEntries([null]); // List format: [null] = empty
+        $emptyRoot = BTreeLeafPage::fromPool();
+        $emptyRoot->count = 0;
+        $emptyRoot->entriesBuilt = true;
+        $this->currentRoot = $emptyRoot;
         if ($oldRoot !== 0) {
             $this->sequence++;
             $this->pageCache = [];
@@ -1276,14 +1260,14 @@ final class BTreeIndex implements IndexInterface
 
     /**
      * Find child index for given key in internal node.
-     * Returns 1-based index into $children array.
-     * Keys array is 1-based.
+     * Returns 0-based index into $children array.
+     * Keys array is 0-based.
      */
     private function findChildIndex(array $keys, int $keyCount, string $key): int
     {
-        // Binary search for first key >= $key (keys are 1-based)
-        $lo = 1;
-        $hi = $keyCount + 1;
+        // Binary search for first key >= $key (keys are 0-based)
+        $lo = 0;
+        $hi = $keyCount;
         while ($lo < $hi) {
             $mid = ($lo + $hi) >> 1;
             if (strcmp($keys[$mid], $key) < 0) {
@@ -1292,7 +1276,7 @@ final class BTreeIndex implements IndexInterface
                 $hi = $mid;
             }
         }
-        return $lo; // 1-based child index
+        return $lo; // 0-based child index
     }
 
     // =========================================================================
@@ -1304,12 +1288,12 @@ final class BTreeIndex implements IndexInterface
      *
      * Returns flat array: [pageNum, childIdx, pageNum, childIdx, ...]
      * - pageNum: null for root, otherwise actual page number
-     * - childIdx: -1 for leaf, otherwise which child was followed (1-based)
+     * - childIdx: -1 for leaf, otherwise which child was followed (0-based)
      *
      * Example paths:
      * - [null, -1] - root is a leaf
-     * - [null, 2, 5, -1] - root is internal, followed child[2], leaf is page 5
-     * - [null, 1, 3, 1, 7, -1] - two internal levels before leaf
+     * - [null, 1, 5, -1] - root is internal, followed child[1], leaf is page 5
+     * - [null, 0, 3, 0, 7, -1] - two internal levels before leaf
      */
     private function findPath(string $key): array
     {
@@ -1324,11 +1308,11 @@ final class BTreeIndex implements IndexInterface
                 return $path;
             }
 
-            // Find child index via binary search (keys are 1-based)
-            // Finds first key > target, result is 1-based child index
+            // Find child index via binary search (keys are 0-based)
+            // Finds first key > target, result is 0-based child index
             $keyCount = $page->childCount - 1;
-            $lo = 1;
-            $hi = $keyCount + 1;
+            $lo = 0;
+            $hi = $keyCount;
             while ($lo < $hi) {
                 $mid = ($lo + $hi) >> 1;
                 if (strcmp($page->keys[$mid], $key) <= 0) {
@@ -1339,9 +1323,9 @@ final class BTreeIndex implements IndexInterface
             }
 
             $path[] = $pageNum;
-            $path[] = $lo; // 1-based child index
+            $path[] = $lo; // 0-based child index
 
-            // Descend to child - children array is 1-based
+            // Descend to child - children array is 0-based
             $childPageNum = $page->children[$lo];
             $pageNum = $childPageNum; // Now actual page number, not null
             $page = $this->getPage($childPageNum);
@@ -1362,33 +1346,38 @@ final class BTreeIndex implements IndexInterface
         if ($leafPageNum === null) {
             $leaf = $this->currentRoot;
         } else {
-            $leaf = $this->getPageForWrite($leafPageNum); // $leafPageNum updated to new page number
+            $leaf = $this->getPageForWrite($leafPageNum);
         }
-        $entries = $leaf->toArray(); // list: [null, e1, e2, ...]
-        $n = count($entries) - 1; // Subtract 1 for null at [0]
+        $leaf->buildEntries();
+        $n = $leaf->count;
 
-        // Find position (1-based) and insert/update
-        $pos = $this->findInsertPosition($entries, $n, $key);
+        // Find position (0-based) via binary search
+        $lo = 0;
+        $hi = $n;
+        while ($lo < $hi) {
+            $mid = ($lo + $hi) >> 1;
+            if (strcmp($leaf->entries[$mid][0], $key) < 0) {
+                $lo = $mid + 1;
+            } else {
+                $hi = $mid;
+            }
+        }
+        $pos = $lo;
 
-        if ($pos <= $n && $entries[$pos][0] === $key) {
-            // Key exists - append rowId (flat format: [key, id1, id2, ...])
-            $entries[$pos][] = $rowId;
+        if ($pos < $n && $leaf->entries[$pos][0] === $key) {
+            // Key exists - append rowId in place
+            $leaf->entries[$pos][] = $rowId;
+            $leaf->rebuildMeta();
         } else {
-            // New key - insert at position (list format: [null, e1, e2, ...])
-            $newEntries = [null];
-            for ($i = 1; $i < $pos; $i++) {
-                $newEntries[] = $entries[$i];
+            // New key - shift entries and insert
+            // Shift from end to make room at $pos
+            for ($i = $n; $i > $pos; $i--) {
+                $leaf->entries[$i] = $leaf->entries[$i - 1];
             }
-            $newEntries[] = [$key, $rowId];
-            for ($i = $pos; $i <= $n; $i++) {
-                $newEntries[] = $entries[$i];
-            }
-            $entries = $newEntries;
-            $n++;
+            $leaf->entries[$pos] = [$key, $rowId];
+            $leaf->count = ++$n;
+            $leaf->rebuildMeta();
         }
-
-        // Update entries in place
-        $leaf->setEntries($entries);
 
         // Check if page fits - if so, just update parent pointers
         if ($leaf->calculateSize() <= self::PAGE_SIZE) {
@@ -1401,7 +1390,7 @@ final class BTreeIndex implements IndexInterface
         // Split required
         if ($n === 1) {
             // Single entry with too many rowIds - split the rowIds
-            $entry = $entries[1];
+            $entry = $leaf->entries[0];
             $entryKey = $entry[0];
             $rowIdCount = \count($entry) - 1;
             $mid = ($rowIdCount >> 1) + 1;
@@ -1415,50 +1404,45 @@ final class BTreeIndex implements IndexInterface
                     $rightEntry[] = $entry[$i];
                 }
             }
-            $leftEntries = [null, $leftEntry];
-            $rightEntries = [null, $rightEntry];
+
+            // Update left page with single entry
+            $leaf->entries[0] = $leftEntry;
+            $leaf->count = 1;
+            $leaf->rebuildMeta();
+            $leftNum = $leafPageNum ?? $this->allocatePage($leaf);
+
+            // Create right page with single entry
+            $rightLeaf = BTreeLeafPage::fromPool();
+            $rightLeaf->entries[0] = $rightEntry;
+            $rightLeaf->count = 1;
+            $rightLeaf->entriesBuilt = true;
+            $rightLeaf->rebuildMeta();
+            $rightNum = $this->allocatePage($rightLeaf);
+
+            $promoteKey = $entryKey;
         } else {
             $mid = $n >> 1;
-            $leftEntries = [null];
-            $rightEntries = [null];
-            for ($i = 1; $i <= $mid; $i++) {
-                $leftEntries[] = $entries[$i];
+
+            // Create right page - copy entries directly
+            $rightLeaf = BTreeLeafPage::fromPool();
+            $rightCount = $n - $mid;
+            for ($i = 0; $i < $rightCount; $i++) {
+                $rightLeaf->entries[$i] = $leaf->entries[$mid + $i];
             }
-            for ($i = $mid + 1; $i <= $n; $i++) {
-                $rightEntries[] = $entries[$i];
-            }
+            $rightLeaf->count = $rightCount;
+            $rightLeaf->entriesBuilt = true;
+            $rightLeaf->rebuildMeta();
+            $rightNum = $this->allocatePage($rightLeaf);
+
+            $promoteKey = $leaf->entries[$mid][0];
+
+            // Update left page - just truncate
+            $leaf->count = $mid;
+            $leaf->rebuildMeta();
+            $leftNum = $leafPageNum ?? $this->allocatePage($leaf);
         }
-
-        // Reuse left page, create new right page
-        $leaf->setEntries($leftEntries);
-        $leftNum = $leafPageNum ?? $this->allocatePage($leaf);
-
-        $rightLeaf = BTreeLeafPage::fromEntries($rightEntries);
-        $rightNum = $this->allocatePage($rightLeaf);
-
-        // Promote first key of right leaf
-        $promoteKey = $rightEntries[1][0];
 
         $this->propagateSplit($path, $pathLen - 4, $leftNum, $rightNum, $promoteKey);
-    }
-
-    /**
-     * Find insert position in 1-based entries array.
-     * Returns 1-based position where key should be inserted.
-     */
-    private function findInsertPosition(array $entries, int $n, string $key): int
-    {
-        $lo = 1;
-        $hi = $n + 1;
-        while ($lo < $hi) {
-            $mid = ($lo + $hi) >> 1;
-            if (strcmp($entries[$mid][0], $key) < 0) {
-                $lo = $mid + 1;
-            } else {
-                $hi = $mid;
-            }
-        }
-        return $lo;
     }
 
     /**
@@ -1474,9 +1458,9 @@ final class BTreeIndex implements IndexInterface
             return;
         }
 
-        // Get parent from path (flat: pageNum, childIndex - childIndex is 1-based)
+        // Get parent from path (flat: pageNum, childIndex - childIndex is 0-based)
         $parentPageNum = $path[$pathIdx];
-        $childIndex = $path[$pathIdx + 1]; // 1-based
+        $childIndex = $path[$pathIdx + 1]; // 0-based
 
         // Get parent for modification
         if ($parentPageNum === null) {
@@ -1485,35 +1469,33 @@ final class BTreeIndex implements IndexInterface
             $parent = $this->getPageForWrite($parentPageNum); // $parentPageNum updated
         }
 
-        // Insert new child and key (list format: [null, c1, c2, ...])
+        // Insert new child and key (0-based arrays)
         $oldChildCount = $parent->childCount;
         $oldKeyCount = $oldChildCount - 1;
-        $newChildren = [null];
-        $newKeys = [null];
+        $newChildren = [];
+        $newKeys = [];
 
         // Copy children up to split point, replacing split child with left
-        for ($i = 1; $i < $childIndex; $i++) {
+        for ($i = 0; $i < $childIndex; $i++) {
             $newChildren[] = $parent->children[$i];
         }
         $newChildren[] = $leftChild;
         $newChildren[] = $rightChild;
-        for ($i = $childIndex + 1; $i <= $oldChildCount; $i++) {
+        for ($i = $childIndex + 1; $i < $oldChildCount; $i++) {
             $newChildren[] = $parent->children[$i];
         }
 
         // Copy keys, inserting promoteKey at position childIndex
-        for ($i = 1; $i < $childIndex; $i++) {
+        for ($i = 0; $i < $childIndex; $i++) {
             $newKeys[] = $parent->keys[$i];
         }
         $newKeys[] = $promoteKey;
-        for ($i = $childIndex; $i <= $oldKeyCount; $i++) {
+        for ($i = $childIndex; $i < $oldKeyCount; $i++) {
             $newKeys[] = $parent->keys[$i];
         }
 
-        // Update parent with list format arrays
-        $parent->children = $newChildren;
-        $parent->childCount = $oldChildCount + 1;
-        $parent->keys = $newKeys;
+        // Update parent using setChildrenAndKeys
+        $parent->setChildrenAndKeys($newChildren, $newKeys);
 
         if (strlen($parent->asString()) <= self::PAGE_SIZE) {
             // Fits - page already modified in overlay
@@ -1524,40 +1506,35 @@ final class BTreeIndex implements IndexInterface
         } else {
             // Split internal node
             $newKeyCount = $oldKeyCount + 1;
-            $mid = $newKeyCount >> 1; // 1-based mid key
+            $mid = $newKeyCount >> 1; // 0-based mid key index
 
-            // Left: keys 1..mid-1, children 1..mid (list format: [null, c1, c2, ...])
-            // Right: keys mid+1..n, children mid+1..n+1
-            $leftChildren = [null];
-            $leftKeys = [null];
-            for ($i = 1; $i <= $mid; $i++) {
+            // Left: keys 0..mid-1, children 0..mid (0-based)
+            // Right: keys mid+1..n-1, children mid+1..n
+            $leftChildren = [];
+            $leftKeys = [];
+            for ($i = 0; $i <= $mid; $i++) {
                 $leftChildren[] = $newChildren[$i];
             }
-            for ($i = 1; $i < $mid; $i++) {
+            for ($i = 0; $i < $mid; $i++) {
                 $leftKeys[] = $newKeys[$i];
             }
 
-            $rightChildren = [null];
-            $rightKeys = [null];
-            for ($i = $mid + 1; $i <= $oldChildCount + 1; $i++) {
+            $rightChildren = [];
+            $rightKeys = [];
+            for ($i = $mid + 1; $i < $oldChildCount + 1; $i++) {
                 $rightChildren[] = $newChildren[$i];
             }
-            for ($i = $mid + 1; $i <= $newKeyCount; $i++) {
+            for ($i = $mid + 1; $i < $newKeyCount; $i++) {
                 $rightKeys[] = $newKeys[$i];
             }
 
             $splitPromoteKey = $newKeys[$mid];
 
             // Reuse left page (already in overlay), create new right page
-            $parent->children = $leftChildren;
-            $parent->childCount = count($leftChildren) - 1; // Subtract 1 for null at [0]
-            $parent->keys = $leftKeys;
+            $parent->setChildrenAndKeys($leftChildren, $leftKeys);
             $leftNum = $parentPageNum ?? $this->allocatePage($parent);
 
-            $rightPage = new BTreeInternalPage();
-            $rightPage->children = $rightChildren;
-            $rightPage->childCount = count($rightChildren) - 1; // Subtract 1 for null at [0]
-            $rightPage->keys = $rightKeys;
+            $rightPage = BTreeInternalPage::fromArrays($rightChildren, $rightKeys);
             $rightNum = $this->allocatePage($rightPage);
 
             $this->propagateSplit($path, $pathIdx - 2, $leftNum, $rightNum, $splitPromoteKey);
@@ -1573,7 +1550,7 @@ final class BTreeIndex implements IndexInterface
     {
         while ($pathIdx >= 0) {
             $parentPageNum = $path[$pathIdx];
-            $childIndex = $path[$pathIdx + 1]; // 1-based
+            $childIndex = $path[$pathIdx + 1]; // 0-based
 
             // Get parent for modification
             if ($parentPageNum === null) {
@@ -1582,7 +1559,7 @@ final class BTreeIndex implements IndexInterface
                 $parent = $this->getPageForWrite($parentPageNum); // $parentPageNum updated
             }
 
-            // Replace child pointer directly (1-based array)
+            // Replace child pointer directly (0-based ArrayObject)
             $parent->children[$childIndex] = $newChild;
 
             if ($parentPageNum === null) {
@@ -1610,16 +1587,16 @@ final class BTreeIndex implements IndexInterface
         if ($leafPageNum === null) {
             $leaf = $this->currentRoot;
         } else {
-            $leaf = $this->getPageForWrite($leafPageNum); // $leafPageNum updated
+            $leaf = $this->getPageForWrite($leafPageNum);
         }
-        $entries = $leaf->toArray(); // list: [null, e1, e2, ...]
-        $n = count($entries) - 1; // Subtract 1 for null at [0]
+        $leaf->buildEntries();
+        $n = $leaf->count;
 
-        // Find key and remove rowId (1-based entries, each entry: [key, id1, id2, ...])
+        // Find key and remove rowId (0-based entries, each entry: [key, id1, id2, ...])
         $found = false;
-        $removeIdx = 0;
-        for ($i = 1; $i <= $n; $i++) {
-            $entry = $entries[$i];
+        $removeIdx = -1;
+        for ($i = 0; $i < $n; $i++) {
+            $entry = $leaf->entries[$i];
             if ($entry[0] === $key) {
                 // Search for rowId in positions 1, 2, 3...
                 $rowIdCount = count($entry) - 1;
@@ -1637,7 +1614,7 @@ final class BTreeIndex implements IndexInterface
                             // No more rowIds - mark for removal
                             $removeIdx = $i;
                         } else {
-                            $entries[$i] = $newEntry;
+                            $leaf->entries[$i] = $newEntry;
                         }
 
                         $found = true;
@@ -1652,19 +1629,15 @@ final class BTreeIndex implements IndexInterface
             return; // Key/rowId not found, nothing to do
         }
 
-        // Remove entry if marked (rebuild list format [null, e1, e2, ...])
-        if ($removeIdx > 0) {
-            $newEntries = [null];
-            for ($i = 1; $i <= $n; $i++) {
-                if ($i !== $removeIdx) {
-                    $newEntries[] = $entries[$i];
-                }
+        // Remove entry if marked - shift entries left
+        if ($removeIdx >= 0) {
+            for ($i = $removeIdx; $i < $n - 1; $i++) {
+                $leaf->entries[$i] = $leaf->entries[$i + 1];
             }
-            $entries = $newEntries;
+            $leaf->count = $n - 1;
         }
 
-        // Update leaf in place
-        $leaf->setEntries($entries);
+        $leaf->rebuildMeta();
 
         if ($leafPageNum !== null) {
             // Update parent pointers to new page number
@@ -1684,7 +1657,7 @@ final class BTreeIndex implements IndexInterface
         $stackTop = 0;
         $leafPageNum = null; // null = root is the leaf, don't release
 
-        // Navigate to first relevant leaf (childIdx is 1-based)
+        // Navigate to first relevant leaf (0-based)
         while (!($page instanceof BTreeLeafPage)) {
             $childIdx = $this->findChildIndex($page->keys, $page->childCount - 1, $startKey);
             $leafPageNum = $page->children[$childIdx];
@@ -1695,13 +1668,13 @@ final class BTreeIndex implements IndexInterface
         }
         $leaf = $page;
 
-        // Iterate through leaves (entries are 1-based: [1 => [key, id1, ...], ...])
+        // Iterate through leaves (entries are 0-based)
         while (true) {
             $leaf->buildEntries();
             $entries = $leaf->entries;
             $entryCount = $leaf->count;
 
-            for ($e = 1; $e <= $entryCount; $e++) {
+            for ($e = 0; $e < $entryCount; $e++) {
                 $entry = $entries[$e];
                 $key = $entry[0];
                 if ($start !== null && strcmp($key, $start) < 0) {
@@ -1721,14 +1694,14 @@ final class BTreeIndex implements IndexInterface
             // Release current leaf before getting next
             if ($leafPageNum !== null) $this->releaseLeaf($leaf, $leafPageNum);
 
-            // Find next leaf via backtracking (childIdx is 1-based)
+            // Find next leaf via backtracking (0-based)
             $found = false;
             while ($stackTop > 0) {
                 $parentPage = $stack[--$stackTop];
                 $childIdx = $stack[--$stackTop];
                 $parentNum = $stack[--$stackTop];
 
-                if ($childIdx < $parentPage->childCount) {
+                if ($childIdx < $parentPage->childCount - 1) {
                     $childIdx++;
                     $stack[$stackTop++] = $parentNum;
                     $stack[$stackTop++] = $childIdx;
@@ -1744,9 +1717,9 @@ final class BTreeIndex implements IndexInterface
                         }
 
                         $stack[$stackTop++] = $leafPageNum;
-                        $stack[$stackTop++] = 1;
+                        $stack[$stackTop++] = 0;
                         $stack[$stackTop++] = $page;
-                        $leafPageNum = $page->children[1];
+                        $leafPageNum = $page->children[0];
                     }
 
                     $found = true;
@@ -1767,13 +1740,13 @@ final class BTreeIndex implements IndexInterface
         $stackTop = 0;
         $leafPageNum = null; // null = root is the leaf, don't release
 
-        // Navigate to last relevant leaf (childIdx is 1-based)
+        // Navigate to last relevant leaf (0-based)
         while (!($page instanceof BTreeLeafPage)) {
             // Find rightmost child that could contain keys <= end
-            $childIdx = $page->childCount; // Start with rightmost (1-based)
+            $childIdx = $page->childCount - 1; // Start with rightmost (0-based)
             if ($end !== null) {
                 $keyCount = $page->childCount - 1;
-                for ($i = $keyCount; $i >= 1; $i--) {
+                for ($i = $keyCount - 1; $i >= 0; $i--) {
                     if (strcmp($page->keys[$i], $end) <= 0) {
                         $childIdx = $i + 1;
                         break;
@@ -1790,13 +1763,13 @@ final class BTreeIndex implements IndexInterface
         }
         $leaf = $page;
 
-        // Iterate through leaves in reverse (entries are 1-based)
+        // Iterate through leaves in reverse (entries are 0-based)
         while (true) {
             $leaf->buildEntries();
             $entries = $leaf->entries;
             $entryCount = $leaf->count;
 
-            for ($e = $entryCount; $e >= 1; $e--) {
+            for ($e = $entryCount - 1; $e >= 0; $e--) {
                 $entry = $entries[$e];
                 $key = $entry[0];
                 if ($end !== null && strcmp($key, $end) > 0) {
@@ -1816,14 +1789,14 @@ final class BTreeIndex implements IndexInterface
             // Release current leaf before getting next
             if ($leafPageNum !== null) $this->releaseLeaf($leaf, $leafPageNum);
 
-            // Find previous leaf via backtracking (childIdx is 1-based)
+            // Find previous leaf via backtracking (0-based)
             $found = false;
             while ($stackTop > 0) {
                 $parentPage = $stack[--$stackTop];
                 $childIdx = $stack[--$stackTop];
                 $parentNum = $stack[--$stackTop];
 
-                if ($childIdx > 1) {
+                if ($childIdx > 0) {
                     $childIdx--;
                     $stack[$stackTop++] = $parentNum;
                     $stack[$stackTop++] = $childIdx;
@@ -1838,7 +1811,7 @@ final class BTreeIndex implements IndexInterface
                             break;
                         }
 
-                        $lastChild = $page->childCount; // 1-based last child
+                        $lastChild = $page->childCount - 1; // 0-based last child
                         $stack[$stackTop++] = $leafPageNum;
                         $stack[$stackTop++] = $lastChild;
                         $stack[$stackTop++] = $page;
@@ -1889,15 +1862,16 @@ final class BTreeIndex implements IndexInterface
             return $newPageNum;
         }
 
-        // Internal node - recursively rewrite children first (children are list [null, c1, c2, ...])
+        // Internal node - recursively rewrite children first (0-based)
         $newChildren = [];
-        for ($i = 1; $i <= $page->childCount; $i++) {
+        for ($i = 0; $i < $page->childCount; $i++) {
             $newChildren[] = $this->rewritePages($temp, $page->children[$i], $pageMap, $newNextPage);
         }
 
-        // Create new internal page with updated children (keys are list [null, k1, k2, ...], extract 0-based)
+        // Create new internal page with updated children (keys are 0-based)
         $keys0 = [];
-        for ($i = 1; $i < $page->childCount; $i++) { // n keys = n+1 children - 1
+        $keyCount = $page->childCount - 1;
+        for ($i = 0; $i < $keyCount; $i++) {
             $keys0[] = $page->keys[$i];
         }
         $newNode = BTreeInternalPage::fromArrays($newChildren, $keys0);
