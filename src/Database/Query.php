@@ -208,6 +208,14 @@ final class Query implements IteratorAggregate, Countable
         return ($this->wrap)($this->pq->withHydrator($hydrator));
     }
 
+    /**
+     * Register a callback to run after each entity is loaded
+     */
+    public function withLoadCallback(Closure $callback): static
+    {
+        return ($this->wrap)($this->pq->withLoadCallback($callback));
+    }
+
     // =========================================================================
     // Debugging
     // =========================================================================

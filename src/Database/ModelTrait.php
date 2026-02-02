@@ -26,7 +26,7 @@ use function mini\db;
  *
  * To add authorization, override query() to filter based on current user:
  * ```php
- * public static function query(): PartialQuery {
+ * public static function query(): Query {
  *     return static::queryUnsafe()->eq('user_id', auth()->userId());
  * }
  * ```
@@ -117,13 +117,13 @@ trait ModelTrait
      * Use this for system operations (CLI, migrations, background jobs)
      * or when you need to bypass user-based row filtering.
      */
-    public static function queryUnsafe(): PartialQuery
+    public static function queryUnsafe(): Query
     {
         $db = static::database();
         $table = $db->quoteIdentifier(static::tableName());
 
         return $db->query("SELECT * FROM {$table}")
-            ->withEntityClass(static::class, false)
+            ->withEntityClass(static::class)
             ->withLoadCallback(fn(object $entity) => static::markLoaded($entity));
     }
 
@@ -235,14 +235,14 @@ trait ModelTrait
      *
      * Override this method to filter rows based on the current user:
      * ```php
-     * public static function query(): PartialQuery {
+     * public static function query(): Query {
      *     return static::queryUnsafe()->eq('user_id', auth()->userId());
      * }
      * ```
      *
      * By default, no filtering is applied (same as queryUnsafe).
      */
-    public static function query(): PartialQuery
+    public static function query(): Query
     {
         return static::queryUnsafe();
     }
