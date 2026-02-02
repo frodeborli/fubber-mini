@@ -159,6 +159,14 @@ final class Query implements IteratorAggregate, Countable
     }
 
     /**
+     * Get first column from all rows as array
+     */
+    public function column(): array
+    {
+        return $this->pq->column();
+    }
+
+    /**
      * Check if any rows exist
      */
     public function exists(): bool
