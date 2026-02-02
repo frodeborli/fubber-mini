@@ -195,7 +195,7 @@ final class Query implements IteratorAggregate, Countable
     /**
      * Hydrate results into entity instances
      */
-    public function asEntity(string $class, array $constructorArgs = []): static
+    public function withEntityClass(string $class, array $constructorArgs = []): static
     {
         return ($this->wrap)($this->pq->withEntityClass($class, $constructorArgs ?: false));
     }

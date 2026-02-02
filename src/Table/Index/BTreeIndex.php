@@ -862,10 +862,7 @@ final class BTreeIndex implements IndexInterface
 
     public function __destruct()
     {
-        // Auto-commit pending changes (root may have been modified even if unwrittenPages is empty)
-        if ($this->inTransaction) {
-            $this->commit();
-        }
+        // close() handles auto-commit if needed
         $this->close();
     }
 
@@ -1356,6 +1353,19 @@ final class BTreeIndex implements IndexInterface
 
     public function close(): void
     {
+        // Auto-commit pending transaction before closing
+        if ($this->inTransaction && !empty($this->dirtyNodes) && $this->file !== null) {
+            $this->commit();
+        } elseif ($this->inTransaction) {
+            // Rollback if no dirty nodes or file already closed
+            $this->dirtyNodes = [];
+            $this->nextTempId = -1;
+            $this->inTransaction = false;
+            if ($this->lockFile !== null) {
+                flock($this->lockFile, LOCK_UN);
+            }
+        }
+
         if ($this->file !== null) {
             fclose($this->file);
             $this->file = null;

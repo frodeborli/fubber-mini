@@ -48,7 +48,7 @@ function apcu_clear_cache(): bool {
     return ApcuDriverFactory::getDriver()->clear_cache();
 }
 
-function apcu_dec(string $key, int $step = 1, bool &$success = null, int $ttl = 0): int|false {
+function apcu_dec(string $key, int $step = 1, ?bool &$success = null, int $ttl = 0): int|false {
     return ApcuDriverFactory::getDriver()->dec($key, $step, $success, $ttl);
 }
 
