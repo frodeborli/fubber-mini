@@ -4,119 +4,187 @@ namespace mini\Session;
 
 use mini\Mini;
 use Psr\Http\Message\ServerRequestInterface;
+use Psr\SimpleCache\CacheInterface;
 
 /**
- * Native PHP session implementation
+ * Cache-backed session implementation
  *
- * Wraps PHP's native session handling with automatic start-on-access.
- * Works in traditional PHP-FPM/CGI environments.
- *
- * For fiber-based async environments (phasync, Swoole), this class uses
- * a load-into-memory pattern: session data is loaded once, kept in memory,
- * and saved at request end. This avoids holding session locks during
- * async operations.
+ * Stores session data in Mini's cache backend (APCu, SQLite, filesystem, etc.).
+ * Uses a short in-memory TTL (100ms) for read operations to reduce cache lookups.
+ * Write operations always fetch fresh data before updating to minimize conflicts.
  *
  * Usage:
  * ```php
- * // Automatic - just access $_SESSION
- * $_SESSION['user_id'] = 123;        // Auto-starts session
- * $userId = $_SESSION['user_id'];    // Returns 123
- *
- * // Or via the session() helper
- * session()->set('user_id', 123);
- * $userId = session()->get('user_id');
+ * // Just access $_SESSION - session auto-starts
+ * $_SESSION['user_id'] = 123;        // Fetches fresh, updates, saves
+ * $userId = $_SESSION['user_id'];    // Returns from memory if fresh
  * ```
  */
 class Session implements SessionInterface
 {
-    /** @var array<string, mixed> In-memory session data */
-    private array $data = [];
+    /** In-memory session data cache */
+    private ?array $sessionData = null;
 
-    /** @var bool Whether session has been started */
-    private bool $started = false;
+    /** Timestamp when sessionData was last loaded */
+    private ?float $sessionDataUpdated = null;
 
-    /** @var bool Whether session data has been modified */
-    private bool $modified = false;
-
-    /** @var string|null Session ID */
+    /** Session ID */
     private ?string $id = null;
 
+    /** Pending cookie data to set on response */
+    private ?array $cookieToSet = null;
+
+    /** How long to trust in-memory data for reads (seconds) */
+    private const READ_CACHE_TTL = 0.1; // 100ms
+
+    /** Cache key prefix */
+    private const CACHE_PREFIX = 'session:';
+
     /**
-     * Create a new Session instance
+     * Get session cache TTL in seconds
      *
-     * Session is not started until first access.
+     * Uses session_cache_expire() which returns minutes (default 180).
+     * This controls how long session data is stored in cache.
+     * Can be configured via php.ini session.cache_expire or by calling
+     * session_cache_expire($minutes) during application bootstrap.
      */
-    public function __construct()
+    private function getCacheTtl(): int
     {
-        // Session starts lazily on first access
+        return session_cache_expire() * 60;
     }
 
     /**
-     * Ensure session is started before accessing data
+     * Get cookie options from PHP configuration with secure fallbacks
+     *
+     * Reads from session_get_cookie_params() but applies secure defaults
+     * when php.ini values are empty/insecure.
      */
-    private function ensureStarted(): void
+    private function getCookieOptions(): array
     {
-        if ($this->started) {
-            return;
+        $params = session_get_cookie_params();
+
+        // Cookie lifetime: 0 = session cookie, >0 = persistent cookie
+        // If 0, we use cache TTL for persistence; if set, respect it
+        $lifetime = $params['lifetime'];
+        if ($lifetime > 0) {
+            $expires = time() + $lifetime;
+        } else {
+            // Session cookie behavior: use cache TTL so cookie outlives typical browser session
+            // but still expires eventually (matches server-side expiration)
+            $expires = time() + $this->getCacheTtl();
         }
 
-        $this->start();
+        return [
+            'expires' => $expires,
+            'path' => $params['path'] ?: '/',
+            'domain' => $params['domain'] ?: null,
+            'secure' => $params['secure'] ?: null, // null = auto-detect in middleware
+            'httponly' => $params['httponly'] ?: true, // Secure default
+            'samesite' => $params['samesite'] ?: 'Lax', // Secure default
+        ];
     }
 
     /**
-     * Start the session
+     * Check if strict mode is enabled
+     *
+     * When enabled, session IDs not found in cache are rejected and
+     * a new session is created. This prevents session fixation attacks.
      */
-    private function start(): void
+    private function isStrictMode(): bool
     {
-        if ($this->started) {
+        return (bool) ini_get('session.use_strict_mode');
+    }
+
+    /**
+     * Get the cache instance
+     */
+    private function getCache(): CacheInterface
+    {
+        return Mini::$mini->get(CacheInterface::class);
+    }
+
+    /**
+     * Get cache key for this session
+     */
+    private function getCacheKey(): string
+    {
+        return self::CACHE_PREFIX . $this->id;
+    }
+
+    /**
+     * Get session ID from request cookie, or generate new one
+     *
+     * If session.use_strict_mode is enabled, validates that the session
+     * exists in cache before accepting it. Unknown session IDs are rejected
+     * and a new session is created (prevents session fixation).
+     */
+    private function ensureId(): void
+    {
+        if ($this->id !== null) {
             return;
         }
 
-        // Get session ID from cookie if available
-        $sessionName = session_name();
+        $sessionName = session_name() ?: 'PHPSESSID';
         $cookies = $this->getCookies();
 
-        if (isset($cookies[$sessionName])) {
-            session_id($cookies[$sessionName]);
+        if (isset($cookies[$sessionName]) && $this->isValidSessionId($cookies[$sessionName])) {
+            $candidateId = $cookies[$sessionName];
+
+            // Strict mode: verify session exists in cache
+            if ($this->isStrictMode()) {
+                $cacheKey = self::CACHE_PREFIX . $candidateId;
+                if ($this->getCache()->has($cacheKey)) {
+                    $this->id = $candidateId;
+                    return;
+                }
+                // Session not in cache - reject and create new (session fixation protection)
+            } else {
+                $this->id = $candidateId;
+                return;
+            }
         }
 
-        // Configure session for CLI if needed
-        if (PHP_SAPI === 'cli') {
-            ini_set('session.use_cookies', '0');
-            ini_set('session.cache_limiter', '');
-        }
-
-        // Start native session
-        if (session_status() === PHP_SESSION_NONE) {
-            session_start();
-        }
-
-        // Load data into memory
-        $this->data = $_SESSION ?? [];
-        $this->id = session_id();
-        $this->started = true;
-
-        // For fiber environments: close session immediately to release lock
-        // Data is kept in memory and saved at request end
-        if ($this->isAsyncEnvironment()) {
-            session_write_close();
-        }
+        // No valid session cookie or strict mode rejected it - create new session
+        $this->id = $this->generateId();
+        $this->setSessionCookie();
     }
 
     /**
-     * Check if running in an async/fiber environment
+     * Validate session ID format
      */
-    private function isAsyncEnvironment(): bool
+    private function isValidSessionId(string $id): bool
     {
-        // Check if we're inside a Fiber (not the main fiber)
-        $fiber = \Fiber::getCurrent();
-        return $fiber !== null;
+        return preg_match('/^[a-zA-Z0-9,-]{22,256}$/', $id) === 1;
+    }
+
+    /**
+     * Generate a new session ID
+     */
+    private function generateId(): string
+    {
+        return bin2hex(random_bytes(32));
+    }
+
+    /**
+     * Mark that session cookie needs to be set on response
+     */
+    private function setSessionCookie(): void
+    {
+        $sessionName = session_name() ?: 'PHPSESSID';
+        $options = $this->getCookieOptions();
+
+        // Remove null values (domain, secure) - middleware handles them
+        $options = array_filter($options, fn($v) => $v !== null);
+
+        $this->cookieToSet = [
+            'name' => $sessionName,
+            'value' => $this->id,
+            'options' => $options,
+        ];
     }
 
     /**
      * Get cookies from current request
-     *
-     * @return array<string, string>
      */
     private function getCookies(): array
     {
@@ -124,176 +192,169 @@ class Session implements SessionInterface
             $request = Mini::$mini->get(ServerRequestInterface::class);
             return $request->getCookieParams();
         } catch (\Throwable) {
-            // Fallback to native $_COOKIE during bootstrap
-            return $_COOKIE ?? [];
+            return [];
         }
     }
 
     /**
-     * {@inheritdoc}
+     * Load session data from cache
      */
+    private function loadFromCache(): void
+    {
+        $this->ensureId();
+        $this->sessionData = $this->getCache()->get($this->getCacheKey()) ?? [];
+        $this->sessionDataUpdated = microtime(true);
+    }
+
+    /**
+     * Save session data to cache
+     */
+    private function saveToCache(): void
+    {
+        $this->getCache()->set($this->getCacheKey(), $this->sessionData, $this->getCacheTtl());
+        $this->sessionDataUpdated = microtime(true);
+    }
+
+    /**
+     * Ensure data is loaded for read operations
+     * Uses in-memory cache if fresh (within READ_CACHE_TTL)
+     */
+    private function ensureLoadedForRead(): void
+    {
+        if ($this->sessionData !== null) {
+            $age = microtime(true) - $this->sessionDataUpdated;
+            if ($age < self::READ_CACHE_TTL) {
+                return; // Use cached version
+            }
+        }
+
+        $this->loadFromCache();
+    }
+
+    /**
+     * Load fresh data, apply update, save immediately
+     */
+    private function updateAndSave(callable $updater): void
+    {
+        $this->loadFromCache();
+        $updater();
+        $this->saveToCache();
+    }
+
+    // =========================================================================
+    // SessionInterface implementation
+    // =========================================================================
+
     public function get(string $key, mixed $default = null): mixed
     {
-        $this->ensureStarted();
-        return $this->data[$key] ?? $default;
+        $this->ensureLoadedForRead();
+        return $this->sessionData[$key] ?? $default;
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function set(string $key, mixed $value): void
     {
-        $this->ensureStarted();
-        $this->data[$key] = $value;
-        $this->modified = true;
-
-        // In non-async mode, also update native $_SESSION
-        if (!$this->isAsyncEnvironment() && session_status() === PHP_SESSION_ACTIVE) {
-            $_SESSION[$key] = $value;
-        }
+        $this->updateAndSave(function () use ($key, $value) {
+            $this->sessionData[$key] = $value;
+        });
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function has(string $key): bool
     {
-        $this->ensureStarted();
-        return array_key_exists($key, $this->data);
+        $this->ensureLoadedForRead();
+        return array_key_exists($key, $this->sessionData);
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function remove(string $key): void
     {
-        $this->ensureStarted();
-        unset($this->data[$key]);
-        $this->modified = true;
-
-        // In non-async mode, also update native $_SESSION
-        if (!$this->isAsyncEnvironment() && session_status() === PHP_SESSION_ACTIVE) {
-            unset($_SESSION[$key]);
-        }
+        $this->updateAndSave(function () use ($key) {
+            unset($this->sessionData[$key]);
+        });
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function all(): array
     {
-        $this->ensureStarted();
-        return $this->data;
+        $this->ensureLoadedForRead();
+        return $this->sessionData;
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function clear(): void
     {
-        $this->ensureStarted();
-        $this->data = [];
-        $this->modified = true;
-
-        // In non-async mode, also update native $_SESSION
-        if (!$this->isAsyncEnvironment() && session_status() === PHP_SESSION_ACTIVE) {
-            $_SESSION = [];
-        }
+        $this->updateAndSave(function () {
+            $this->sessionData = [];
+        });
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function getId(): string
     {
-        $this->ensureStarted();
-        return $this->id ?? '';
+        $this->ensureId();
+        return $this->id;
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function regenerate(bool $deleteOldSession = false): bool
     {
-        $this->ensureStarted();
+        $this->ensureLoadedForRead();
+        $oldKey = $this->getCacheKey();
+        $oldData = $this->sessionData;
 
-        if ($this->isAsyncEnvironment()) {
-            // In async mode: reopen session, regenerate, close
-            session_id($this->id);
-            session_start();
-            $result = session_regenerate_id($deleteOldSession);
-            $this->id = session_id();
-            $_SESSION = $this->data;
-            session_write_close();
-            return $result;
+        // Generate new ID
+        $this->id = $this->generateId();
+        $this->setSessionCookie();
+
+        // Copy data to new session
+        $this->sessionData = $oldData;
+        $this->saveToCache();
+
+        // Delete old session if requested
+        if ($deleteOldSession) {
+            $this->getCache()->delete($oldKey);
         }
 
-        // In sync mode: use native regeneration
-        if (session_status() !== PHP_SESSION_ACTIVE) {
-            return false;
-        }
-
-        $result = session_regenerate_id($deleteOldSession);
-        $this->id = session_id();
-        return $result;
+        return true;
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function isStarted(): bool
     {
-        return $this->started;
+        return $this->sessionData !== null;
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function save(): void
     {
-        if (!$this->started) {
-            return;
-        }
-
-        if ($this->isAsyncEnvironment() && $this->modified) {
-            // In async mode: reopen session, save data, close
-            session_id($this->id);
-            session_start();
-            $_SESSION = $this->data;
-            session_write_close();
-            $this->modified = false;
-        } elseif (session_status() === PHP_SESSION_ACTIVE) {
-            // In sync mode: just close (data already in $_SESSION)
-            session_write_close();
+        if ($this->sessionData !== null) {
+            $this->saveToCache();
         }
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function destroy(): bool
     {
-        if (!$this->started) {
-            return false;
-        }
+        $this->ensureId();
 
-        $this->data = [];
-        $this->modified = false;
+        // Clear local data
+        $this->sessionData = [];
+        $this->sessionDataUpdated = null;
 
-        if ($this->isAsyncEnvironment()) {
-            // In async mode: reopen session, destroy, close
-            session_id($this->id);
-            session_start();
-            $result = session_destroy();
-            return $result;
-        }
+        // Delete from cache
+        $this->getCache()->delete($this->getCacheKey());
 
-        // In sync mode: use native destroy
-        if (session_status() === PHP_SESSION_ACTIVE) {
-            return session_destroy();
-        }
+        // Mark cookie for expiration (use same path as session cookie)
+        $sessionName = session_name() ?: 'PHPSESSID';
+        $params = session_get_cookie_params();
+        $this->cookieToSet = [
+            'name' => $sessionName,
+            'value' => '',
+            'options' => [
+                'expires' => 1,
+                'path' => $params['path'] ?: '/',
+            ],
+        ];
 
-        return false;
+        return true;
+    }
+
+    public function getCookieToSet(): ?array
+    {
+        $cookie = $this->cookieToSet;
+        $this->cookieToSet = null;
+        return $cookie;
     }
 
     // =========================================================================
@@ -326,8 +387,8 @@ class Session implements SessionInterface
 
     public function count(): int
     {
-        $this->ensureStarted();
-        return count($this->data);
+        $this->ensureLoadedForRead();
+        return count($this->sessionData);
     }
 
     // =========================================================================
@@ -336,8 +397,8 @@ class Session implements SessionInterface
 
     public function getIterator(): \ArrayIterator
     {
-        $this->ensureStarted();
-        return new \ArrayIterator($this->data);
+        $this->ensureLoadedForRead();
+        return new \ArrayIterator($this->sessionData);
     }
 
     // =========================================================================
@@ -347,10 +408,10 @@ class Session implements SessionInterface
     public function __debugInfo(): array
     {
         return [
-            'started' => $this->started,
-            'modified' => $this->modified,
             'id' => $this->id,
-            'data' => $this->started ? $this->data : '(not started)',
+            'dataLoaded' => $this->sessionData !== null,
+            'dataAge' => $this->sessionDataUpdated ? (microtime(true) - $this->sessionDataUpdated) : null,
+            'data' => $this->sessionData ?? '(not loaded)',
         ];
     }
 }

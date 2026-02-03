@@ -53,6 +53,7 @@
             "src/Metadata/functions.php",
             "src/Inference/functions.php",
             "src/Authorizer/functions.php",
+            "src/Session/functions.php",
             "src/Dispatcher/defaults.php"
         ]
     },

@@ -101,4 +101,14 @@ interface SessionInterface extends \ArrayAccess, \Countable, \IteratorAggregate
      * @return bool
      */
     public function destroy(): bool;
+
+    /**
+     * Get cookie data if one needs to be set on the response
+     *
+     * Returns cookie data array if a cookie needs to be set (new session or regenerated ID),
+     * null if no cookie is needed. Clears the pending cookie after returning.
+     *
+     * @return array{name: string, value: string, options: array}|null
+     */
+    public function getCookieToSet(): ?array;
 }
