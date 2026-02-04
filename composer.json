@@ -53,6 +53,7 @@
             "src/Metadata/functions.php",
             "src/Inference/functions.php",
             "src/Authorizer/functions.php",
+            "src/Session/functions.php",
             "src/Dispatcher/defaults.php"
         ]
     },
@@ -77,15 +78,18 @@
         "psr/http-message": "^1.0 || ^2.0",
         "psr/http-server-handler": "^1.0",
         "psr/http-server-middleware": "^1.0",
-        "psr/http-factory": "^1.0"
+        "psr/http-factory": "^1.0",
+        "psr/http-client": "^1.0"
     },
     "provide": {
         "psr/simple-cache-implementation": "1.0|2.0|3.0",
         "psr/container-implementation": "1.1|2.0",
         "psr/http-message-implementation": "1.0|2.0",
-        "psr/http-factory-implementation": "1.0"
+        "psr/http-factory-implementation": "1.0",
+        "psr/http-client-implementation": "1.0"
     },
     "suggest": {
-        "ext-intl": "For full internationalization features with all languages and locales"
+        "ext-intl": "For full internationalization features with all languages and locales",
+        "ext-curl": "For HTTP client functionality"
     }
 }
