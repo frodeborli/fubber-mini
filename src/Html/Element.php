@@ -214,8 +214,16 @@ class Element extends Node
         $results = [];
         $seen = new \SplObjectStorage();
 
-        foreach ($parsed as $complex) {
-            $this->matchComplex($complex, 0, $this, $results, $seen);
+        foreach ($this->collectDescendants($this) as $descendant) {
+            foreach ($parsed as $complex) {
+                if ($this->matchesComplexSelector($descendant, $complex)) {
+                    if (!$seen->contains($descendant)) {
+                        $seen->attach($descendant);
+                        $results[] = $descendant;
+                    }
+                    break;
+                }
+            }
         }
 
         return $results;
@@ -225,10 +233,11 @@ class Element extends Node
     {
         $parsed = CssSelectorParser::parse($selector);
 
-        foreach ($parsed as $complex) {
-            $result = $this->matchComplexFirst($complex, 0, $this);
-            if ($result !== null) {
-                return $result;
+        foreach ($this->collectDescendants($this) as $descendant) {
+            foreach ($parsed as $complex) {
+                if ($this->matchesComplexSelector($descendant, $complex)) {
+                    return $descendant;
+                }
             }
         }
 
@@ -241,73 +250,45 @@ class Element extends Node
     }
 
     /**
-     * Recursively match a complex selector (chain of compound + combinator segments).
+     * Test if an element matches a complex selector by walking ancestors right-to-left.
+     * Per the DOM spec, the full document hierarchy is considered — ancestors above
+     * the base element participate in matching.
      *
      * @param array<int, array{compound: array, combinator: ?string}> $segments
-     * @param Element[] &$results
      */
-    private function matchComplex(array $segments, int $segIndex, Element $context, array &$results, \SplObjectStorage $seen): void
+    private function matchesComplexSelector(Element $element, array $segments): bool
     {
-        $segment = $segments[$segIndex];
-        $isLast = $segIndex === count($segments) - 1;
+        $last = count($segments) - 1;
 
-        // Determine which elements to test
-        $candidates = $segIndex === 0 || $segment['combinator'] === ' '
-            ? $this->collectDescendants($context)
-            : $context->children; // child combinator '>'
+        if (!$element->matchesCompound($segments[$last]['compound'])) {
+            return false;
+        }
 
-        foreach ($candidates as $child) {
-            if (!$child instanceof Element) {
-                continue;
-            }
-            if (!$child->matchesCompound($segment['compound'])) {
-                continue;
-            }
+        $current = $element;
+        for ($i = $last - 1; $i >= 0; $i--) {
+            $combinator = $segments[$i + 1]['combinator'];
 
-            if ($isLast) {
-                if (!$seen->contains($child)) {
-                    $seen->attach($child);
-                    $results[] = $child;
+            if ($combinator === '>') {
+                $current = $current->parentElement();
+                if ($current === null || !$current->matchesCompound($segments[$i]['compound'])) {
+                    return false;
                 }
             } else {
-                $this->matchComplex($segments, $segIndex + 1, $child, $results, $seen);
-            }
-        }
-    }
-
-    /**
-     * Like matchComplex but short-circuits on first match.
-     *
-     * @param array<int, array{compound: array, combinator: ?string}> $segments
-     */
-    private function matchComplexFirst(array $segments, int $segIndex, Element $context): ?Element
-    {
-        $segment = $segments[$segIndex];
-        $isLast = $segIndex === count($segments) - 1;
-
-        $candidates = $segIndex === 0 || $segment['combinator'] === ' '
-            ? $this->collectDescendants($context)
-            : $context->children;
-
-        foreach ($candidates as $child) {
-            if (!$child instanceof Element) {
-                continue;
-            }
-            if (!$child->matchesCompound($segment['compound'])) {
-                continue;
-            }
-
-            if ($isLast) {
-                return $child;
-            }
-
-            $result = $this->matchComplexFirst($segments, $segIndex + 1, $child);
-            if ($result !== null) {
-                return $result;
+                // Descendant combinator — walk up until an ancestor matches
+                $current = $current->parentElement();
+                while ($current !== null) {
+                    if ($current->matchesCompound($segments[$i]['compound'])) {
+                        break;
+                    }
+                    $current = $current->parentElement();
+                }
+                if ($current === null) {
+                    return false;
+                }
             }
         }
 
-        return null;
+        return true;
     }
 
     /**

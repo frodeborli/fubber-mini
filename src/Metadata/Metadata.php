@@ -124,6 +124,46 @@ class Metadata implements JsonSerializable
         return null;
     }
 
+    public function getTitle(): Stringable|string|null
+    {
+        return $this->annotations['title'] ?? null;
+    }
+
+    public function getDescription(): Stringable|string|null
+    {
+        return $this->annotations['description'] ?? null;
+    }
+
+    public function isReadOnly(): ?bool
+    {
+        return $this->annotations['readOnly'] ?? null;
+    }
+
+    public function isWriteOnly(): ?bool
+    {
+        return $this->annotations['writeOnly'] ?? null;
+    }
+
+    public function isDeprecated(): ?bool
+    {
+        return $this->annotations['deprecated'] ?? null;
+    }
+
+    public function getFormat(): ?string
+    {
+        return $this->annotations['format'] ?? null;
+    }
+
+    public function getDefault(): mixed
+    {
+        return $this->annotations['default'] ?? null;
+    }
+
+    public function getExamples(): ?array
+    {
+        return $this->annotations['examples'] ?? null;
+    }
+
     /**
      * Set a class reference for a property (for lazy metadata resolution)
      *

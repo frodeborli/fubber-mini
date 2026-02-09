@@ -7,6 +7,8 @@ use ReflectionProperty;
 use mini\I18n\Translatable;
 use mini\Mini;
 use mini\Metadata\Attributes;
+use mini\Validator\Attributes\Format as ValidatorFormat;
+use mini\Validator\Attributes\Ref as ValidatorRef;
 
 /**
  * Builds metadata from PHP class attributes
@@ -83,12 +85,6 @@ class AttributeMetadataFactory
      */
     private function getPropertyRefClass(ReflectionProperty $property): ?string
     {
-        // Check for explicit Ref attribute first
-        $refAttrs = $property->getAttributes(Attributes\Ref::class);
-        if (!empty($refAttrs)) {
-            return $refAttrs[0]->newInstance()->class;
-        }
-
         // Check type hint for class reference
         $type = $property->getType();
         if (!$type instanceof \ReflectionNamedType || $type->isBuiltin()) {
@@ -97,7 +93,6 @@ class AttributeMetadataFactory
 
         $typeName = $type->getName();
 
-        // Only return if it's a class (not interface for now, could be expanded)
         if (class_exists($typeName) || interface_exists($typeName)) {
             return $typeName;
         }
@@ -240,20 +235,40 @@ class AttributeMetadataFactory
         $metadata = new Metadata();
         $hasMetadata = false;
 
+        // Check for Validator\Ref — resolve metadata from referenced class property
         foreach ($attributes as $attribute) {
-            // Skip non-metadata attributes (e.g., Validator, Tables attributes)
-            if (!str_starts_with($attribute->getName(), 'mini\\Metadata\\Attributes\\')) {
+            if ($attribute->getName() === ValidatorRef::class) {
+                $ref = $attribute->newInstance();
+                $refProp = $ref->property;
+                $refMetadata = \mini\metadata($ref->class)->$refProp;
+                if ($refMetadata !== null) {
+                    $metadata = $refMetadata;
+                    $hasMetadata = true;
+                }
+                break;
+            }
+        }
+
+        // Apply explicit metadata attributes on top (local overrides Ref)
+        foreach ($attributes as $attribute) {
+            $attrName = $attribute->getName();
+
+            if (str_starts_with($attrName, 'mini\\Metadata\\Attributes\\')) {
+                $hasMetadata = true;
+                $instance = $attribute->newInstance();
+                $metadata = $this->applyAttribute($metadata, $instance, $sourceFile);
                 continue;
             }
 
-            // Skip Ref attribute - it's handled separately for class references
-            if ($attribute->getName() === Attributes\Ref::class) {
-                continue;
+            // Also extract format from Validator\Format (validation defines schema format)
+            if ($attrName === ValidatorFormat::class) {
+                $instance = $attribute->newInstance();
+                // Only use core format (no purpose) for schema
+                if ($instance->purpose === null) {
+                    $hasMetadata = true;
+                    $metadata = $metadata->format($instance->format);
+                }
             }
-
-            $hasMetadata = true;
-            $instance = $attribute->newInstance();
-            $metadata = $this->applyAttribute($metadata, $instance, $sourceFile);
         }
 
         return $hasMetadata ? $metadata : null;
@@ -277,7 +292,6 @@ class AttributeMetadataFactory
             Attributes\IsReadOnly::class => $metadata->readOnly($attribute->value),
             Attributes\IsWriteOnly::class => $metadata->writeOnly($attribute->value),
             Attributes\IsDeprecated::class => $metadata->deprecated($attribute->value),
-            Attributes\MetaFormat::class => $metadata->format($attribute->format),
             default => $metadata
         };
     }

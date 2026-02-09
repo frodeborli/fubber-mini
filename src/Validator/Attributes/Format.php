@@ -6,7 +6,9 @@ use Attribute;
 use mini\Validator\Purpose;
 
 /**
- * Validate via format()
+ * Validate string format (email, uri, date-time, etc.)
+ *
+ * Also used by metadata/schema generation - no need for separate Meta\Format.
  *
  * @see \mini\Validator\Validator::format()
  */

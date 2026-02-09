@@ -98,6 +98,26 @@ class Validator implements \JsonSerializable
     }
 
     /**
+     * Read a validation rule value by keyword
+     *
+     * Returns null if the rule is not set.
+     *
+     * @param string $keyword Rule keyword (e.g. 'format', 'minLength', 'enum')
+     */
+    public function rule(string $keyword): mixed
+    {
+        return $this->rules[$keyword] ?? null;
+    }
+
+    /**
+     * Check if this field is marked as required
+     */
+    public function isRequired(): bool
+    {
+        return $this->isRequired;
+    }
+
+    /**
      * Invokable: $validator($value)
      *
      * @param mixed $value
