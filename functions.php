@@ -129,10 +129,9 @@ function url(string|\Psr\Http\Message\UriInterface $path = '', array $query = []
  * Flash message functions
  */
 function flash_set($type, $message) {
-    if (!isset($_SESSION['flash'])) {
-        $_SESSION['flash'] = [];
-    }
-    $_SESSION['flash'][] = ['type' => $type, 'message' => $message];
+    $flash = $_SESSION['flash'] ?? [];
+    $flash[] = ['type' => $type, 'message' => $message];
+    $_SESSION['flash'] = $flash;
 }
 
 /**
