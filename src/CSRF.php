@@ -52,10 +52,23 @@ class CSRF
     {
         $hardToGuess = Mini::$mini->salt;
 
-        // Include session ID if available
-        $sessionName = session_name() ?: '';
-        if ($sessionName && isset($_COOKIE[$sessionName])) {
-            $hardToGuess .= $_COOKIE[$sessionName];
+        // Include session ID if available (prefer framework session over cookie
+        // to avoid signature mismatch when session is created during the request)
+        try {
+            $session = Mini::$mini->get(\mini\Session\SessionInterface::class);
+            if ($session->isStarted()) {
+                $hardToGuess .= $session->getId();
+            }
+        } catch (\Throwable) {
+            // Fallback to native PHP session or cookie
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                $hardToGuess .= session_id();
+            } else {
+                $sessionName = session_name() ?: '';
+                if ($sessionName && isset($_COOKIE[$sessionName])) {
+                    $hardToGuess .= $_COOKIE[$sessionName];
+                }
+            }
         }
 
         // Include user agent for browser fingerprinting
