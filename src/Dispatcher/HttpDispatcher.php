@@ -151,7 +151,13 @@ class HttpDispatcher
      */
     public function registerExceptionConverter(\Closure $converter): void
     {
-        $this->exceptionConverters->register($converter);
+        // During Bootstrap phase, allow transparent replacement of existing converters.
+        // This lets application code override framework defaults without errors.
+        if (Mini::$mini->phase->getCurrentState() === \mini\Phase::Bootstrap) {
+            $this->exceptionConverters->replace($converter);
+        } else {
+            $this->exceptionConverters->register($converter);
+        }
     }
 
 
