@@ -26,6 +26,29 @@ function t(string $text, array $vars = []): Translatable {
 }
 
 /**
+ * Translate and JSON-encode for safe embedding in JavaScript
+ *
+ * Returns a JSON-encoded string (including quotes), safe to use directly
+ * in <script> blocks without additional escaping.
+ *
+ * Usage in templates:
+ *   var msg = <?= tjs("Hello {name}", ['name' => $user]) ?>;
+ *
+ * @param string $text The text to translate
+ * @param array $vars Variables for interpolation
+ * @return string JSON-encoded translated string
+ */
+function tjs(string $text, array $vars = []): \Stringable {
+    $translatable = new Translatable($text, $vars);
+    return new class($translatable) implements \Stringable {
+        public function __construct(private Translatable $t) {}
+        public function __toString(): string {
+            return json_encode((string) $this->t);
+        }
+    };
+}
+
+/**
  * Get a formatter instance for convenience
  *
  * Provides shortcuts for common formatting tasks.
