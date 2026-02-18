@@ -13,7 +13,7 @@ Metadata is built on JSON Schema's annotation vocabulary, providing standardized
 - **readOnly**: Indicates value should not be modified
 - **writeOnly**: Indicates value may be set but remains hidden
 - **deprecated**: Marks data as deprecated
-- **format**: Semantic hint about string format (e.g., 'email', 'uri')
+- **format**: Semantic hint about string format (derived from `V\Format` validator attribute)
 
 ## Basic Usage
 
@@ -23,6 +23,7 @@ The preferred way to define metadata is using PHP attributes:
 
 ```php
 use mini\Metadata\Attributes as Meta;
+use mini\Validator\Attributes as V;
 
 #[Meta\Title('User Account')]
 #[Meta\Description('Represents a user in the system')]
@@ -35,7 +36,7 @@ class User
     public string $username;
 
     #[Meta\Title('Email Address')]
-    #[Meta\MetaFormat('email')]
+    #[V\Format('email')]  // Format is defined via validation (schema extracts it)
     public string $email;
 
     #[Meta\Title('Password')]
@@ -192,9 +193,10 @@ All attributes are in the `mini\Metadata\Attributes` namespace:
 - **`IsReadOnly(bool $value = true)`** - Mark as read-only (property only)
 - **`IsWriteOnly(bool $value = true)`** - Mark as write-only (property only)
 - **`IsDeprecated(bool $value = true)`** - Mark as deprecated (class or property)
-- **`MetaFormat(string $format)`** - Format hint like 'email', 'uri' (property only)
 - **`Property(...)`** - Define property metadata without actual property (class only, repeatable)
 - **`Ref(string $class)`** - Reference another class's metadata (property only)
+
+**Note:** The `format` property in metadata is derived from `mini\Validator\Attributes\Format`. There is no separate metadata Format attribute - validation defines format, and the schema extracts it.
 
 ### Class References and Auto-Resolution
 

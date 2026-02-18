@@ -4,6 +4,97 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Database: Simplified Model — Final Unsafe, Overridable Safe (2026-02-18)
+
+**BREAKING CHANGE**
+
+Merged `ModelTrait` into the abstract `Model` class with a simple two-tier design: final unsafe methods for guaranteed persistence, overridable safe methods for custom auth/logic.
+
+### What Changed
+
+- **ModelTrait deleted** — all code moved into `Model` abstract class
+- **saveUnsafe(), deleteUnsafe()** are `final` — the guaranteed persistence layer (timestamps, dehydration, validation, DB writes)
+- **save(), delete()** are **overridable** — default verifies entity is visible via `query()` before persisting, then calls `saveUnsafe()`/`deleteUnsafe()`. Throws `AccessDeniedException` if entity exists but is not accessible.
+- **Removed**: `performSave()`, `performDelete()`, `beforeSave()`, `afterSave()`, `beforeDelete()`, `afterDelete()` — no hooks, no extra layers
+
+### Design
+
+```
+saveUnsafe() [final]  → dehydrate (incl. timestamps) → validate → INSERT/UPDATE
+deleteUnsafe() [final] → DELETE → clear identity
+
+save() [overridable]   → query()-based auth check → saveUnsafe()
+delete() [overridable] → query()-based auth check → deleteUnsafe()
+```
+
+Override `query()` to filter by user permissions — `save()` and `delete()` automatically use it to verify access.
+
+### Timestamp Attributes
+
+Timestamps are now handled by the Dehydrator via `#[CreatedAt]` and `#[UpdatedAt]` attributes:
+
+```php
+#[CreatedAt]
+public ?string $created_at = null;  // Set to current datetime on insert (when null)
+
+#[UpdatedAt]
+public string $updated_at;          // Set to current datetime on every save
+```
+
+- Works with any property name — not hardcoded to `created_at`/`updated_at`
+- Output is always `'Y-m-d H:i:s'` string format (SQL-compatible)
+- `#[CreatedAt]` only sets value when null; `#[UpdatedAt]` always overwrites
+- Only applies to reflection-based dehydration (entities implementing `Dehydratable` handle their own)
+
+For custom logic around persistence, override `save()`/`delete()` and wrap the unsafe call:
+
+```php
+public function save(?array $only = null): int {
+    // custom auth, logging, etc.
+    return $this->saveUnsafe($only);
+}
+```
+
+### Migration
+
+**Classes extending Model** — no changes needed (all entity classes already extend Model).
+
+**Classes using `use ModelTrait` directly** — must extend `Model` instead:
+
+```php
+// Before
+class User {
+    use ModelTrait;
+    protected static function tableName(): string { return 'users'; }
+}
+
+// After
+class User extends Model {
+    protected static function tableName(): string { return 'users'; }
+}
+```
+
+**Classes overriding performSave()/hooks** — override `save()` instead:
+
+```php
+// Before
+protected function performSave(): int { ... }
+protected function beforeSave(): void { ... }
+
+// After
+public function save(?array $only = null): int {
+    // your custom logic here
+    return $this->saveUnsafe($only);
+}
+```
+
+### Why This Change?
+
+1. **Simpler**: Two layers instead of five (`save → saveUnsafe → beforeSave → performSave → afterSave`)
+2. **No temporary state**: Removed `$_oldDataForSave` and `$_saveOnlyProperties` — parameters flow directly
+3. **Natural override point**: Override `save()`/`delete()` is more intuitive than `performSave()`/hooks
+4. **Final persistence**: `saveUnsafe()`/`deleteUnsafe()` guarantee timestamps, validation, and DB writes always happen
+
 ## Database: PartialQuery API - Separated withEntityClass() from withHydrator() (2025-01-24)
 
 **BREAKING CHANGE**

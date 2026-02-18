@@ -178,22 +178,53 @@ class AttributeValidatorFactory
      *
      * @param ReflectionProperty $property Property to build validator for
      * @param Purpose|string|null $purpose Filter attributes by purpose
-     * @return Validator|null Property validator, or null if no validation attributes
+     * @return Validator|null Property validator, or null if no validation rules
      */
     private function buildPropertyValidator(ReflectionProperty $property, Purpose|string|null $purpose): ?Validator
     {
-        $attributes = $property->getAttributes();
-
-        if (empty($attributes)) {
-            return null;
-        }
-
         $validator = new Validator();
         $hasValidation = false;
 
+        // Infer type from PHP type hint (explicit #[Type] attribute overrides)
+        $phpType = $property->getType();
+        if ($phpType instanceof \ReflectionNamedType && $phpType->isBuiltin() && !$phpType->allowsNull()) {
+            $jsonSchemaType = match ($phpType->getName()) {
+                'bool' => 'boolean',
+                'int' => 'integer',
+                'float' => 'number',
+                'string' => 'string',
+                'array' => 'array',
+                default => null,
+            };
+            if ($jsonSchemaType !== null) {
+                $validator = $validator->type($jsonSchemaType);
+                $hasValidation = true;
+            }
+        }
+
+        $attributes = $property->getAttributes();
+
+        // Check for Ref attribute first
         foreach ($attributes as $attribute) {
-            // Skip non-validator attributes (e.g., Tables attributes)
+            if ($attribute->getName() === Attributes\Ref::class) {
+                $ref = $attribute->newInstance();
+                $refValidator = \mini\validator($ref->class)->{$ref->property};
+                if ($refValidator !== null) {
+                    $validator = $refValidator;
+                    $hasValidation = true;
+                }
+                break;
+            }
+        }
+
+        // Apply additional validation attributes on top
+        foreach ($attributes as $attribute) {
             if (!str_starts_with($attribute->getName(), 'mini\\Validator\\Attributes\\')) {
+                continue;
+            }
+
+            // Skip Ref itself
+            if ($attribute->getName() === Attributes\Ref::class) {
                 continue;
             }
 

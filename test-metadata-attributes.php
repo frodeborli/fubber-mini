@@ -22,7 +22,7 @@ class SimpleUser
 
     #[Meta\Title('Email')]
     #[Meta\Description('User email address')]
-    #[Meta\MetaFormat('email')]
+    #[Valid\Format('email')]
     public string $email;
 }
 
@@ -94,7 +94,6 @@ class CompleteUser
     #[Valid\Required]
     #[Valid\Format('email')]
     #[Meta\Title('Email Address')]
-    #[Meta\MetaFormat('email')]
     public string $email;
 
     #[Valid\Minimum(18)]

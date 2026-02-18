@@ -1,8 +1,11 @@
 <?php
 /**
- * ModelTrait Example
+ * Model Example
  *
- * Demonstrates using ModelTrait for Eloquent-style models.
+ * Demonstrates extending Model for Active Record entities.
+ *
+ * NOTE: This example was previously named "model-trait" when ModelTrait existed
+ * as a separate trait. ModelTrait has been merged into the abstract Model class.
  */
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -171,49 +174,27 @@ $db = new class($pdo) implements mini\Database\DatabaseInterface {
     }
 };
 
-// Helper to inject our database instance for the db() function
-// In real applications, this would be configured in _config/mini/Database/DatabaseInterface.php
-function db(): mini\Database\DatabaseInterface {
-    global $db;
-    return $db;
-}
-
-// Define User model
-class User {
-    use mini\Database\ModelTrait;
-
+// Define User model extending Model
+class User extends mini\Database\Model
+{
     public ?int $id = null;
     public string $name;
     public string $email;
     public string $status = 'active';
+    #[mini\Database\Attributes\CreatedAt]
     public ?string $created_at = null;
 
-    protected static function getTableName(): string {
+    protected static function tableName(): string {
         return 'users';
     }
 
-    protected static function getPrimaryKey(): string {
+    protected static function primaryKey(): string {
         return 'id';
     }
 
-    protected static function getEntityClass(): string {
-        return self::class;
-    }
-
-    protected static function dehydrate(object $entity): array {
-        $data = [
-            'name' => $entity->name,
-            'email' => $entity->email,
-            'status' => $entity->status,
-            'created_at' => $entity->created_at ?? date('Y-m-d H:i:s')
-        ];
-
-        // Only include ID if it's set (for updates)
-        if ($entity->id !== null) {
-            $data['id'] = $entity->id;
-        }
-
-        return $data;
+    protected static function database(): mini\Database\DatabaseInterface {
+        global $db;
+        return $db;
     }
 
     // Custom query scopes
@@ -228,7 +209,7 @@ class User {
     }
 }
 
-echo "=== ModelTrait Examples ===\n\n";
+echo "=== Model Examples ===\n\n";
 
 // Example 1: Create and save new model
 echo "1. Create and save new user:\n";

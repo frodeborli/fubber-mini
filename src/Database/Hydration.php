@@ -3,14 +3,10 @@
 namespace mini\Database;
 
 /**
- * Interface for entities that can hydrate from and dehydrate to database rows
+ * Combined interface for entities with both custom hydration and dehydration
  *
- * Implement this interface on entity classes that need custom hydration/dehydration
- * logic, such as computed properties, column renaming, or nested object construction.
- *
- * When withEntityClass() is used with a class implementing this interface:
- * - fromSqlRow() is called instead of default reflection-based hydration
- * - toSqlRow() is called for insert/update operations instead of reflection
+ * Use this when you need custom logic for both loading and saving.
+ * If you only need one direction, implement Hydratable or Dehydratable instead.
  *
  * ```php
  * class User implements Hydration
@@ -19,18 +15,17 @@ namespace mini\Database;
  *     public string $fullName;
  *     public \DateTimeImmutable $createdAt;
  *
- *     public static function fromSqlRow(array $row): static
+ *     public static function fromSqlRow(object $row): static
  *     {
  *         $user = new static();
- *         $user->id = $row['id'];
- *         $user->fullName = $row['first_name'] . ' ' . $row['last_name'];
- *         $user->createdAt = new \DateTimeImmutable($row['created_at']);
+ *         $user->id = $row->id;
+ *         $user->fullName = $row->first_name . ' ' . $row->last_name;
+ *         $user->createdAt = new \DateTimeImmutable($row->created_at);
  *         return $user;
  *     }
  *
  *     public function toSqlRow(): array
  *     {
- *         // Split fullName back to first/last for storage
  *         $parts = explode(' ', $this->fullName, 2);
  *         return [
  *             'id' => $this->id,
@@ -41,27 +36,7 @@ namespace mini\Database;
  *     }
  * }
  * ```
- *
- * @see SqlValueHydrator For hydrating value objects from a single column
  */
-interface Hydration
+interface Hydration extends Hydratable, Dehydratable
 {
-    /**
-     * Create instance from a database row
-     *
-     * @param array<string, mixed> $row Associative array of column => value
-     * @return static
-     */
-    public static function fromSqlRow(array $row): static;
-
-    /**
-     * Convert instance to a database row
-     *
-     * Returns an associative array suitable for INSERT/UPDATE operations.
-     * Values should be SQL-compatible scalars (strings, ints, floats, bools, null).
-     * DateTimeInterface should be formatted as strings, objects as JSON, etc.
-     *
-     * @return array<string, mixed> Associative array of column => value
-     */
-    public function toSqlRow(): array;
 }

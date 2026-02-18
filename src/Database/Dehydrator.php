@@ -3,49 +3,63 @@
 namespace mini\Database;
 
 use mini\Converter\ConverterRegistryInterface;
+use mini\Database\Attributes\CreatedAt;
+use mini\Database\Attributes\UpdatedAt;
 use mini\Mini;
 
 /**
  * Converts between entity objects and SQL-compatible arrays
  *
  * Handles hydration/dehydration via:
- * 1. Hydration interface - if entity implements Hydration, uses fromSqlRow()/toSqlRow()
- * 2. Reflection fallback - maps properties to columns with type conversion
+ * 1. Hydratable interface - if entity implements Hydratable, uses fromSqlRow()
+ * 2. Dehydratable interface - if entity implements Dehydratable, uses toSqlRow()
+ * 3. Reflection fallback - maps properties to columns with type conversion
  *
  * Used by PartialQuery for reading and by write operations for validation.
  */
 final class Dehydrator
 {
     /**
-     * Hydrate an array to an entity instance
+     * Track classes currently being hydrated to detect recursion
+     * @var array<string, true>
+     */
+    private static array $hydrating = [];
+
+    /**
+     * Hydrate a database row to an entity instance
      *
      * @template T of object
-     * @param array<string, mixed> $row Associative array of column => value
+     * @param object $row Database row (typically stdClass from PDO)
      * @param class-string<T> $entityClass The entity class to hydrate into
      * @param array|false $constructorArgs Constructor args, or false to skip constructor
      * @return T
      */
-    public static function hydrate(array $row, string $entityClass, array|false $constructorArgs = false): object
+    public static function hydrate(object $row, string $entityClass, array|false $constructorArgs = false): object
     {
-        // If entity implements Hydration, use its fromSqlRow() method
-        if (is_subclass_of($entityClass, Hydration::class)) {
-            return $entityClass::fromSqlRow($row);
+        // If entity implements Hydratable and we're not already hydrating it (recursion guard)
+        if (is_subclass_of($entityClass, Hydratable::class) && !isset(self::$hydrating[$entityClass])) {
+            self::$hydrating[$entityClass] = true;
+            try {
+                return $entityClass::fromSqlRow($row);
+            } finally {
+                unset(self::$hydrating[$entityClass]);
+            }
         }
 
-        // Reflection-based hydration
-        return self::hydrateViaReflection($row, $entityClass, $constructorArgs);
+        // Reflection-based hydration (also used as fallback for recursive calls)
+        return self::hydrateReflection($row, $entityClass, $constructorArgs);
     }
 
     /**
      * Hydrate using reflection (maps columns to properties with type conversion)
      *
      * @template T of object
-     * @param array<string, mixed> $row
+     * @param object $row Database row (typically stdClass from PDO)
      * @param class-string<T> $entityClass
      * @param array|false $constructorArgs
      * @return T
      */
-    private static function hydrateViaReflection(array $row, string $entityClass, array|false $constructorArgs): object
+    private static function hydrateReflection(object $row, string $entityClass, array|false $constructorArgs = false): object
     {
         $refClass = new \ReflectionClass($entityClass);
         $converterRegistry = null;
@@ -99,8 +113,8 @@ final class Dehydrator
      */
     public static function dehydrate(object $entity): array
     {
-        // If entity implements Hydration, use its toSqlRow() method
-        if ($entity instanceof Hydration) {
+        // If entity implements Dehydratable, use its toSqlRow() method
+        if ($entity instanceof Dehydratable) {
             return $entity->toSqlRow();
         }
 
@@ -132,6 +146,13 @@ final class Dehydrator
             }
 
             $value = $prop->getValue($entity);
+
+            // Auto-set timestamp attributes
+            if (!empty($prop->getAttributes(UpdatedAt::class))) {
+                $value = date('Y-m-d H:i:s');
+            } elseif ($value === null && !empty($prop->getAttributes(CreatedAt::class))) {
+                $value = date('Y-m-d H:i:s');
+            }
 
             // Convert non-scalar values to SQL-compatible format
             if ($value !== null && !is_scalar($value)) {

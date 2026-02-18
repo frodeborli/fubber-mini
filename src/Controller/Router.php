@@ -242,6 +242,15 @@ class Router
         $query = $request->getUri()->getQuery();
         $queryString = $query ? '?' . $query : '';
 
+        // Get route prefix for redirects (includes base URL path + route path, e.g., '/members-dev/auth')
+        // This is set by the file-based Router when scoping the request for controllers
+        $routePrefix = $request->getAttribute('mini.router.routePrefix', '');
+        if ($routePrefix === '') {
+            // Fallback to just baseUrl path if not set (e.g., controller used directly)
+            $baseUrl = \mini\Mini::$mini?->baseUrl;
+            $routePrefix = $baseUrl !== null ? (parse_url($baseUrl, PHP_URL_PATH) ?: '') : '';
+        }
+
         // Try to find matching route
         foreach ($this->routes as $route) {
             // Check HTTP method
@@ -260,10 +269,10 @@ class Router
 
                 if ($routeEndsWithSlash && !$pathEndsWithSlash) {
                     // Route expects trailing slash but path doesn't have it - redirect
-                    return new \mini\Http\Message\Response('', ['Location' => $path . '/' . $queryString], 301);
+                    return new \mini\Http\Message\Response('', ['Location' => $routePrefix . $path . '/' . $queryString], 301);
                 } elseif (!$routeEndsWithSlash && $pathEndsWithSlash && $path !== '/') {
                     // Route doesn't expect trailing slash but path has it - redirect
-                    return new \mini\Http\Message\Response('', ['Location' => rtrim($path, '/') . $queryString], 301);
+                    return new \mini\Http\Message\Response('', ['Location' => $routePrefix . rtrim($path, '/') . $queryString], 301);
                 }
 
                 // Type-cast parameters
@@ -286,7 +295,7 @@ class Router
                 }
                 if (preg_match($route['pattern'], $path . '/', $matches)) {
                     // Alternate path matches - redirect to it
-                    return new \mini\Http\Message\Response('', ['Location' => $path . '/' . $queryString], 301);
+                    return new \mini\Http\Message\Response('', ['Location' => $routePrefix . $path . '/' . $queryString], 301);
                 }
             }
         } elseif ($path !== '/') {
@@ -298,7 +307,7 @@ class Router
                 }
                 if (preg_match($route['pattern'], $pathWithoutSlash, $matches)) {
                     // Alternate path matches - redirect to it
-                    return new \mini\Http\Message\Response('', ['Location' => $pathWithoutSlash . $queryString], 301);
+                    return new \mini\Http\Message\Response('', ['Location' => $routePrefix . $pathWithoutSlash . $queryString], 301);
                 }
             }
         }

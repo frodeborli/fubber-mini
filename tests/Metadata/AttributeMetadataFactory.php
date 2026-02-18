@@ -9,6 +9,7 @@ use mini\Test;
 use mini\Metadata\Metadata;
 use mini\Metadata\AttributeMetadataFactory;
 use mini\Metadata\Attributes as Meta;
+use mini\Validator\Attributes as V;
 use mini\I18n\Translatable;
 
 // Test classes with attributes
@@ -23,7 +24,7 @@ class TestUser
     public string $username;
 
     #[Meta\Title('Email Address')]
-    #[Meta\MetaFormat('email')]
+    #[V\Format('email')]
     public string $email;
 
     #[Meta\Title('Password')]

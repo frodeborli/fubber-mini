@@ -39,6 +39,9 @@ use mini\Mini;
  */
 class ValidatorStore extends InstanceStore
 {
+    /** @var array<string, true> Classes currently being built (circular reference detection) */
+    private array $building = [];
+
     public function __construct()
     {
         parent::__construct(Validator::class);
@@ -100,8 +103,20 @@ class ValidatorStore extends InstanceStore
 
         // Auto-build from class attributes if class exists
         if (class_exists($key) || interface_exists($key)) {
-            $factory = Mini::$mini->get(AttributeValidatorFactory::class);
-            $validator = $factory->forClass($key, $purpose);
+            if (isset($this->building[$cacheKey])) {
+                throw new \RuntimeException(
+                    "Circular Ref detected while building validator for '$key'. " .
+                    "Chain: " . implode(' -> ', array_keys($this->building)) . " -> $key"
+                );
+            }
+
+            $this->building[$cacheKey] = true;
+            try {
+                $factory = Mini::$mini->get(AttributeValidatorFactory::class);
+                $validator = $factory->forClass($key, $purpose);
+            } finally {
+                unset($this->building[$cacheKey]);
+            }
 
             // Cache it
             parent::set($cacheKey, $validator);

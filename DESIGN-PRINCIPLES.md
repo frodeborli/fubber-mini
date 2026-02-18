@@ -40,7 +40,7 @@
 - Teaching juniors to become seniors, not hiding complexity forever
 
 ## ORM Patterns
-- Active Record via `ModelTrait` for entity persistence
+- Active Record via `Model` base class for entity persistence
 - VirtualDatabase decouples entities from storage backend
 - Validation integrated into save() via JSON Schema attributes
 - Identity tracking for correct insert vs update detection

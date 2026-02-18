@@ -26,6 +26,9 @@ use mini\Mini;
  */
 class MetadataStore extends InstanceStore
 {
+    /** @var array<string, true> Classes currently being built (circular reference detection) */
+    private array $building = [];
+
     public function __construct()
     {
         parent::__construct(Metadata::class);
@@ -46,8 +49,20 @@ class MetadataStore extends InstanceStore
 
         // If it's a class or interface, build from attributes
         if (class_exists($key) || interface_exists($key)) {
-            $factory = Mini::$mini->get(AttributeMetadataFactory::class);
-            $metadata = $factory->forClass($key);
+            if (isset($this->building[$key])) {
+                throw new \RuntimeException(
+                    "Circular reference detected while building metadata for '$key'. " .
+                    "Chain: " . implode(' -> ', array_keys($this->building)) . " -> $key"
+                );
+            }
+
+            $this->building[$key] = true;
+            try {
+                $factory = Mini::$mini->get(AttributeMetadataFactory::class);
+                $metadata = $factory->forClass($key);
+            } finally {
+                unset($this->building[$key]);
+            }
 
             // Cache it
             $this->set($key, $metadata);

@@ -219,9 +219,9 @@ Exceptions are caught and converted to responses via the `exceptionConverter` re
 
 ## Data Layer Philosophy
 
-### Active Record via ModelTrait
+### Active Record via Model
 
-We provide Active Record style persistence via `ModelTrait`. Entities use validation attributes for schema definition, and `VirtualDatabase` decouples persistence from storage backend - so the "coupling" argument against Active Record is moot.
+We provide Active Record style persistence via the abstract `Model` class. Entities use validation attributes for schema definition, and `VirtualDatabase` decouples persistence from storage backend - so the "coupling" argument against Active Record is moot.
 
 We provide Eloquent-style queries, but we don't hide SQL:
 ```php

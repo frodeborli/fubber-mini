@@ -528,9 +528,17 @@ final class PartialQuery implements ResultSetInterface, MutableTableInterface
     }
 
     /**
+     * Get the entity class name if set
+     */
+    public function getEntityClass(): ?string
+    {
+        return $this->entityClass;
+    }
+
+    /**
      * Set a callback to be called after each entity is hydrated
      *
-     * Used by ModelTrait to mark entities as loaded from the database.
+     * Used by Model to mark entities as loaded from the database.
      *
      * @param \Closure(object):void $callback Called with each hydrated entity
      * @return self
@@ -1583,88 +1591,17 @@ final class PartialQuery implements ResultSetInterface, MutableTableInterface
             return;
         }
 
-        // Entity class hydration
+        // Entity class hydration via Dehydrator
         if ($this->entityClass !== null) {
             $class = $this->entityClass;
             $args  = $this->entityConstructorArgs;
 
-            // Check if class implements Hydration for custom hydration
-            if (is_subclass_of($class, Hydration::class)) {
-                foreach ($rows as $row) {
-                    $obj = $class::fromSqlRow($row);
-                    if ($this->loadCallback !== null) {
-                        ($this->loadCallback)($obj);
-                    }
-                    yield $obj;
+            foreach ($rows as $row) {
+                $obj = Dehydrator::hydrate($row, $class, $args);
+                if ($this->loadCallback !== null) {
+                    ($this->loadCallback)($obj);
                 }
-                return;
-            }
-
-            // Default: reflection-based hydration
-            try {
-                $refClass = new \ReflectionClass($class);
-                /** @var array<string, array{prop: \ReflectionProperty, type: ?string}> $reflectionCache */
-                $reflectionCache = [];
-                $converterRegistry = null;
-
-                foreach ($rows as $row) {
-                    // Create instance with or without constructor
-                    if ($args === false) {
-                        $obj = $refClass->newInstanceWithoutConstructor();
-                    } else {
-                        $obj = $refClass->newInstanceArgs($args);
-                    }
-
-                    // Map columns to properties by name if property exists
-                    foreach ($row as $propertyName => $value) {
-                        if (!isset($reflectionCache[$propertyName])) {
-                            if (!$refClass->hasProperty($propertyName)) {
-                                // Unknown column -> skip
-                                continue;
-                            }
-                            $prop = $refClass->getProperty($propertyName);
-
-                            // Get target type name for conversion
-                            $targetType = null;
-                            $refType = $prop->getType();
-                            if ($refType instanceof \ReflectionNamedType && !$refType->isBuiltin()) {
-                                $targetType = $refType->getName();
-                            }
-
-                            $reflectionCache[$propertyName] = ['prop' => $prop, 'type' => $targetType];
-                        }
-
-                        $cached = $reflectionCache[$propertyName];
-
-                        // Convert value if target is a class and value needs conversion
-                        if ($value !== null && $cached['type'] !== null && !($value instanceof $cached['type'])) {
-                            // Lazy-load converter registry
-                            if ($converterRegistry === null) {
-                                $converterRegistry = \mini\Mini::$mini->get(\mini\Converter\ConverterRegistryInterface::class);
-                            }
-                            // Use 'sql-value' as source type for database hydration
-                            // tryConvert checks both registered converters and fallback handlers
-                            $found = false;
-                            $converted = $converterRegistry->tryConvert($value, $cached['type'], 'sql-value', $found);
-                            if ($found) {
-                                $value = $converted;
-                            }
-                        }
-
-                        $cached['prop']->setValue($obj, $value);
-                    }
-
-                    if ($this->loadCallback !== null) {
-                        ($this->loadCallback)($obj);
-                    }
-                    yield $obj;
-                }
-            } catch (\ReflectionException $e) {
-                throw new \RuntimeException(
-                    "Failed to hydrate class '{$class}': " . $e->getMessage(),
-                    0,
-                    $e
-                );
+                yield $obj;
             }
             return;
         }

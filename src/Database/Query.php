@@ -209,6 +209,14 @@ final class Query implements IteratorAggregate, Countable
     }
 
     /**
+     * Get the entity class name if set
+     */
+    public function getEntityClass(): ?string
+    {
+        return $this->pq->getEntityClass();
+    }
+
+    /**
      * Transform each row with a custom hydrator
      */
     public function withHydrator(Closure $hydrator): static

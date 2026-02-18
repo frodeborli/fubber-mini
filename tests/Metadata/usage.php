@@ -11,6 +11,7 @@ require __DIR__ . '/../../ensure-autoloader.php';
 use mini\Test;
 use mini\Metadata\Metadata;
 use mini\Metadata\Attributes as Meta;
+use mini\Validator\Attributes as V;
 
 // ============================================================================
 // Test entities - realistic domain models
@@ -32,7 +33,7 @@ class User
     public string $username;
 
     #[Meta\Title('Email')]
-    #[Meta\MetaFormat('email')]
+    #[V\Format('email')]
     public string $email;
 
     #[Meta\Title('Age')]

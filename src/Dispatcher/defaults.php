@@ -57,22 +57,16 @@ $dispatcher->registerExceptionConverter(function(\mini\Exceptions\NotFoundExcept
     return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], 404);
 });
 
-// Handle AccessDeniedException → 401/403
+// Handle AuthenticationRequiredException → 401
+$dispatcher->registerExceptionConverter(function(\mini\Exceptions\AuthenticationRequiredException $e): ResponseInterface {
+    $body = \mini\Http\ErrorHandler::renderExceptionPage($e, 401);
+    return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], 401);
+});
+
+// Handle AccessDeniedException → 403
 $dispatcher->registerExceptionConverter(function(\mini\Exceptions\AccessDeniedException $e): ResponseInterface {
-    // Determine if user is authenticated to decide between 401 and 403
-    $statusCode = 401; // Default to 401 (Unauthorized)
-
-    try {
-        $auth = \mini\auth();
-        if ($auth->isAuthenticated()) {
-            $statusCode = 403; // User is authenticated but lacks permission
-        }
-    } catch (\Throwable) {
-        // Auth not configured, default to 401
-    }
-
-    $body = \mini\Http\ErrorHandler::renderExceptionPage($e, $statusCode);
-    return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], $statusCode);
+    $body = \mini\Http\ErrorHandler::renderExceptionPage($e, 403);
+    return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], 403);
 });
 
 // Handle BadRequestException → 400

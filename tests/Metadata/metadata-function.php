@@ -9,6 +9,7 @@ use mini\Test;
 use mini\Metadata\Metadata;
 use mini\Metadata\MetadataStore;
 use mini\Metadata\Attributes as Meta;
+use mini\Validator\Attributes as V;
 
 // Test class with attributes
 #[Meta\Title('Product')]
@@ -19,7 +20,7 @@ class TestProduct
     public string $name;
 
     #[Meta\Title('Price')]
-    #[Meta\MetaFormat('currency')]
+    #[V\Format('currency')]
     public float $price;
 }
 

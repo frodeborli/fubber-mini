@@ -3,10 +3,12 @@
 namespace mini\Exceptions;
 
 /**
- * Exception thrown when access to a resource is denied
+ * Exception thrown when an authenticated user lacks permission
  *
- * Transport-agnostic - the dispatcher maps this to appropriate response
- * (e.g., 401/403 for HTTP, appropriate error for CLI, etc.)
+ * Maps to HTTP 403 (Forbidden). The user is authenticated but not
+ * authorized to perform this action.
+ *
+ * For unauthenticated users, throw AuthenticationRequiredException (401) instead.
  */
 class AccessDeniedException extends \Exception
 {

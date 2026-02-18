@@ -225,6 +225,11 @@ class Router implements RequestHandlerInterface
                     $scopedRequestTarget = $scopedPath . ($queryString ? '?' . $queryString : '');
                     $request = $request->withRequestTarget($scopedRequestTarget);
 
+                    // Store the route prefix for Controller\Router redirects
+                    // This includes baseUrl path + resolved route path (e.g., '/members-dev/auth')
+                    $routePrefix = $baseUrlPath . '/' . rtrim($resolvedPath, '/');
+                    $request = $request->withAttribute('mini.router.routePrefix', $routePrefix);
+
                     // Update global request instance with scoped request target
                     $this->replaceGlobalRequest($request);
                 }

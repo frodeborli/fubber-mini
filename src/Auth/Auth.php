@@ -3,6 +3,7 @@
 namespace mini\Auth;
 
 use mini\Exceptions\AccessDeniedException;
+use mini\Exceptions\AuthenticationRequiredException;
 use mini\Mini;
 
 /**
@@ -94,12 +95,12 @@ final class Auth
     /**
      * Require user to be authenticated
      *
-     * @throws AccessDeniedException If not authenticated
+     * @throws AuthenticationRequiredException If not authenticated
      */
     public function requireLogin(): self
     {
         if (!$this->isAuthenticated()) {
-            throw new AccessDeniedException('Authentication required');
+            throw new AuthenticationRequiredException();
         }
         return $this;
     }
