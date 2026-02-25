@@ -89,6 +89,10 @@ trait RequestTrait {
      */
     public function withRequestTarget(string $requestTarget): RequestInterface {
         $c = clone $this;
+        // Freeze the URI before changing the request target (PSR-7: URI and request-target are independent)
+        if ($c->uriOverride === null) {
+            $c->uriOverride = $this->getUri();
+        }
         $c->requestTarget = $requestTarget;
         return $c;
     }

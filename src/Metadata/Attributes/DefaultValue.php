@@ -7,6 +7,8 @@ use Attribute;
 /**
  * Set metadata default value annotation
  *
+ * Query: `metadata(User::class)->$prop?->getDefault()` — never use ReflectionClass directly.
+ *
  * Note: Named DefaultValue to avoid conflict with PHP's reserved keyword 'default'
  *
  * @see \mini\Metadata\Metadata::default()

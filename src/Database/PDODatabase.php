@@ -318,34 +318,29 @@ class PDODatabase implements DatabaseInterface
 
     /**
      * Delete rows matching a query
+     *
+     * Requires a WHERE clause for safety. Use db()->exec('DELETE FROM table')
+     * for mass deletes.
      */
     public function delete(Query|PartialQuery $query): int
     {
         $pq = $query instanceof Query ? $this->unwrapQuery($query) : $query;
-        $table = $pq->getSourceTable();
-        $ctes = $pq->getCTEs();
-        $where = $pq->getWhere();
 
-        // Require WHERE clause for safety
-        // Use db()->exec('DELETE FROM table') or TRUNCATE for mass deletes
+        // Safety: require WHERE clause
+        $where = $pq->getWhere();
         if (empty($where['sql'])) {
+            $table = $pq->getSourceTable();
             throw new \InvalidArgumentException(
                 "DELETE requires a WHERE clause. Use db()->exec('DELETE FROM {$table}') for mass deletes."
             );
         }
 
-        $sql = $ctes['sql'] . "DELETE FROM {$table}";
-        $sql .= " WHERE {$where['sql']}";
-        $limit = $pq->getLimit();
-        if ($limit !== null) {
-            $sql .= " LIMIT {$limit}";
-        }
-
-        $params = array_merge($ctes['params'], $where['params']);
+        $renderer = SqlRenderer::forDialect($this->getDialect());
+        [$sql, $params] = $renderer->renderAsDelete($pq);
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute($params);
+            $stmt->execute(array_map(sqlval(...), $params));
             return $stmt->rowCount();
         } catch (PDOException $e) {
             throw new Exception("Delete failed: " . $e->getMessage());
@@ -358,40 +353,12 @@ class PDODatabase implements DatabaseInterface
     public function update(Query|PartialQuery $query, string|array $set, array $params = []): int
     {
         $pq = $query instanceof Query ? $this->unwrapQuery($query) : $query;
-        $table = $pq->getSourceTable();
-        $ctes = $pq->getCTEs();
-        $where = $pq->getWhere();
-
-        if (is_string($set)) {
-            // Raw SQL expression with optional params
-            $sql = $ctes['sql'] . "UPDATE {$table} SET {$set}";
-            $params = array_merge($ctes['params'], $params, $where['params']);
-        } else {
-            // Array of column => value assignments
-            $setParts = [];
-            $setParams = [];
-
-            foreach ($set as $column => $value) {
-                $setParts[] = "$column = ?";
-                $setParams[] = $value;
-            }
-
-            $sql = $ctes['sql'] . "UPDATE {$table} SET " . implode(', ', $setParts);
-            $params = array_merge($ctes['params'], $setParams, $where['params']);
-        }
-
-        if ($where['sql']) {
-            $sql .= " WHERE {$where['sql']}";
-        }
-
-        $limit = $pq->getLimit();
-        if ($limit !== null) {
-            $sql .= " LIMIT {$limit}";
-        }
+        $renderer = SqlRenderer::forDialect($this->getDialect());
+        [$sql, $params] = $renderer->renderAsUpdate($pq, $set, $params);
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute($params);
+            $stmt->execute(array_map(sqlval(...), $params));
             return $stmt->rowCount();
         } catch (PDOException $e) {
             throw new Exception("Update failed: " . $e->getMessage());

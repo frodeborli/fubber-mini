@@ -109,6 +109,11 @@ final class Query implements IteratorAggregate, Countable
         return ($this->wrap)($this->pq->order($spec));
     }
 
+    public function orderBy(string $column, bool $asc = true): static
+    {
+        return $this->order(self::quoteIdentifier($column) . ($asc ? ' ASC' : ' DESC'));
+    }
+
     public function limit(int $n): static
     {
         return ($this->wrap)($this->pq->limit($n));
@@ -239,5 +244,23 @@ final class Query implements IteratorAggregate, Countable
     public function __toString(): string
     {
         return (string) $this->pq;
+    }
+
+    // =========================================================================
+    // Internal
+    // =========================================================================
+
+    /**
+     * Quote identifier for safe inclusion in SQL fragments
+     *
+     * Uses SQL-standard double quotes. The parser reads these into IdentifierNode,
+     * and SqlRenderer re-quotes per dialect at render time.
+     */
+    private static function quoteIdentifier(string $name): string
+    {
+        return implode('.', array_map(
+            fn($part) => '"' . str_replace('"', '""', $part) . '"',
+            explode('.', $name)
+        ));
     }
 }

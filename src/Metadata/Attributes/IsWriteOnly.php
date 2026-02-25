@@ -7,6 +7,8 @@ use Attribute;
 /**
  * Mark field as write-only in metadata
  *
+ * Query: `metadata(User::class)->$prop?->isWriteOnly()` — never use ReflectionClass directly.
+ *
  * @see \mini\Metadata\Metadata::writeOnly()
  */
 #[Attribute(Attribute::TARGET_PROPERTY)]

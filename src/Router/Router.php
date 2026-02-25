@@ -176,6 +176,8 @@ class Router implements RequestHandlerInterface
             $this->replaceGlobalRequest($request);
 
             // 4. Include controller file and get return value
+            //    Mount path is available on $this during require() so controllers can read it
+            $this->mountPath = $resolvedPath !== null ? '/' . rtrim($resolvedPath, '/') : null;
             try {
                 $returnValue = self::runControllerFile($handlerFile);
             } catch (Redirect $redirect) {
@@ -203,6 +205,8 @@ class Router implements RequestHandlerInterface
 
                 $request = $this->handleReroute($request, $resolvedPath, $reroute->routes);
                 continue;
+            } finally {
+                $this->mountPath = null;
             }
 
             // 5. Handle null return (classical PHP)
@@ -250,6 +254,13 @@ class Router implements RequestHandlerInterface
             return $response;
         }
     }
+
+    /**
+     * The mount path resolved by the file-based router for the current route file.
+     * Available during require() of a route file and cleared immediately after.
+     * e.g., for _routes/admin/composers/__DEFAULT__.php this is '/admin/composers'
+     */
+    public ?string $mountPath = null;
 
     private static function runControllerFile(string $filePath)
     {

@@ -8,6 +8,8 @@ use mini\Validator\Purpose;
 /**
  * Validate via uniqueItems()
  *
+ * Query: `validator(User::class)->$prop->uniqueItems` — never use ReflectionClass directly.
+ *
  * @see \mini\Validator\Validator::uniqueItems()
  */
 #[Attribute(Attribute::TARGET_PROPERTY | Attribute::IS_REPEATABLE)]

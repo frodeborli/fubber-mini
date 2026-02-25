@@ -27,5 +27,5 @@ use mini\Lifetime;
 $primaryRoutesPath = $_ENV['MINI_ROUTES_ROOT'] ?? (Mini::$mini->root . '/_routes');
 Mini::$mini->paths->routes = new \mini\Util\PathsRegistry($primaryRoutesPath);
 
-// Register Router as the PSR-15 RequestHandler
-Mini::$mini->addService(\Psr\Http\Server\RequestHandlerInterface::class, Lifetime::Singleton, fn() => new Router());
+// Register Router service
+Mini::$mini->addService(Router::class, Lifetime::Singleton, fn() => new Router());

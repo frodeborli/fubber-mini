@@ -141,6 +141,48 @@ Mini provides you with almost everything you'll need out of the box. Mini hasn't
 
 Mini is dependency free, completely. Therefore, all of packagist.org is packages you can use in your Mini based applications. Use Guzzle 1, or Guzzle 6 - Mini doesn't impose any specific third party package, therefore you can use ANY third party package - you're not limited to the packages that don't conflict with for example Laravel or CodeIgniter.
 
+## Attribute Query Functions — Never Use ReflectionClass Directly
+
+Mini parses PHP attributes via dedicated functions that cache results. AI assistants and developers should always use these functions instead of doing their own reflection.
+
+| Attribute Namespace | Query Function | Returns |
+|---------------------|----------------|---------|
+| `Database\Attributes\Table`, `PrimaryKey` | `model(User::class)` | `ModelInfo` with `->tableName`, `->primaryKey` |
+| `Validator\Attributes\*` | `validator(User::class)` | `Validator` with `->$prop->required`, `->$prop->format`, etc. |
+| `Metadata\Attributes\*` | `metadata(User::class)` | `Metadata` with `->$prop?->getTitle()`, `->$prop?->isReadOnly()`, etc. |
+| `Authorizer\Ability` | `can(Ability::Read, $entity)` | `bool` — checks authorization |
+
+```php
+// CORRECT — use the query function
+$table = model(User::class)->tableName;      // 'users'
+$pk    = model(User::class)->primaryKey;      // 'id'
+$title = metadata(User::class)->email?->getTitle(); // 'Email'
+$valid = validator(User::class)->email;        // PropertyValidator
+
+// WRONG — never do your own reflection
+$ref = new ReflectionClass(User::class);
+$attrs = $ref->getAttributes(Table::class);   // Don't do this!
+```
+
+## The `provide*` Convention
+
+Methods prefixed with `provide` are **declaration points for the framework** — not APIs you call directly. They tell the framework how something should behave, and the framework calls them internally.
+
+```php
+// Framework declaration points (override to customize behavior)
+protected static function provideDatabase(): DatabaseInterface { ... }
+public static function provideCanList(): ?bool { return null; }
+public function provideCanUpdate(): ?bool { return null; }
+
+// These are called by the framework, not by your code.
+// Your code calls model(), can(), save(), etc. instead.
+```
+
+The `provide*` prefix makes it immediately clear that:
+1. The method is a hook/declaration point, not a utility
+2. The framework calls it — you override it
+3. You should not call it from application code
+
 ## Core Principles
 
 - **Let PHP patterns survive**: `$_GET`, `$_POST` is great for productivity, so let devs use it. It's readable and efficient. We've replaced them with ArrayAccess implementations that map to the psr-7 RequestInterface of the current request. And let developers use `echo`, `header()`, `http_response_code()` when they need to - most applications aren't going to be running like long lived event loop applications.

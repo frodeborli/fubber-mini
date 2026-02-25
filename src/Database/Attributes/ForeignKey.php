@@ -5,7 +5,7 @@ namespace mini\Database\Attributes;
 /**
  * Specifies foreign key relationship
  *
- * Inspired by Entity Framework Core's [ForeignKey] attribute.
+ * Query: Parsed internally by schema generation — never use ReflectionClass directly.
  *
  * Can be applied to either the foreign key property or the navigation property.
  *

@@ -8,6 +8,8 @@ use mini\Validator\Purpose;
 /**
  * Validate via multipleOf()
  *
+ * Query: `validator(User::class)->$prop->multipleOf` — never use ReflectionClass directly.
+ *
  * @see \mini\Validator\Validator::multipleOf()
  */
 #[Attribute(Attribute::TARGET_PROPERTY | Attribute::IS_REPEATABLE)]

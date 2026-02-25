@@ -8,6 +8,8 @@ use mini\Validator\Purpose;
 /**
  * Validate via const()
  *
+ * Query: `validator(User::class)->$prop->const` — never use ReflectionClass directly.
+ *
  * @see \mini\Validator\Validator::const()
  */
 #[Attribute(Attribute::TARGET_PROPERTY | Attribute::IS_REPEATABLE)]

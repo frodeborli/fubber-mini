@@ -5,7 +5,7 @@ namespace mini\Database\Attributes;
 /**
  * Marks property as primary key
  *
- * Inspired by Entity Framework Core's [Key] attribute.
+ * Query: `model(User::class)->primaryKey` — never use ReflectionClass directly.
  *
  * Example:
  * ```php

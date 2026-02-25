@@ -8,6 +8,8 @@ use mini\Validator\Purpose;
 /**
  * Define a field validator on a class/interface without a property
  *
+ * Query: `validator(MyInterface::class)->$field` — never use ReflectionClass directly.
+ *
  * Useful for interfaces, DTOs, or when you want to define validation
  * schema without actual properties on the class.
  *

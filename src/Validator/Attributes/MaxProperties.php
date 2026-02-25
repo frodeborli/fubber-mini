@@ -8,6 +8,8 @@ use mini\Validator\Purpose;
 /**
  * Validate via maxProperties()
  *
+ * Query: `validator(User::class)->$prop->maxProperties` — never use ReflectionClass directly.
+ *
  * @see \mini\Validator\Validator::maxProperties()
  */
 #[Attribute(Attribute::TARGET_PROPERTY | Attribute::IS_REPEATABLE)]

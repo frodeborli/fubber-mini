@@ -2,8 +2,13 @@
 
 namespace mini;
 
+use mini\Authorizer\Ability;
+use mini\Authorizer\Authorization;
+use mini\Authorizer\AuthorizationQuery;
 use mini\Converter\ConverterRegistryInterface;
 use mini\Database\DatabaseInterface;
+use mini\Database\Model;
+use mini\Database\ModelInfo;
 use mini\Database\PDOService;
 use mini\Database\SqlValueHydrator;
 use mini\Database\SqlValue;
@@ -32,7 +37,7 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
         if ($dt instanceof \DateTime) {
             $dt = \DateTimeImmutable::createFromMutable($dt);
         }
-        return $dt->setTimezone($dbTz)->format('Y-m-d H:i:s');
+        return $dt->setTimezone($dbTz)->format('Y-m-d\TH:i:s');
     }, 'sql-value');
 
     // BackedEnum -> its backing value (string or int)
@@ -160,6 +165,40 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
 function db(): DatabaseInterface {
     return Mini::$mini->get(DatabaseInterface::class);
 }
+
+/**
+ * Get model metadata (table name, primary key) for an entity class
+ *
+ * Parses #[Table] and #[PrimaryKey] attributes. Results are cached per class.
+ * Follows the same pattern as validator() and metadata().
+ *
+ * @param class-string<Model> $class Entity class name
+ * @return ModelInfo Parsed model metadata
+ * @throws \RuntimeException If class lacks required #[Table] attribute
+ */
+function model(string $class): ModelInfo
+{
+    static $cache = [];
+    return $cache[$class] ??= ModelInfo::fromClass($class);
+}
+
+// Register Model authorization handler
+Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
+    Mini::$mini->get(Authorization::class)
+        ->for(Model::class)->listen(function(AuthorizationQuery $q): ?bool {
+            $class = $q->className();
+            $instance = $q->instance();
+
+            return match ($q->ability) {
+                Ability::List => $class::provideCanList(),
+                Ability::Create => $class::provideCanCreate(),
+                Ability::Read => $instance?->provideCanRead(),
+                Ability::Update => $instance?->provideCanUpdate(),
+                Ability::Delete => $instance?->provideCanDelete(),
+                default => null,
+            };
+        });
+});
 
 /**
  * Convert a value to SQL-bindable scalar

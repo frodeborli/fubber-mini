@@ -271,6 +271,8 @@ class AttributeValidatorFactory
             Attributes\Required::class => $validator->required($attribute->message),
             Attributes\Const::class => $validator->const($attribute->value, $attribute->message),
             Attributes\Enum::class => $validator->enum($attribute->values, $attribute->message),
+            Attributes\Slug::class => $validator
+                ->pattern('/^[a-z0-9][a-z0-9-]*$/', $attribute->message ?? 'Slug must start with a letter or number and contain only lowercase letters, numbers, and dashes.'),
             default => $validator
         };
     }

@@ -179,6 +179,44 @@ class SqlParser
         return $result;
     }
 
+    /**
+     * Parse a SET clause fragment into column/value pairs
+     *
+     * Use this for parsing UPDATE SET specifications like:
+     * - "name = 'John'"
+     * - "login_count = login_count + 1"
+     * - "name = ?, age = ?"
+     *
+     * @param string $setClause SET clause to parse (without the SET keyword)
+     * @return array[] Array of ['column' => IdentifierNode, 'value' => ASTNode]
+     * @throws SqlSyntaxException
+     */
+    public function parseSetFragment(string $setClause): array
+    {
+        $this->sql = $setClause;
+        $lexer = new SqlLexer($setClause);
+        $this->tokens = $lexer->tokenize();
+        $this->pos = 0;
+
+        $updates = [];
+        do {
+            $col = $this->parseIdentifier();
+            $this->expectOp('=');
+            $val = $this->parseExpression();
+            $updates[] = ['column' => $col, 'value' => $val];
+        } while ($this->match(SqlLexer::T_COMMA));
+
+        if ($this->current()['type'] !== SqlLexer::T_EOF) {
+            throw new SqlSyntaxException(
+                "Unexpected trailing input in SET clause",
+                $this->sql,
+                $this->current()['pos']
+            );
+        }
+
+        return $updates;
+    }
+
     private function current(): array
     {
         return $this->tokens[$this->pos];
@@ -537,6 +575,10 @@ class SqlParser
             $stmt->where = $this->parseExpression();
         }
 
+        if ($this->match(SqlLexer::T_LIMIT)) {
+            $stmt->limit = $this->parseNumberOrPlaceholder('LIMIT');
+        }
+
         return $stmt;
     }
 
@@ -550,6 +592,10 @@ class SqlParser
 
         if ($this->match(SqlLexer::T_WHERE)) {
             $stmt->where = $this->parseExpression();
+        }
+
+        if ($this->match(SqlLexer::T_LIMIT)) {
+            $stmt->limit = $this->parseNumberOrPlaceholder('LIMIT');
         }
 
         return $stmt;

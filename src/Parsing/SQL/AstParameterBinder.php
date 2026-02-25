@@ -214,9 +214,11 @@ class AstParameterBinder
                     'value' => $this->bindNode($update['value'])
                 ];
             }, $node->updates);
-            // Bind WHERE
             if ($node->where) {
                 $new->where = $this->bindNode($node->where);
+            }
+            if ($node->limit) {
+                $new->limit = $this->bindNode($node->limit);
             }
             return $new;
         }
@@ -225,6 +227,9 @@ class AstParameterBinder
             $new = clone $node;
             if ($node->where) {
                 $new->where = $this->bindNode($node->where);
+            }
+            if ($node->limit) {
+                $new->limit = $this->bindNode($node->limit);
             }
             return $new;
         }

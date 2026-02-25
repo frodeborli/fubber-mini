@@ -5,7 +5,7 @@ namespace mini\Database\Attributes;
 /**
  * Creates database index
  *
- * Inspired by Entity Framework Core's [Index] attribute.
+ * Query: Parsed internally by schema generation — never use ReflectionClass directly.
  *
  * For single-column indexes, apply to the property.
  * For composite indexes, apply to the class level.

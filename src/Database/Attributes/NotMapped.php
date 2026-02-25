@@ -5,7 +5,7 @@ namespace mini\Database\Attributes;
 /**
  * Excludes property from database mapping
  *
- * Inspired by Entity Framework Core's [NotMapped] attribute.
+ * Query: Parsed internally by Dehydrator — never use ReflectionClass directly.
  *
  * Use for computed properties or properties that should not be persisted.
  *

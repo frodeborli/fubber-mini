@@ -10,4 +10,5 @@ class DeleteStatement extends ASTNode
     public string $type = 'DELETE_STATEMENT';
     public IdentifierNode $table;
     public ?ASTNode $where = null;
+    public ?ASTNode $limit = null;
 }

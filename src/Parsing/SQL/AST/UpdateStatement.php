@@ -12,4 +12,5 @@ class UpdateStatement extends ASTNode
     /** @var array[] Array of ['column' => IdentifierNode, 'value' => ASTNode] */
     public array $updates = [];
     public ?ASTNode $where = null;
+    public ?ASTNode $limit = null;
 }

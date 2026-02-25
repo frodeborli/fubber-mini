@@ -149,9 +149,9 @@ final class Dehydrator
 
             // Auto-set timestamp attributes
             if (!empty($prop->getAttributes(UpdatedAt::class))) {
-                $value = date('Y-m-d H:i:s');
+                $value = date('Y-m-d\TH:i:s');
             } elseif ($value === null && !empty($prop->getAttributes(CreatedAt::class))) {
-                $value = date('Y-m-d H:i:s');
+                $value = date('Y-m-d\TH:i:s');
             }
 
             // Convert non-scalar values to SQL-compatible format
@@ -170,8 +170,8 @@ final class Dehydrator
                     // Direct SqlValue support
                     $value = $value->toSqlValue();
                 } elseif ($value instanceof \DateTimeInterface) {
-                    // Common case: DateTime to string
-                    $value = $value->format('Y-m-d H:i:s');
+                    // Common case: DateTime to ISO 8601 string
+                    $value = $value->format('Y-m-d\TH:i:s');
                 } elseif ($value instanceof \BackedEnum) {
                     // Backed enums to their value
                     $value = $value->value;

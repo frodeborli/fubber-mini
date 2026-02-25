@@ -8,6 +8,8 @@ use mini\Validator\Purpose;
 /**
  * Validate via minimum()
  *
+ * Query: `validator(User::class)->$prop->minimum` — never use ReflectionClass directly.
+ *
  * @see \mini\Validator\Validator::minimum()
  */
 #[Attribute(Attribute::TARGET_PROPERTY | Attribute::IS_REPEATABLE)]

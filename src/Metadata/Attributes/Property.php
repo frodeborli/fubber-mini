@@ -8,6 +8,8 @@ use Stringable;
 /**
  * Define metadata for a property on a class/interface without an actual property
  *
+ * Query: `metadata(MyInterface::class)->$prop` — never use ReflectionClass directly.
+ *
  * Useful for interfaces, DTOs, or when you want to define metadata
  * schema without actual properties on the class.
  *

@@ -3,7 +3,6 @@
 namespace mini;
 
 use mini\Dispatcher\HttpDispatcher;
-use mini\Session\Session;
 use mini\Session\SessionInterface;
 use mini\Session\SessionMiddleware;
 
@@ -17,10 +16,11 @@ use mini\Session\SessionMiddleware;
  */
 
 // Register Session service with Lifetime::Scoped for per-request instances
+// Override via _config/mini/Session/SessionInterface.php
 Mini::$mini->addService(
     SessionInterface::class,
     Lifetime::Scoped,
-    fn() => new Session()
+    fn() => Mini::$mini->loadServiceConfig(SessionInterface::class)
 );
 
 // Register SessionMiddleware to add session cookies to responses

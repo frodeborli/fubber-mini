@@ -9,6 +9,8 @@ use Attribute;
 /**
  * Reference validation rules from another class property
  *
+ * Query: `validator(Form::class)->$prop` resolves Ref automatically — never use ReflectionClass directly.
+ *
  * Usage:
  *   #[Ref(User::class, 'email')]
  *   public string $email = '';

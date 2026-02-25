@@ -5,7 +5,7 @@ namespace mini\Database\Attributes;
 /**
  * Maps property to database column
  *
- * Inspired by Entity Framework Core's [Column] attribute.
+ * Query: Parsed internally by Dehydrator — never use ReflectionClass directly.
  *
  * Example:
  * ```php

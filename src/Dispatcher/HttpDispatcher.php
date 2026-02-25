@@ -74,8 +74,9 @@ class HttpDispatcher
      */
     public readonly \mini\Hooks\Event $onAfterRequest;
 
-    public function __construct()
-    {
+    public function __construct(
+        private ?RequestHandlerInterface $requestHandler = null,
+    ) {
         // Create separate converter registry for exceptions
         // This keeps exception handling separate from content conversion
         $this->exceptionConverters = new \mini\Converter\ConverterRegistry();
@@ -205,8 +206,8 @@ class HttpDispatcher
             // 5. Declare Ready phase (locks down service registration)
             Mini::$mini->phase->trigger(\mini\Phase::Ready);
 
-            // 6. Add callback to allow Router to replace current request
-            //    Router uses this after Redirect/Reroute to update the request
+            // 6. Attach replaceRequest callback so Router can update
+            //    currentServerRequest for internal mutations (query param parsing, reroutes)
             $serverRequest = $serverRequest->withAttribute(
                 'mini.dispatcher.replaceRequest',
                 function(ServerRequestInterface $newRequest) {
@@ -219,10 +220,12 @@ class HttpDispatcher
 
             // 8. Build middleware chain and dispatch into the framework
             try {
-                // Get the final handler (Router)
-                $handler = Mini::$mini->get(RequestHandlerInterface::class);
+                // Get the final handler (Router by default)
+                $handler = $this->requestHandler ?? Mini::$mini->get(\mini\Router\Router::class);
 
                 // Wrap handler with middleware stack (reverse order for FIFO execution)
+                // Each wrapper updates currentServerRequest so mini\request() and
+                // $_GET/$_POST proxies always reflect the latest request from middleware
                 $handler = $this->buildMiddlewareChain($handler);
 
                 // Process request through middleware chain
@@ -244,7 +247,7 @@ class HttpDispatcher
                 }
             }
 
-            // 9. Emit response to browser
+            // 9. Emit response
             $this->emitResponse($response);
 
         } catch (\Throwable $e) {
@@ -252,7 +255,7 @@ class HttpDispatcher
             $exception = $e;
             $this->handleFatalError($e);
         } finally {
-            // 10. Always trigger after-request hook for cleanup (session save, logging, etc.)
+            // Always trigger after-request hook for cleanup (session save, logging, etc.)
             if ($this->currentServerRequest !== null) {
                 $this->onAfterRequest->trigger($this->currentServerRequest, $response, $exception);
             }
@@ -265,27 +268,49 @@ class HttpDispatcher
      * Wraps the handler (Router) with all registered middleware in reverse order
      * to ensure FIFO execution (first added middleware executes first).
      *
+     * Each wrapper updates currentServerRequest when handle() is called, so that
+     * mini\request() and $_GET/$_POST proxies always reflect the latest request
+     * as it flows through middleware. This enables middleware like JSON body parsers
+     * to make their changes visible to $_POST and request()->getParsedBody().
+     *
      * @param RequestHandlerInterface $handler Final handler (typically Router)
      * @return RequestHandlerInterface Wrapped handler with middleware chain
      */
     private function buildMiddlewareChain(RequestHandlerInterface $handler): RequestHandlerInterface
     {
-        // If no middleware registered, return handler as-is
-        if (empty($this->middlewares)) {
-            return $handler;
-        }
+        // Closure that updates the current request — captured by each wrapper
+        $trackRequest = function(ServerRequestInterface $request) {
+            $this->currentServerRequest = $request;
+        };
+
+        // Wrap the final handler (Router) so its handle() calls are also tracked
+        $handler = new class($handler, $trackRequest) implements RequestHandlerInterface {
+            /** @param \Closure(ServerRequestInterface): void $trackRequest */
+            public function __construct(
+                private RequestHandlerInterface $inner,
+                private \Closure $trackRequest
+            ) {}
+
+            public function handle(ServerRequestInterface $request): ResponseInterface {
+                ($this->trackRequest)($request);
+                return $this->inner->handle($request);
+            }
+        };
 
         // Wrap handler with middleware in reverse order (FIFO execution)
         // Last middleware in array wraps the handler first
         for ($i = count($this->middlewares) - 1; $i >= 0; $i--) {
             $middleware = $this->middlewares[$i];
-            $handler = new class($middleware, $handler) implements RequestHandlerInterface {
+            $handler = new class($middleware, $handler, $trackRequest) implements RequestHandlerInterface {
+                /** @param \Closure(ServerRequestInterface): void $trackRequest */
                 public function __construct(
                     private MiddlewareInterface $middleware,
-                    private RequestHandlerInterface $next
+                    private RequestHandlerInterface $next,
+                    private \Closure $trackRequest
                 ) {}
 
                 public function handle(ServerRequestInterface $request): ResponseInterface {
+                    ($this->trackRequest)($request);
                     return $this->middleware->process($request, $this->next);
                 }
             };

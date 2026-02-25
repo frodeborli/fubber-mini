@@ -85,6 +85,9 @@ class VirtualDatabase implements DatabaseInterface
     /** @var array<string, TableInterface> */
     private array $tables = [];
 
+    /** @var array<string, ModelTableConfig> tableName (lowercase) => config */
+    private array $modelConfigs = [];
+
     /** @var array<string, array{step: callable, final: callable, argCount: int}> */
     private array $aggregates = [];
 
@@ -443,6 +446,51 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Register a Model class for a table, enabling auth-aware operations
+     *
+     * Wraps the existing table with ModelScopedTable for per-entity authorization,
+     * and stores scope configuration for WHERE merging at SQL level.
+     *
+     * Scope Queries (readable/updatable/deletable) are lazily evaluated: if null,
+     * VDB calls the model's default method (e.g., User::query()) at execution time.
+     * Explicit Query overrides are evaluated eagerly (must be created from this VDB).
+     *
+     * @param string $tableName Table name as registered in VDB
+     * @param class-string<Model> $class Entity class
+     * @param Query|null $readable Row-level read scope (null = $class::query())
+     * @param Query|null $updatable Row-level update scope (null = $class::updatable())
+     * @param Query|null $deletable Row-level delete scope (null = $class::deletable())
+     * @param bool|null $allowInsert Insert gate (null = can(Ability::Create, $class))
+     */
+    public function registerModel(
+        string $tableName,
+        string $class,
+        ?Query $readable = null,
+        ?Query $updatable = null,
+        ?Query $deletable = null,
+        ?bool $allowInsert = null,
+    ): self {
+        $key = strtolower($tableName);
+
+        $table = $this->tables[$key] ?? null;
+        if ($table === null) {
+            throw new \RuntimeException("Table '$tableName' must be registered before registerModel()");
+        }
+
+        if (!$table instanceof MutableTableInterface || !$table instanceof \mini\Table\AbstractTable) {
+            throw new \RuntimeException(
+                "Table '$tableName' must be a mutable AbstractTable for registerModel()"
+            );
+        }
+
+        $config = new ModelTableConfig($class, $readable, $updatable, $deletable, $allowInsert);
+        $this->modelConfigs[$key] = $config;
+        $this->tables[$key] = new ModelScopedTable($table, $config);
+
+        return $this;
+    }
+
+    /**
      * Get a registered table by name
      *
      * If a session is active (during query execution), checks the session's
@@ -492,6 +540,11 @@ class VirtualDatabase implements DatabaseInterface
         // Copy custom aggregates
         foreach ($this->aggregates as $name => $aggregate) {
             $vdb->aggregates[$name] = $aggregate;
+        }
+
+        // Copy model configs
+        foreach ($this->modelConfigs as $name => $config) {
+            $vdb->modelConfigs[$name] = $config;
         }
 
         // Shadow with provided tables
@@ -555,6 +608,52 @@ class VirtualDatabase implements DatabaseInterface
         // Ensure AST is parsed using reflection to call private ensureAST()
         self::$ensureAstMethod->invoke($query);
         return self::$astProperty->getValue($query);
+    }
+
+    /**
+     * Extract the WHERE clause from a model's scope query
+     *
+     * Lazily evaluates the scope: calls the model's method if no explicit
+     * Query was provided. The scope Query must be backed by this VDB
+     * (via provideDatabase()), so unwrapQuery() can access its PartialQuery.
+     *
+     * Returns a deep-cloned AST node safe for merging into another query.
+     *
+     * @param string $tableName Lowercase table name
+     * @param string $scopeType 'readable', 'updatable', or 'deletable'
+     * @return ASTNode|null The WHERE clause, or null if scope has no WHERE
+     */
+    private function getScopeWhere(string $tableName, string $scopeType): ?ASTNode
+    {
+        $config = $this->modelConfigs[$tableName] ?? null;
+        if ($config === null) {
+            return null;
+        }
+
+        // Get the scope Query — explicit override or lazy call to model method
+        $scopeQuery = match ($scopeType) {
+            'readable' => $config->readable ?? $config->modelClass::query(),
+            'updatable' => $config->updatable ?? $config->modelClass::updatable(),
+            'deletable' => $config->deletable ?? $config->modelClass::deletable(),
+            default => throw new \InvalidArgumentException("Unknown scope type: $scopeType"),
+        };
+
+        // Unwrap to PartialQuery and peek at the AST
+        $pq = $this->unwrapQuery($scopeQuery);
+        $ast = self::peekAst($pq);
+
+        // Extract WHERE from the SelectStatement
+        if (!$ast instanceof SelectStatement) {
+            return null;
+        }
+
+        $where = $ast->where;
+        if ($where === null) {
+            return null;
+        }
+
+        // Deep clone to avoid shared mutation when merging into another AST
+        return $where->deepClone();
     }
 
     /**
@@ -1390,6 +1489,16 @@ class VirtualDatabase implements DatabaseInterface
 
             if ($table === null) {
                 throw new \RuntimeException("Table not found: $tableName");
+            }
+
+            // Merge readable scope for model-registered tables.
+            // Shallow-clone $ast to avoid mutating the shared SQL parse cache.
+            $readableWhere = $this->getScopeWhere(strtolower($tableName), 'readable');
+            if ($readableWhere !== null) {
+                $ast = clone $ast;
+                $ast->where = $ast->where !== null
+                    ? new BinaryOperation($ast->where, 'AND', $readableWhere)
+                    : $readableWhere;
             }
         }
 
@@ -2249,6 +2358,16 @@ class VirtualDatabase implements DatabaseInterface
 
         if ($table === null) {
             throw new \RuntimeException("Table not found: $tableName");
+        }
+
+        // Merge readable scope for model-registered tables.
+        // Shallow-clone $ast to avoid mutating the shared SQL parse cache.
+        $readableWhere = $this->getScopeWhere(strtolower($tableName), 'readable');
+        if ($readableWhere !== null) {
+            $ast = clone $ast;
+            $ast->where = $ast->where !== null
+                ? new BinaryOperation($ast->where, 'AND', $readableWhere)
+                : $readableWhere;
         }
 
         // Use predicate pushdown for all multi-table queries with WHERE
@@ -3759,6 +3878,16 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("Table '$tableName' does not support UPDATE");
         }
 
+        // Merge updatable scope for model-registered tables.
+        // Shallow-clone $ast to avoid mutating the shared SQL parse cache.
+        $updatableWhere = $this->getScopeWhere(strtolower($tableName), 'updatable');
+        if ($updatableWhere !== null) {
+            $ast = clone $ast;
+            $ast->where = $ast->where !== null
+                ? new BinaryOperation($ast->where, 'AND', $updatableWhere)
+                : $updatableWhere;
+        }
+
         // Check if any SET expression needs row context (e.g., SET x = x + 2)
         $needsRowContext = false;
         foreach ($ast->updates as $update) {
@@ -3898,6 +4027,16 @@ class VirtualDatabase implements DatabaseInterface
 
         if (!$table instanceof MutableTableInterface) {
             throw new \RuntimeException("Table '$tableName' does not support DELETE");
+        }
+
+        // Merge deletable scope for model-registered tables.
+        // Shallow-clone $ast to avoid mutating the shared SQL parse cache.
+        $deletableWhere = $this->getScopeWhere(strtolower($tableName), 'deletable');
+        if ($deletableWhere !== null) {
+            $ast = clone $ast;
+            $ast->where = $ast->where !== null
+                ? new BinaryOperation($ast->where, 'AND', $deletableWhere)
+                : $deletableWhere;
         }
 
         $query = $this->applyWhereToTable($table, $ast->where);

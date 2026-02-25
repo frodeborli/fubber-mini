@@ -2,10 +2,13 @@
 
 namespace mini\Parsing\SQL;
 
+use mini\Database\PartialQuery;
 use mini\Database\SqlDialect;
 use mini\Parsing\SQL\AST\{
     ASTNode,
     SelectStatement,
+    DeleteStatement,
+    UpdateStatement,
     WithStatement,
     UnionNode,
     SubqueryNode,
@@ -100,6 +103,119 @@ class SqlRenderer
     }
 
     /**
+     * Transform a SELECT-based query into a DELETE statement and render it
+     *
+     * Validates the query is a single-table SELECT (no JOINs, UNIONs, subquery FROM).
+     * Preserves CTEs, WHERE, and LIMIT from the original query.
+     *
+     * @return array{string, array<int, mixed>} [sql, params]
+     * @throws \RuntimeException If query cannot be converted to DELETE
+     */
+    public function renderAsDelete(PartialQuery $query): array
+    {
+        $ast = $query->getAST();
+        [$select, $withWrapper] = $this->extractSelect($ast, 'DELETE');
+
+        $delete = new DeleteStatement();
+        $delete->table = $select->from;
+        $delete->where = $select->where;
+        $delete->limit = $select->limit;
+
+        $final = $withWrapper !== null
+            ? new WithStatement($withWrapper->ctes, $withWrapper->recursive, $delete)
+            : $delete;
+
+        return $this->renderWithParams($final);
+    }
+
+    /**
+     * Transform a SELECT-based query into an UPDATE statement and render it
+     *
+     * Validates the query is a single-table SELECT (no JOINs, UNIONs, subquery FROM).
+     * Preserves CTEs, WHERE, and LIMIT from the original query.
+     *
+     * @param string|array $set Column assignments — array of column => value, or SQL string
+     *     Array: ['name' => 'John', 'age' => 30] — values become bound placeholders
+     *     String: 'login_count = login_count + 1' — parsed into AST, params bound from $params
+     * @param array $params Parameters for string $set (ignored for array $set)
+     * @return array{string, array<int, mixed>} [sql, params]
+     * @throws \RuntimeException If query cannot be converted to UPDATE
+     */
+    public function renderAsUpdate(PartialQuery $query, string|array $set, array $params = []): array
+    {
+        $ast = $query->getAST();
+        [$select, $withWrapper] = $this->extractSelect($ast, 'UPDATE');
+
+        $update = new UpdateStatement();
+        $update->table = $select->from;
+        $update->where = $select->where;
+        $update->limit = $select->limit;
+
+        if (is_array($set)) {
+            foreach ($set as $column => $value) {
+                $placeholder = new PlaceholderNode('?');
+                $placeholder->bind($value);
+                $update->updates[] = [
+                    'column' => new IdentifierNode($column),
+                    'value' => $placeholder,
+                ];
+            }
+        } else {
+            $parser = new SqlParser();
+            $update->updates = $parser->parseSetFragment($set);
+
+            // Bind params to placeholders in the parsed SET clause
+            if (!empty($params)) {
+                $paramsCopy = $params;
+                foreach ($update->updates as $pair) {
+                    SqlParser::bindParams($pair['value'], $paramsCopy);
+                }
+            }
+        }
+
+        $final = $withWrapper !== null
+            ? new WithStatement($withWrapper->ctes, $withWrapper->recursive, $update)
+            : $update;
+
+        return $this->renderWithParams($final);
+    }
+
+    /**
+     * Extract a single-table SelectStatement from an AST, validating it's suitable for DELETE/UPDATE
+     *
+     * @return array{SelectStatement, WithStatement|null} [select, withWrapper]
+     * @throws \RuntimeException If query cannot be converted
+     */
+    private function extractSelect(ASTNode $ast, string $operation): array
+    {
+        $withWrapper = null;
+        $inner = $ast;
+
+        if ($inner instanceof WithStatement) {
+            $withWrapper = $inner;
+            $inner = $inner->query;
+        }
+
+        if ($inner instanceof UnionNode) {
+            throw new \RuntimeException("Cannot convert UNION query to {$operation}");
+        }
+
+        if (!$inner instanceof SelectStatement) {
+            throw new \RuntimeException("Cannot convert " . get_class($inner) . " to {$operation}");
+        }
+
+        if (!empty($inner->joins)) {
+            throw new \RuntimeException("Cannot convert query with JOINs to {$operation}");
+        }
+
+        if (!$inner->from instanceof IdentifierNode) {
+            throw new \RuntimeException("Cannot convert query with subquery/complex FROM to {$operation}");
+        }
+
+        return [$inner, $withWrapper];
+    }
+
+    /**
      * Render ORDER BY items to SQL string (without ORDER BY keywords)
      *
      * @param array<int, array{column: ASTNode, direction: string}> $orderBy
@@ -123,6 +239,8 @@ class SqlRenderer
         return match (true) {
             $node instanceof WithStatement => $this->renderWith($node),
             $node instanceof SelectStatement => $this->renderSelect($node),
+            $node instanceof DeleteStatement => $this->renderDelete($node),
+            $node instanceof UpdateStatement => $this->renderUpdate($node),
             $node instanceof UnionNode => $this->renderUnion($node),
             $node instanceof SubqueryNode => $this->renderSubquery($node),
             $node instanceof ColumnNode => $this->renderColumn($node),
@@ -237,6 +355,42 @@ class SqlRenderer
 
         // LIMIT/OFFSET - dialect-specific
         $sql .= $this->renderLimitOffset($node->limit, $node->offset);
+
+        return $sql;
+    }
+
+    private function renderDelete(DeleteStatement $node): string
+    {
+        $sql = 'DELETE FROM ' . $this->render($node->table);
+
+        if ($node->where !== null) {
+            $sql .= ' WHERE ' . $this->render($node->where);
+        }
+
+        if ($node->limit !== null) {
+            $sql .= ' LIMIT ' . $this->render($node->limit);
+        }
+
+        return $sql;
+    }
+
+    private function renderUpdate(UpdateStatement $node): string
+    {
+        $sql = 'UPDATE ' . $this->render($node->table) . ' SET ';
+
+        $setParts = [];
+        foreach ($node->updates as $update) {
+            $setParts[] = $this->render($update['column']) . ' = ' . $this->render($update['value']);
+        }
+        $sql .= implode(', ', $setParts);
+
+        if ($node->where !== null) {
+            $sql .= ' WHERE ' . $this->render($node->where);
+        }
+
+        if ($node->limit !== null) {
+            $sql .= ' LIMIT ' . $this->render($node->limit);
+        }
 
         return $sql;
     }

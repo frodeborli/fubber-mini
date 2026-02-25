@@ -8,6 +8,8 @@ use Stringable;
 /**
  * Set metadata description annotation
  *
+ * Query: `metadata(User::class)->$prop?->getDescription()` — never use ReflectionClass directly.
+ *
  * @see \mini\Metadata\Metadata::description()
  */
 #[Attribute(Attribute::TARGET_PROPERTY | Attribute::TARGET_CLASS)]

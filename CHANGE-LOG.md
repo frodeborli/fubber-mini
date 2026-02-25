@@ -4,6 +4,88 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Database: model() function, provide\* convention, Authorization integration (2026-02-19)
+
+**BREAKING CHANGE**
+
+Extracted attribute parsing from Model into `ModelInfo` + `model()` function. Adopted `provide*` naming convention for framework declaration points. Wired `save()`/`delete()` into the Authorization system via `can()`.
+
+### What Changed
+
+**New: `model()` function + `ModelInfo` class**
+
+Follows the same pattern as `validator()` and `metadata()` — a global function that returns cached, parsed metadata from attributes.
+
+```php
+model(User::class)->tableName;   // 'users'
+model(User::class)->primaryKey;  // 'id'
+```
+
+**Removed from Model**: `tableName()`, `primaryKey()` methods and their `$_tableNames`/`$_primaryKeys` caches. Attribute parsing now lives in `ModelInfo::fromClass()`.
+
+**Renamed**: `database()` → `provideDatabase()` — the `provide*` prefix signals "framework declaration point, not an API to call directly."
+
+**New authorization declaration points on Model**:
+
+```php
+// Static — class-level abilities (return true/false/null)
+public static function provideCanList(): ?bool { return null; }
+public static function provideCanCreate(): ?bool { return null; }
+
+// Instance — entity-level abilities
+public function provideCanRead(): ?bool { return null; }
+public function provideCanUpdate(): ?bool { return null; }
+public function provideCanDelete(): ?bool { return null; }
+```
+
+All return `null` by default → no opinion → Authorization default = allowed.
+
+**`save()` and `delete()` now use two-layer authorization**:
+
+1. **`can()` system** — action authorization via `provideCanUpdate()`/`provideCanDelete()`/`provideCanCreate()`
+2. **`updatable()`/`deletable()`** — row-level write scoping (entity must be reachable via query)
+
+```php
+// save() on update: can() check, then updatable() row check
+// save() on create: can() check only
+// delete(): can() check, then deletable() row check
+```
+
+**New: `updatable()` and `deletable()` methods** — row-level write scoping, default to `query()`. Override to diverge read vs write scoping:
+
+```php
+public static function updatable(): Query {
+    return static::queryUnsafe()->eq('owner_id', auth()->getUserId());
+}
+public static function deletable(): Query {
+    return static::queryUnsafe()->eq('owner_id', auth()->getUserId());
+}
+```
+
+**Authorization handler registered for Model::class** — dispatches to the `providecan*()` methods via the existing Authorization system (guards → handlers → fallback → default allow).
+
+### Migration
+
+**`database()` → `provideDatabase()`**: If you overrode `database()` in a subclass, rename to `provideDatabase()`:
+
+```php
+// Before
+protected static function database(): DatabaseInterface { return vdb(); }
+
+// After
+protected static function provideDatabase(): DatabaseInterface { return vdb(); }
+```
+
+**`tableName()` / `primaryKey()`**: These methods no longer exist. Use `model(MyEntity::class)->tableName` or `model(MyEntity::class)->primaryKey` instead. Entity classes don't need changes — the `#[Table]` and `#[PrimaryKey]` attributes still work.
+
+**Custom save()/delete() overrides**: If you overrode `save()`/`delete()` for authorization, consider using `provideCanUpdate()`/`provideCanDelete()` instead. The default `save()`/`delete()` now call `can()` automatically.
+
+### What does NOT change
+
+- **`query()` method** — stays as row-level scoping mechanism
+- **`queryUnsafe()`/`findUnsafe()`/`saveUnsafe()`/`deleteUnsafe()`** — unchanged, still final
+- **Authorization guards** — still work via existing guard system
+
 ## Database: Simplified Model — Final Unsafe, Overridable Safe (2026-02-18)
 
 **BREAKING CHANGE**

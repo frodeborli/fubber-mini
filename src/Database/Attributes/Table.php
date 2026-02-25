@@ -5,14 +5,12 @@ namespace mini\Database\Attributes;
 /**
  * Maps entity class to database table
  *
- * Inspired by Entity Framework Core's [Table] attribute.
+ * Query: `model(User::class)->tableName` — never use ReflectionClass directly.
  *
  * Example:
  * ```php
- * #[Table(name: 'users')]
- * class User {
- *     // ...
- * }
+ * #[Table('users')]
+ * class User extends Model { ... }
  * ```
  */
 #[\Attribute(\Attribute::TARGET_CLASS)]
