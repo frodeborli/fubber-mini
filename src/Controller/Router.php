@@ -254,7 +254,7 @@ class Router
         // Try to find matching route
         foreach ($this->routes as $route) {
             // Check HTTP method
-            if ($route['method'] !== '*' && $route['method'] !== $method) {
+            if (!$this->methodMatches($route['method'], $method)) {
                 continue;
             }
 
@@ -290,7 +290,7 @@ class Router
         if (!str_ends_with($path, '/')) {
             // Try with trailing slash
             foreach ($this->routes as $route) {
-                if ($route['method'] !== '*' && $route['method'] !== $method) {
+                if (!$this->methodMatches($route['method'], $method)) {
                     continue;
                 }
                 if (preg_match($route['pattern'], $path . '/', $matches)) {
@@ -302,7 +302,7 @@ class Router
             // Try without trailing slash
             $pathWithoutSlash = rtrim($path, '/');
             foreach ($this->routes as $route) {
-                if ($route['method'] !== '*' && $route['method'] !== $method) {
+                if (!$this->methodMatches($route['method'], $method)) {
                     continue;
                 }
                 if (preg_match($route['pattern'], $pathWithoutSlash, $matches)) {
@@ -314,6 +314,26 @@ class Router
 
         // No route matched - 404
         throw new \mini\Exceptions\NotFoundException('Route not found');
+    }
+
+    /**
+     * Does a registered route method satisfy the request method?
+     *
+     * `*` matches anything. HEAD requests fall back to GET routes per RFC 9110 §9.3.2:
+     * "A server SHOULD send the same header fields in response to a HEAD request
+     * as it would have sent if the request method had been GET". The downstream
+     * web server (nginx/php-fpm/cli) is responsible for stripping the body before
+     * sending the HEAD response on the wire.
+     */
+    private function methodMatches(string $routeMethod, string $requestMethod): bool
+    {
+        if ($routeMethod === '*' || $routeMethod === $requestMethod) {
+            return true;
+        }
+        if ($requestMethod === 'HEAD' && $routeMethod === 'GET') {
+            return true;
+        }
+        return false;
     }
 
 
