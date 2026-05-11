@@ -4,226 +4,212 @@ namespace mini\Http\Message;
 use Psr\Http\Message\StreamInterface;
 
 /**
- * Value object representing a file uploaded through an HTTP request.
+ * PSR-7 UploadedFileInterface implementation.
  *
- * Instances of this interface are considered immutable; all methods that
- * might change state MUST be implemented such that they retain the internal
- * state of the current instance and return an instance that contains the
- * changed state.
+ * Accepts either a file path (from $_FILES['tmp_name']) or a stream resource
+ * (for non-SAPI / testing). Property names mirror the PSR-7 getter names.
  */
 trait UploadedFileTrait {
 
+    /** Stream resource when constructed from one; null for file-path sources */
     protected mixed $stream = null;
+
+    /** Resolved file path when constructed from tmp_name; null for stream sources */
     protected ?string $path = null;
-    protected ?string $filename = null;
-    protected ?string $mediaType = null;
-    protected ?string $error = null;
-    protected ?int $filesize = null;
+
+    /** Client-reported filename — $_FILES['name']. Do not trust. */
+    protected ?string $clientFilename;
+
+    /** Client-reported MIME type — $_FILES['type']. Do not trust. */
+    protected ?string $clientMediaType;
+
+    /** File size in bytes — $_FILES['size'] */
+    protected ?int $size;
+
+    /** Upload error code — one of UPLOAD_ERR_* constants */
+    protected int $error;
+
+    /** Override for is_uploaded_file() check — set true in tests */
+    protected bool $isUploadedFile;
+
+    /** Whether moveTo() has been called (PSR-7: must throw on second call) */
+    protected bool $moved = false;
 
     /**
-     * @param resource|string $source   A stream resource or the path to the actual file in the file system
-     * @param string $filename          The filename as provided by the uploader
-     * @param string $mediaType         The mime type as provided by the uploader
-     * @param int $filesize             The filesize of the uploaded file, if known
-     * @param int $error                The error code as provided by the uploader {$see https://www.php.net/manual/en/features.file-upload.errors.php}
-     * @param bool $isUploadedFile      Declare that the file is in fact an uploaded file, regardless of is_uploaded_file()
+     * @param resource|string $source        Stream resource or file path (tmp_name)
+     * @param ?string         $clientFilename Client-reported filename
+     * @param ?string         $clientMediaType Client-reported MIME type
+     * @param ?int            $size           File size in bytes
+     * @param ?int            $error          Upload error code (UPLOAD_ERR_* constant)
+     * @param bool            $isUploadedFile Override is_uploaded_file() for testing
      */
-    protected function UploadedFileTrait(mixed $source, string $filename=null, string $mediaType=null, int $filesize=null, int $error=null, bool $isUploadedFile=false) {
+    protected function UploadedFileTrait(
+        mixed $source,
+        ?string $clientFilename = null,
+        ?string $clientMediaType = null,
+        ?int $size = null,
+        ?int $error = null,
+        bool $isUploadedFile = false,
+    ): void {
+        $this->error = $error ?? \UPLOAD_ERR_OK;
+        $this->clientFilename = $clientFilename;
+        $this->clientMediaType = $clientMediaType;
+        $this->size = $size;
+        $this->isUploadedFile = $isUploadedFile;
+
         if (is_resource($source)) {
             $this->stream = $source;
-        } else {
-            $this->path = realpath($source);
-            if (!$this->path) {
-                throw new \InvalidArgumentException("File path '$source' does not exist");
+        } elseif ($this->error === \UPLOAD_ERR_OK && $source !== '') {
+            // Only resolve path for successful uploads — errored uploads have no temp file
+            $resolved = realpath($source);
+            if ($resolved === false) {
+                throw new \InvalidArgumentException("File path does not exist: '$source'");
             }
+            $this->path = $resolved;
         }
-        $this->source = $source;
-        $this->name = $filename;
-        $this->mediaType = $mediaType;
-        $this->filesize = $filesize;
-        $this->error = $error ?? UPLOAD_ERR_OK;
-        $this->isUploadedFile = $isUploadedFile;
     }
 
     /**
      * Retrieve a stream representing the uploaded file.
      *
-     * This method MUST return a StreamInterface instance, representing the
-     * uploaded file. The purpose of this method is to allow utilizing native PHP
-     * stream functionality to manipulate the file upload, such as
-     * stream_copy_to_stream() (though the result will need to be decorated in a
-     * native PHP stream wrapper to work with such functions).
-     *
-     * If the moveTo() method has been called previously, this method MUST raise
-     * an exception.
-     *
-     * @return StreamInterface Stream representation of the uploaded file.
-     * @throws \RuntimeException in cases when no stream is available.
-     * @throws \RuntimeException in cases when no stream can be created.
+     * @throws \RuntimeException If moveTo() was already called or file is unavailable
      */
     public function getStream(): StreamInterface {
+        if ($this->moved) {
+            throw new \RuntimeException('Cannot retrieve stream after moveTo() has been called');
+        }
         $this->assertNoError();
-        if (is_resource($this->source)) {
-            return new Stream($this->source);
+
+        if ($this->stream !== null && is_resource($this->stream)) {
+            return new Stream($this->stream);
         }
-        if (is_string($this->source) && file_exists($this->source)) {
-            return new Stream(fopen($this->source, 'rbn'));
+        if ($this->path !== null && file_exists($this->path)) {
+            return new Stream(fopen($this->path, 'rb'));
         }
-        throw new \RuntimeException("Uploaded file is unavailable");
+        throw new \RuntimeException('Uploaded file stream is unavailable');
     }
 
     /**
      * Move the uploaded file to a new location.
      *
-     * Use this method as an alternative to move_uploaded_file(). This method is
-     * guaranteed to work in both SAPI and non-SAPI environments.
-     * Implementations must determine which environment they are in, and use the
-     * appropriate method (move_uploaded_file(), rename(), or a stream
-     * operation) to perform the operation.
+     * Uses move_uploaded_file() for real SAPI uploads, rename() for
+     * testing/CLI, and stream copying for stream-based sources.
      *
-     * $targetPath may be an absolute path, or a relative path. If it is a
-     * relative path, resolution should be the same as used by PHP's rename()
-     * function.
-     *
-     * The original file or stream MUST be removed on completion.
-     *
-     * If this method is called more than once, any subsequent calls MUST raise
-     * an exception.
-     *
-     * When used in an SAPI environment where $_FILES is populated, when writing
-     * files via moveTo(), is_uploaded_file() and move_uploaded_file() SHOULD be
-     * used to ensure permissions and upload status are verified correctly.
-     *
-     * If you wish to move to a stream, use getStream(), as SAPI operations
-     * cannot guarantee writing to stream destinations.
-     *
-     * @see http://php.net/is_uploaded_file
-     * @see http://php.net/move_uploaded_file
-     * @param string $targetPath Path to which to move the uploaded file.
-     * @throws \InvalidArgumentException if the $targetPath specified is invalid.
-     * @throws \RuntimeException on any error during the move operation.
-     * @throws \RuntimeException on the second or subsequent call to the method.
+     * @throws \RuntimeException On second call, on error, or if move fails
      */
-    public function moveTo($targetPath): void {
+    public function moveTo(string $targetPath): void {
+        if ($this->moved) {
+            throw new \RuntimeException('Uploaded file has already been moved');
+        }
         $this->assertNoError();
+
         if ($this->stream !== null) {
-            // we have a stream reference to the upload, so we'll read from that
-            if (!rewind($this->stream)) {
-                throw new \RuntimeException("Unable to rewind the incoming upload stream");
-            }
-            $fp = fopen($targetPath, "xn");
-            if (!$fp) {
-                throw new \InvalidArgumentException("Unable to create file '$targetPath'");
-            }
-            while (!feof($this->stream)) {
-                $chunk = fread($this->stream, 8192);
-                if ($chunk === false) {
-                    unlink($targetPath);
-                    throw new \RuntimeException("fread() failed on incoming upload stream");
-                }
-                $written = fwrite($fp, $chunk);
-                if (!is_int($written)) {
-                    unlink($targetPath);
-                    throw new \RuntimeException("fwrite() failed on the destination file");
-                }
-            }
-            fclose($fp);
-            fclose($this->stream);
-            return;
+            $this->moveStreamTo($targetPath);
+        } elseif ($this->path !== null) {
+            $this->moveFileTo($targetPath);
+        } else {
+            throw new \RuntimeException('No upload source available');
         }
-        if ($this->path) {
-            if (!(isset($_FILES) && ($this->isUploadedFile || is_uploaded_file($this->path)))) {
-                throw new \RuntimeException("The file is not an uploaded file");
-            }
-            rename($this->path, $targetPath);
-            return;
-        }
-        throw new \RuntimeException("Unable to move uploaded file");
+
+        $this->moved = true;
     }
 
     /**
-     * Retrieve the file size.
-     *
-     * Implementations SHOULD return the value stored in the "size" key of
-     * the file in the $_FILES array if available, as PHP calculates this based
-     * on the actual size transmitted.
-     *
-     * @return int|null The file size in bytes or null if unknown.
+     * Copy a stream source to the target path
      */
-    public function getSize(): ?int {
-        if (is_int($this->filesize)) {
-            return $this->filesize;
+    private function moveStreamTo(string $targetPath): void {
+        if (!rewind($this->stream)) {
+            throw new \RuntimeException('Unable to rewind upload stream');
         }
-        if ($this->stream && is_resource($this->stream)) {
-            $stat = fstat($this->stream);
-            if ($stat && key_exists('size', $stat)) {
-                return $this->filesize = $stat['size'];
+        $fp = fopen($targetPath, 'xb');
+        if (!$fp) {
+            throw new \InvalidArgumentException("Unable to create file: '$targetPath'");
+        }
+        while (!feof($this->stream)) {
+            $chunk = fread($this->stream, 8192);
+            if ($chunk === false) {
+                fclose($fp);
+                unlink($targetPath);
+                throw new \RuntimeException('Failed reading from upload stream');
+            }
+            if (fwrite($fp, $chunk) === false) {
+                fclose($fp);
+                unlink($targetPath);
+                throw new \RuntimeException('Failed writing to target file');
             }
         }
-        if ($this->path && file_exists($this->path)) {
-            return $this->filesize = filesize($this->path);
+        fclose($fp);
+        fclose($this->stream);
+    }
+
+    /**
+     * Move a file-path source to the target path.
+     *
+     * In SAPI: uses move_uploaded_file() for security (PSR-7 SHOULD).
+     * In CLI or with isUploadedFile override: uses rename().
+     */
+    private function moveFileTo(string $targetPath): void {
+        if (is_uploaded_file($this->path)) {
+            // Real SAPI upload — secure move
+            if (!move_uploaded_file($this->path, $targetPath)) {
+                throw new \RuntimeException("move_uploaded_file() failed for: '$targetPath'");
+            }
+        } elseif ($this->isUploadedFile || \PHP_SAPI === 'cli') {
+            // Test override or CLI environment — rename directly
+            if (!rename($this->path, $targetPath)) {
+                throw new \RuntimeException("Failed to move file to: '$targetPath'");
+            }
+        } else {
+            throw new \RuntimeException('Source is not a valid uploaded file');
+        }
+    }
+
+    /**
+     * @return int|null File size in bytes, or null if unknown
+     */
+    public function getSize(): ?int {
+        if ($this->size !== null) {
+            return $this->size;
+        }
+        if ($this->stream !== null && is_resource($this->stream)) {
+            $stat = fstat($this->stream);
+            if ($stat && isset($stat['size'])) {
+                return $this->size = $stat['size'];
+            }
+        }
+        if ($this->path !== null && file_exists($this->path)) {
+            return $this->size = filesize($this->path);
         }
         return null;
     }
 
     /**
-     * Retrieve the error associated with the uploaded file.
-     *
-     * The return value MUST be one of PHP's UPLOAD_ERR_XXX constants.
-     *
-     * If the file was uploaded successfully, this method MUST return
-     * UPLOAD_ERR_OK.
-     *
-     * Implementations SHOULD return the value stored in the "error" key of
-     * the file in the $_FILES array.
-     *
-     * @see http://php.net/manual/en/features.file-upload.errors.php
-     * @return int One of PHP's UPLOAD_ERR_XXX constants.
+     * @return int One of PHP's UPLOAD_ERR_* constants
      */
     public function getError(): int {
         return $this->error;
     }
 
     /**
-     * Retrieve the filename sent by the client.
-     *
-     * Do not trust the value returned by this method. A client could send
-     * a malicious filename with the intention to corrupt or hack your
-     * application.
-     *
-     * Implementations SHOULD return the value stored in the "name" key of
-     * the file in the $_FILES array.
-     *
-     * @return string|null The filename sent by the client or null if none
-     *     was provided.
+     * @return string|null Client-reported filename, or null
      */
     public function getClientFilename(): ?string {
-        return $this->filename;
+        return $this->clientFilename;
     }
 
     /**
-     * Retrieve the media type sent by the client.
-     *
-     * Do not trust the value returned by this method. A client could send
-     * a malicious media type with the intention to corrupt or hack your
-     * application.
-     *
-     * Implementations SHOULD return the value stored in the "type" key of
-     * the file in the $_FILES array.
-     *
-     * @return string|null The media type sent by the client or null if none
-     *     was provided.
+     * @return string|null Client-reported media type, or null
      */
     public function getClientMediaType(): ?string {
-        return $this->mediaType;
+        return $this->clientMediaType;
     }
 
     /**
-     * Check that no error condition exists which should prevent this operation
+     * @throws \RuntimeException If an upload error prevents the operation
      */
     protected function assertNoError(): void {
-        if ($this->error !== UPLOAD_ERR_OK) {
-            throw new \RuntimeException("Upload error code ".$this->error." prevented this operation");
+        if ($this->error !== \UPLOAD_ERR_OK) {
+            throw new \RuntimeException("Upload error code {$this->error} prevented this operation");
         }
     }
 }

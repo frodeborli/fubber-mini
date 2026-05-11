@@ -4,25 +4,29 @@ namespace mini\Http\Message;
 use Psr\Http\Message\UploadedFileInterface;
 
 /**
- * Value object representing a file uploaded through an HTTP request.
+ * PSR-7 UploadedFileInterface implementation.
  *
- * Instances of this interface are considered immutable; all methods that
- * might change state MUST be implemented such that they retain the internal
- * state of the current instance and return an instance that contains the
- * changed state.
+ * Constructed from $_FILES data (via HttpDispatcher) or manually for testing.
  */
 class UploadedFile implements UploadedFileInterface {
     use UploadedFileTrait;
 
     /**
-     * @param resource|string $source   A stream resource or the path to the actual file in the file system
-     * @param string $filename          The filename as provided by the uploader
-     * @param string $mediaType         The mime type as provided by the uploader
-     * @param int $filesize             The filesize of the uploaded file, if known
-     * @param int $error                The error code as provided by the uploader {$see https://www.php.net/manual/en/features.file-upload.errors.php}
-     * @param bool $isUploadedFile      Override the {@see is_uploaded_file()} function by setting this to true
+     * @param resource|string $source         Stream resource or file path ($_FILES['tmp_name'])
+     * @param ?string         $clientFilename Client-reported filename ($_FILES['name'])
+     * @param ?string         $clientMediaType Client-reported MIME type ($_FILES['type'])
+     * @param ?int            $size           File size in bytes ($_FILES['size'])
+     * @param ?int            $error          Upload error code ($_FILES['error'])
+     * @param bool            $isUploadedFile Override is_uploaded_file() check for testing
      */
-    public function __construct(mixed $source, string $filename=null, string $mediaType=null, int $filesize=null, int $error=null, bool $isUploadedFile=false) {
-        $this->UploadedFileTrait($source, $filename, $mediaType, $filesize, $error, $isUploadedFile);
+    public function __construct(
+        mixed $source,
+        ?string $clientFilename = null,
+        ?string $clientMediaType = null,
+        ?int $size = null,
+        ?int $error = null,
+        bool $isUploadedFile = false,
+    ) {
+        $this->UploadedFileTrait($source, $clientFilename, $clientMediaType, $size, $error, $isUploadedFile);
     }
 }

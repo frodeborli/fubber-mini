@@ -756,15 +756,14 @@ class HttpDispatcher
     private function createUploadedFileFromSpec(array $spec): UploadedFileInterface|array
     {
         if (!is_array($spec['tmp_name'])) {
-            // Single file
-            $stream = Stream::create($spec['tmp_name']);
-
+            // Single file — pass tmp_name as file path
+            // UploadedFile(source, clientFilename, clientMediaType, size, error)
             return new UploadedFile(
-                $stream,
-                $spec['size'] ?? null,
-                $spec['error'] ?? \UPLOAD_ERR_OK,
+                $spec['tmp_name'],
                 $spec['name'] ?? null,
-                $spec['type'] ?? null
+                $spec['type'] ?? null,
+                isset($spec['size']) ? (int) $spec['size'] : null,
+                isset($spec['error']) ? (int) $spec['error'] : \UPLOAD_ERR_OK,
             );
         }
 
