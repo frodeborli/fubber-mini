@@ -10,8 +10,8 @@ namespace mini\Exceptions;
  */
 class BadRequestException extends \Exception
 {
-    public function __construct(string $message = 'Bad request', ?\Throwable $previous = null)
+    public function __construct(string|\Stringable $message = 'Bad request', ?\Throwable $previous = null)
     {
-        parent::__construct($message, 0, $previous);
+        parent::__construct((string) $message, 0, $previous);
     }
 }

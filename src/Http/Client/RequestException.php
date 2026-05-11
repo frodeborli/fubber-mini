@@ -12,11 +12,11 @@ class RequestException extends ClientException implements RequestExceptionInterf
 {
     public function __construct(
         private RequestInterface $request,
-        string $message,
+        string|\Stringable $message,
         int $code = 0,
         ?\Throwable $previous = null
     ) {
-        parent::__construct($message, $code, $previous);
+        parent::__construct((string) $message, $code, $previous);
     }
 
     public function getRequest(): RequestInterface

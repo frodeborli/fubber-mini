@@ -18,8 +18,8 @@ namespace mini\Exceptions;
  */
 class AuthenticationRequiredException extends \Exception
 {
-    public function __construct(string $message = 'Authentication required', ?\Throwable $previous = null)
+    public function __construct(string|\Stringable $message = 'Authentication required', ?\Throwable $previous = null)
     {
-        parent::__construct($message, 0, $previous);
+        parent::__construct((string) $message, 0, $previous);
     }
 }

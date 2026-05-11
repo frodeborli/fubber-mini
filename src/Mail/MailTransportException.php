@@ -7,4 +7,8 @@ namespace mini\Mail;
  */
 class MailTransportException extends \RuntimeException
 {
+    public function __construct(string|\Stringable $message = "", int $code = 0, ?\Throwable $previous = null)
+    {
+        parent::__construct((string) $message, $code, $previous);
+    }
 }

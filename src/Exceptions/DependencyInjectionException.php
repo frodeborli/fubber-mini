@@ -14,4 +14,8 @@ use Psr\Container\ContainerExceptionInterface;
  */
 class DependencyInjectionException extends \Exception implements ContainerExceptionInterface
 {
+    public function __construct(string|\Stringable $message = "", int $code = 0, ?\Throwable $previous = null)
+    {
+        parent::__construct((string) $message, $code, $previous);
+    }
 }

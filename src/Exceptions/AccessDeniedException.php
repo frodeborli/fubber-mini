@@ -12,8 +12,8 @@ namespace mini\Exceptions;
  */
 class AccessDeniedException extends \Exception
 {
-    public function __construct(string $message = 'Access denied', ?\Throwable $previous = null)
+    public function __construct(string|\Stringable $message = 'Access denied', ?\Throwable $previous = null)
     {
-        parent::__construct($message, 0, $previous);
+        parent::__construct((string) $message, 0, $previous);
     }
 }

@@ -7,8 +7,8 @@ namespace mini\Database;
  */
 class QueryTimeoutException extends \RuntimeException
 {
-    public function __construct(string $message, ?\Throwable $previous = null)
+    public function __construct(string|\Stringable $message, ?\Throwable $previous = null)
     {
-        parent::__construct($message . "\n\nStack trace:\n" . $this->getTraceAsString(), 0, $previous);
+        parent::__construct((string) $message . "\n\nStack trace:\n" . $this->getTraceAsString(), 0, $previous);
     }
 }

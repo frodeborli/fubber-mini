@@ -9,13 +9,13 @@ namespace mini\Parsing\SQL;
  */
 class SqlSyntaxException extends \LogicException
 {
-    public function __construct(string $message, string $sql, int $pos)
+    public function __construct(string|\Stringable $message, string $sql, int $pos)
     {
         [$lineNum, $colNum, $lineSnippet, $pointer] = $this->getDetailedContext($sql, $pos);
 
         $output = sprintf(
             "%s at line %d, column %d\n\n%s\n%s",
-            $message,
+            (string) $message,
             $lineNum,
             $colNum,
             $lineSnippet,

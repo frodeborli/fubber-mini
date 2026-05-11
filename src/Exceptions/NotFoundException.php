@@ -11,4 +11,8 @@ use Psr\Container\NotFoundExceptionInterface;
  */
 class NotFoundException extends \Exception implements NotFoundExceptionInterface
 {
+    public function __construct(string|\Stringable $message = "", int $code = 0, ?\Throwable $previous = null)
+    {
+        parent::__construct((string) $message, $code, $previous);
+    }
 }
