@@ -223,13 +223,21 @@ class Router implements RequestHandlerInterface
             // 7. Check if return value is a PSR-15 request handler
             if ($returnValue instanceof RequestHandlerInterface) {
                 // Strip the matched URL prefix from the request target for
-                // scoped routing — e.g., /tests/router/ matched at prefix
+                // scoped routing — e.g. /tests/router/ matched at prefix
                 // "/tests/router/" becomes /. Use $matchedUrlPrefix (a
-                // literal URL) rather than $resolvedPath (a filesystem path
-                // that may contain `_` wildcards) so wildcard mounts strip
-                // the right number of characters.
-                if ($matchedUrlPrefix !== null && $matchedUrlPrefix !== '' && $matchedUrlPrefix !== '/') {
-                    $scopedPath = '/' . ltrim(substr($path, strlen(rtrim($matchedUrlPrefix, '/'))), '/');
+                // literal URL) rather than $resolvedPath (a filesystem
+                // path that may contain `_` wildcards) so wildcard mounts
+                // strip the right number of characters.
+                //
+                // For root mounts ($matchedUrlPrefix === '/') the strip
+                // is a no-op, but we still need this branch to rewrite
+                // the request target — the original target still carries
+                // the baseUrl path, and Controller\Router::match() will
+                // be looking at the raw target, not our locally
+                // baseUrl-stripped `$path`.
+                if ($matchedUrlPrefix !== null) {
+                    $stripLen = strlen(rtrim($matchedUrlPrefix, '/'));
+                    $scopedPath = '/' . ltrim(substr($path, $stripLen), '/');
                     $queryString = parse_url($requestTarget, PHP_URL_QUERY);
                     $scopedRequestTarget = $scopedPath . ($queryString ? '?' . $queryString : '');
                     $request = $request->withRequestTarget($scopedRequestTarget);
