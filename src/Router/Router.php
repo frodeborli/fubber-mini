@@ -88,7 +88,8 @@ class Router implements RequestHandlerInterface
 
             $internalRequest = $redirectCount > 0;
             $pathComponents = [];
-            $handlerFile = $this->resolveHandlerFile($path, $internalRequest, $resolvedPath, $pathComponents);
+            $matchedUrlPrefix = null;
+            $handlerFile = $this->resolveHandlerFile($path, $internalRequest, $resolvedPath, $pathComponents, $matchedUrlPrefix);
 
             // Preserve query string for redirects
             $query = $request->getUri()->getQuery();
@@ -221,17 +222,21 @@ class Router implements RequestHandlerInterface
 
             // 7. Check if return value is a PSR-15 request handler
             if ($returnValue instanceof RequestHandlerInterface) {
-                // Strip the resolved path from request target for scoped routing
-                // e.g., /tests/router/ with resolvedPath="tests/router/" becomes /
-                if ($resolvedPath !== null && $resolvedPath !== '') {
-                    $scopedPath = '/' . ltrim(substr($path, strlen('/' . rtrim($resolvedPath, '/'))), '/');
+                // Strip the matched URL prefix from the request target for
+                // scoped routing — e.g., /tests/router/ matched at prefix
+                // "/tests/router/" becomes /. Use $matchedUrlPrefix (a
+                // literal URL) rather than $resolvedPath (a filesystem path
+                // that may contain `_` wildcards) so wildcard mounts strip
+                // the right number of characters.
+                if ($matchedUrlPrefix !== null && $matchedUrlPrefix !== '' && $matchedUrlPrefix !== '/') {
+                    $scopedPath = '/' . ltrim(substr($path, strlen(rtrim($matchedUrlPrefix, '/'))), '/');
                     $queryString = parse_url($requestTarget, PHP_URL_QUERY);
                     $scopedRequestTarget = $scopedPath . ($queryString ? '?' . $queryString : '');
                     $request = $request->withRequestTarget($scopedRequestTarget);
 
-                    // Store the route prefix for Controller\Router redirects
-                    // This includes baseUrl path + resolved route path (e.g., '/members-dev/auth')
-                    $routePrefix = $baseUrlPath . '/' . rtrim($resolvedPath, '/');
+                    // Store the route prefix for Controller\Router redirects.
+                    // baseUrl path + matched literal URL prefix.
+                    $routePrefix = $baseUrlPath . rtrim($matchedUrlPrefix, '/');
                     $request = $request->withAttribute('mini.router.routePrefix', $routePrefix);
 
                     // Update global request instance with scoped request target
@@ -309,8 +314,13 @@ class Router implements RequestHandlerInterface
      * @param ?array $pathComponents Captured wildcard values (reversed: nearest wildcard is [0])
      * @return string|null Absolute path to controller file, or null if not found
      */
-    private function resolveHandlerFile(string $path, bool $internalRequest = false, ?string &$resolvedPath=null, ?array &$pathComponents=null): ?string
-    {
+    private function resolveHandlerFile(
+        string $path,
+        bool $internalRequest = false,
+        ?string &$resolvedPath = null,
+        ?array &$pathComponents = null,
+        ?string &$matchedUrlPrefix = null,
+    ): ?string {
         if ($path === '' || $path[0] !== '/') {
             throw new \LogicException("Router::resolveHandlerFile expects absolute paths from the root of the router");
         }
@@ -389,6 +399,7 @@ class Router implements RequestHandlerInterface
                         $resolvedPath = '';
                     }
                     $pathComponents = array_reverse($wildcardValues);
+                    $matchedUrlPrefix = '/' . implode('/', $parts);
                     return $match;
                 }
 
@@ -401,6 +412,7 @@ class Router implements RequestHandlerInterface
                     }
                     $wildcardValues[] = $finalSegment;
                     $pathComponents = array_reverse($wildcardValues);
+                    $matchedUrlPrefix = '/' . implode('/', $parts);
                     return $match;
                 }
             } else {
@@ -412,6 +424,7 @@ class Router implements RequestHandlerInterface
                         $resolvedPath = '';
                     }
                     $pathComponents = array_reverse($wildcardValues);
+                    $matchedUrlPrefix = '/' . implode('/', $parts);
                     return $match;
                 }
 
@@ -424,23 +437,49 @@ class Router implements RequestHandlerInterface
                     }
                     $wildcardValues[] = $finalSegment;
                     $pathComponents = array_reverse($wildcardValues);
+                    $matchedUrlPrefix = '/' . implode('/', $parts);
                     return $match;
                 }
             }
         }
 
-        // no direct match, so we must look for __DEFAULT__.php files
-        for ($i = $partCount - 1; $i >= 0; $i--) {
-            $candidatePath = implode("/", array_slice($parts, 0, $i)) . '/__DEFAULT__.php';
+        // No direct file match. Walk the matched wildcard prefix from longest
+        // to shortest looking for __DEFAULT__.php. This lets a controller at a
+        // parameterized prefix (e.g. _routes/orgs/_/members/__DEFAULT__.php)
+        // own all sub-paths via attribute routing — same way a literal-prefix
+        // controller (e.g. _routes/admin/users/__DEFAULT__.php) does today.
+        //
+        // $matchedParts contains '_' for wildcard slots; $wildcardValues is
+        // in left-to-right capture order. For each prefix length, the
+        // captures that survive are the ones from `_` slots within that
+        // prefix; pathComponents returns them in nearest-wildcard-first
+        // order, matching the convention used by the direct-match block.
+        $walkedLen = count($matchedParts);
+        for ($i = $walkedLen; $i >= 0; $i--) {
+            $candidatePath = $i > 0
+                ? implode('/', array_slice($matchedParts, 0, $i)) . '/__DEFAULT__.php'
+                : '__DEFAULT__.php';
             if (null !== ($match = $routes->findFirst($candidatePath))) {
-                $resolvedPath = dirname($candidatePath) . '/';
-                $pathComponents = [];
+                $resolvedPath = $i > 0
+                    ? implode('/', array_slice($matchedParts, 0, $i)) . '/'
+                    : '';
+                $wildcardsInPrefix = 0;
+                for ($j = 0; $j < $i; $j++) {
+                    if ($matchedParts[$j] === '_') {
+                        $wildcardsInPrefix++;
+                    }
+                }
+                $pathComponents = array_reverse(array_slice($wildcardValues, 0, $wildcardsInPrefix));
+                $matchedUrlPrefix = $i > 0
+                    ? '/' . implode('/', array_slice($parts, 0, $i)) . '/'
+                    : '/';
                 return $match;
             }
         }
 
         $resolvedPath = null;
         $pathComponents = [];
+        $matchedUrlPrefix = null;
 
         return null;
     }
