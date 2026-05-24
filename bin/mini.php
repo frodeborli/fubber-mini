@@ -83,6 +83,14 @@ $availableCommands = [
             "vdb 'SELECT * FROM users'" => 'Query VirtualDatabase directly',
             "vdb '.schema'" => 'Show VirtualDatabase schema'
         ]
+    ],
+    'aspects' => [
+        'description' => 'Sync aspects/ bundles with composer + bootstrap files',
+        'script' => 'mini-aspects.php',
+        'examples' => [
+            'aspects' => 'Scan aspects/*, ensure composer.json + _bootstrap.php exist, update host composer.json',
+            'aspects list' => 'List discovered aspects with their package names and registered paths',
+        ]
     ]
 ];
 
