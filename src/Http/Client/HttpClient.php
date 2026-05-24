@@ -340,15 +340,30 @@ class HttpClient implements ClientInterface
 
     /**
      * Send a request with custom method
+     *
+     * @param string $method HTTP method
+     * @param string $url Target URL
+     * @param string|StreamInterface|null $body Request body (string or stream)
+     * @param array $headers Request headers
      */
-    public function request(string $method, string $url, ?string $body = null, array $headers = []): ResponseInterface
+    public function request(string $method, string $url, string|\Psr\Http\Message\StreamInterface|null $body = null, array $headers = []): ResponseInterface
     {
-        $request = new \mini\Http\Message\Request(
-            method: $method,
-            requestTarget: $url,
-            headers: $headers,
-            body: $body ?? ''
-        );
+        // Use Request::create() which properly parses full URLs into URI components
+        $request = \mini\Http\Message\Request::create($method, $url);
+
+        // Add headers
+        foreach ($headers as $name => $value) {
+            $request = $request->withHeader($name, $value);
+        }
+
+        // Add body if provided
+        if ($body !== null) {
+            if ($body instanceof \Psr\Http\Message\StreamInterface) {
+                $request = $request->withBody($body);
+            } elseif ($body !== '') {
+                $request = $request->withBody(Stream::cast($body));
+            }
+        }
 
         return $this->sendRequest($request);
     }
