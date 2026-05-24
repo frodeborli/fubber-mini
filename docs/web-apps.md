@@ -1,6 +1,6 @@
 # Building Web Applications with Mini
 
-This guide covers all aspects of building web applications with Mini: routing, error handling, response converters, and web app patterns.
+This guide covers the main parts of building web applications with Mini: routing, error handling, response converters, and web app patterns.
 
 ## Table of Contents
 
@@ -30,17 +30,21 @@ Use `_.php` files to capture dynamic URL segments:
 
 ```php
 // _routes/users/_.php - Matches /users/123
+use mini\Http\Message\JsonResponse;
+
 $userId = $_GET[0];
 $user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$userId]);
-echo json_encode($user);
+return new JsonResponse($user);
 ```
 
 ```php
 // _routes/users/_/posts/_.php - Matches /users/{userId}/posts/{postId}
+use mini\Http\Message\JsonResponse;
+
 $userId = $_GET[0];   // First wildcard
 $postId = $_GET[1];   // Second wildcard
 $post = db()->queryOne("SELECT * FROM posts WHERE id = ? AND user_id = ?", [$postId, $userId]);
-echo json_encode($post);
+return new JsonResponse($post);
 ```
 
 **Wildcard behavior:**
@@ -62,15 +66,21 @@ The router automatically redirects to ensure consistency:
 Route files can return different types of values:
 
 ```php
-// 1. Nothing (native PHP output)
-header('Content-Type: application/json');
-echo json_encode(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
+// 1. PSR-7 Response (recommended — portable to coroutine runtimes)
+use mini\Http\Message\JsonResponse;
+return new JsonResponse(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
 ```
 
 ```php
-// 2. PSR-7 Response (recommended for HTML pages)
+// 2. PSR-7 HTML Response
 use mini\Http\Message\HtmlResponse;
 return new HtmlResponse(render('users.php', ['users' => $users]));
+```
+
+```php
+// 3. Nothing — native PHP output (SAPI-only; not coroutine-portable)
+header('Content-Type: application/json');
+echo json_encode(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
 ```
 
 ```php
@@ -101,7 +111,50 @@ return new class implements RequestHandlerInterface {
 };
 ```
 
+```php
+// 6. Closure (first-class callable) — typed parameter injection
+return (new SupportTicket)->handleUserSupportTicket(...);
+```
+
 **Important:** Returning a plain string creates a `text/plain` response, not HTML. For HTML responses, always use `HtmlResponse` or a class that extends it.
+
+### Mounting a module's handler method
+
+When a route file returns a `Closure` (most commonly via PHP's first-class callable syntax `Method(...)`), Mini invokes it with **typed parameter injection** — the same mechanism that drives attribute-based controllers. This lets a route delegate to a service method in one line:
+
+```php
+// _routes/people/_/support-tickets.php
+use mini\Mini;
+use App\Support\SupportTicket;
+
+return Mini::$mini->get(SupportTicket::class)->handleUserSupportTicket(...);
+```
+
+```php
+// src/Support/SupportTicket.php
+namespace App\Support;
+
+use mini\Http\Message\JsonResponse;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\ServerRequestInterface;
+
+class SupportTicket {
+    public function handleUserSupportTicket(int $_0, ServerRequestInterface $request): ResponseInterface {
+        // $_0 is the wildcard match — the person id from /people/{id}/support-tickets
+        $tickets = db()->query("SELECT * FROM tickets WHERE user_id = ?", [$_0])->fetchAll();
+        return new JsonResponse(['tickets' => $tickets]);
+    }
+}
+```
+
+**Parameter resolution rules** (applied in order, per parameter):
+
+1. **`$_0`, `$_1`, ...** → positional wildcard captures, nearest wildcard first (same array as `$_GET[0]`, `$_GET[1]`). Builtin scalar types are coerced (`int $_0` → integer).
+2. **Class-typed parameter** → if the type matches `ServerRequestInterface` (or a sub-type), the current request is injected. Otherwise the service container resolves it (`Mini::$mini->get($type)`).
+3. **Match by parameter name** against request attributes (URL captures set by attribute-based routes live here, plus anything middleware added).
+4. **Default value**, then nullable → `null`, then a `Missing required parameter` error.
+
+The same rules apply to attribute-based controllers, so a single convention covers both routing styles.
 
 ## Controller-Based Routing
 

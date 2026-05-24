@@ -1,714 +1,165 @@
-# Why Choose Mini? A Thorough Discussion
+# Design Rationale
 
-Mini isn't trying to be Laravel. It's solving a different problem with a different philosophy.
+What motivates the design choices behind Mini, and what each choice trades off.
 
-This document addresses the real concerns developers have when choosing between Mini and established frameworks, with honest answers about trade-offs.
-
----
-
-## The Core Thesis: Designed for Decades, Not Release Cycles
-
-**Mini is designed for zero maintenance.**
-
-Not "low maintenance" - **zero maintenance over 10-20 years**.
-
-### Why This Is Possible
-
-Mini wraps PHP's stable core APIs:
-
-```php
-fmt()->currency(19.99, 'EUR')           // → NumberFormatter (stable since PHP 5.3, 2009)
-t("Hello {name}", ['name' => 'World'])  // → MessageFormatter (stable since PHP 5.3, 2009)
-db()->query("SELECT * FROM users")      // → PDO (stable since PHP 5.1, 2005)
-\Locale::setDefault('de_DE')            // → intl extension (stable since PHP 5.3, 2009)
-```
-
-**These APIs haven't changed in 15-20 years. Why would they change in the next 20?**
-
-PHP's backward compatibility commitment is extraordinarily strong:
-- `mysql_*` functions: 12 years from deprecation to removal
-- `ereg_*` functions: 6 years from deprecation to removal
-- PDO, intl, reflection: Never broken in 20 years
-
-**Mini doesn't abstract PHP away - it provides convenient access to it.**
-
-### Compare to Framework Churn
-
-**Laravel over 10 years (2015-2025):**
-- Version 5 → 6 → 7 → 8 → 9 → 10 → 11
-- Each major version brings breaking changes
-- Authentication system rewritten (5.x → 6.x)
-- Mail backend replaced (SwiftMailer → Symfony Mailer)
-- Query builder contracts changed
-- Estimated upgrade time: 20-40 days total
-
-**Why does Laravel change?**
-- Complex abstractions evolve (Eloquent ORM, service container, facades)
-- Feature additions require BC breaks
-- "Improvements" to the developer experience
-- Ecosystem coordination (packages must update)
-
-**Mini over 10 years:**
-- Same thin wrappers around stable PHP APIs
-- No abstraction layer to maintain
-- No feature churn (already feature-complete)
-- Estimated maintenance: 0-2 days total
-
-**Why doesn't Mini change?**
-- Simple wrappers over stable APIs don't need updates
-- Not chasing trends or adding features
-- Direct PHP usage means PHP evolution benefits Mini automatically
-
-### The Only Realistic Maintenance Scenarios
-
-**1. Security vulnerability in Mini's code**
-- Possible in any framework
-- Mini's ~15,000 lines make auditing feasible
-- Fix time: 2-4 hours for typical issues
-
-**2. Catastrophic PHP BC break**
-- Example: PHP removes intl extension or breaks PDO API
-- This would break Laravel, Symfony, and the entire ecosystem
-- Not a "Mini problem" - it's an "ecosystem is dead" problem
-- Probability: Near zero (PHP's BC commitment is rock-solid)
-
-**3. You want new features**
-- This is enhancement, not maintenance
-- And it's optional (Mini works as-is)
-
-### Real-World Longevity
-
-I've been building PHP frameworks for 24 years. Code I wrote in 2002 still runs in production today at a regional SaaS in Norway. I know where BC breaks happen and how to avoid them.
-
-Mini is designed with that experience: wrap stable APIs, avoid clever abstractions, use timeless patterns (files, SQL, templates).
+This is not a comparison document. The aim is to make the design intent explicit so that someone evaluating Mini, contributing to Mini, or maintaining a fork of Mini understands which constraints are deliberate and which are accidental.
 
 ---
 
-## Addressing Common Concerns
+## Zero non-PSR dependencies
 
-### "Single-developer project - what if you disappear?"
+**The fact.** Mini's `composer.json` requires `php >=8.3`, the seven `psr/*` interface packages, and two conditional `symfony/polyfill-intl-*` shims that activate only when PHP's `intl` extension is missing. Mini *provides* implementations for five PSR contracts (`container`, `http-message`, `http-factory`, `http-client`, `simple-cache`).
 
-**The concern is backwards.**
+**What this motivates.**
 
-**Question:** What's easier to maintain?
-- 15,000 lines of well-documented, explicit PHP
-- 500,000+ lines of abstracted framework + ecosystem packages
+- The audit surface for the framework is Mini's own source. There is no transitive supply chain to track for advisories.
+- Upgrading Mini reconciles one package, not a dependency tree. There is no "is this our bug or upstream's" investigation when something breaks.
+- An aspect's `composer.json` requiring `fubber/mini` does not drag in eighty transitive packages. Aspect installation is a single package.
+- The Packagist ecosystem is reachable from a Mini application without conflict. Eloquent, Doctrine, Symfony Mailer, Carbon, Guzzle, Stripe SDK, AWS SDK — any PSR-compatible package can be composed into a Mini app or an aspect. Mini does not compete with these packages; it provides the substrate they run on.
 
-**Reality check:**
-- Any competent PHP developer can read and understand Mini in a weekend
-- The code IS the documentation (clear docblocks, obvious patterns, explicit behavior)
-- No complex service provider boot process, no magic bindings, no hidden lifecycle
-
-**Compare to Laravel:**
-- Good luck finding where something actually happens without xdebug
-- Service container bindings are opaque
-- Middleware pipeline is complex
-- Facade magic obscures real dependencies
-
-**The real question:** Is it safer to depend on transparent, simple code or complex, abstracted code?
-
-**When I'm unavailable in year 10:**
-- Mini: Fork it, maintain it (15K lines, fully documented)
-- Laravel: Upgrade or rewrite (can't realistically fork 500K+ lines)
-
-**Business reality:** You're not maintaining either framework day-to-day. But if you NEED to (in year 15), Mini is feasible. Laravel isn't.
+**The tradeoff.** Functionality that other frameworks import (mailer, ORM, validator) is implemented inside Mini. This is more code in Mini's source than in a wrapper-style framework, in exchange for the dependency-tree properties above. The trade is accepted because the implementations are small (the entire framework is ~64K LOC) and because PSR compatibility means a developer who prefers Doctrine or Eloquent over Mini's data layer can still use them.
 
 ---
 
-### "Unknown release cycle - no predictable LTS versions"
+## Engine-native over userland reimplementations
 
-**True, but the premise is flawed.**
+**The fact.** Mini uses PHP's C-level engine features where they exist: the `intl` extension for ICU MessageFormatter and number/date/currency formatting, PDO for database access, `\Locale::setDefault()` for per-request locale switching, the filesystem itself as the routing table, plain PHP files as templates.
 
-**Mini's stability model is different:**
-- Not designed for frequent releases (stable wrappers don't change)
-- Breaking changes are rare (small surface area)
-- **CHANGE-LOG.md** documents every breaking change explicitly
+**What this motivates.**
 
-**When stable wrappers do need changes:**
-- They're typically edge cases in routing or configuration loading
-- Not "we rewrote the authentication system" (Laravel 5→6)
-- Not "we replaced the mail backend" (Laravel 6→7)
+- These engine features have stable APIs measured in decades. `intl` has been stable since PHP 5.3 (2009). PDO since 5.1 (2005). `\Locale` since 5.3. Mini's API surface inherits this stability — code written against Mini's `t()` or `fmt()` does not break when the framework version changes, because the framework is a thin wrapper over an engine API that does not change.
+- Performance bottoms out at the engine, not at userland. ICU translation through `MessageFormatter` is C code; userland-parsed translation arrays are PHP.
+- A developer's existing PHP knowledge transfers. There is no framework-specific equivalent of well-known engine features to learn.
 
-**Laravel's "advantage" is overstated:**
-- Yes, LTS versions get 2 years of support
-- But upgrades between major versions are painful
-- Teams often stay stuck on old versions because upgrading isn't worth the effort
-- BC breaks every 2 years is predictable, but it's predictably expensive
-
-**Mini's approach:**
-- Fewer breaking changes total (simple code is stable code)
-- When breaks happen, they're documented and easy to fix
-- No pressure to upgrade every 2 years
-
-**Ask yourself:** Would you rather have "supported" BC breaks every 2 years, or rare, documented changes when actually necessary?
+**The tradeoff.** Mini requires the `intl` extension for full functionality (the polyfills cover partial functionality when intl is missing). Requires PDO for the default database driver. These are universally available in production PHP environments but represent a stricter runtime requirement than frameworks that ship pure-PHP fallbacks.
 
 ---
 
-### "Uncertain long-term support - might be abandoned"
+## Filesystem as the routing table
 
-**Let's be direct.**
+**The fact.** URL paths map directly to `_routes/` files. `_routes/users/_.php` matches `/users/<anything>` and captures the segment. Composite handlers can be mounted via `_routes/users/__DEFAULT__.php` returning a controller or PSR-15 handler.
 
-**Yes, Mini could be abandoned. So could Laravel.**
+**What this motivates.**
 
-Laravel survives because:
-- Taylor Otwell makes money from Forge/Vapor/Spark
-- That revenue stream funds development
-- If it stops, Laravel's pace would slow dramatically
+- The URL structure of an application is visible at `ls _routes/`. There is no separate routing table to consult and no compilation step to rebuild after edits.
+- The OS kernel's file metadata cache handles the lookup, which is faster than any userland regex-based router can be.
+- Renaming a file renames the route. Removing a file removes the route. No state to maintain elsewhere.
 
-Mini survives because:
-- I run production systems on it that need to work in 10 years
-- It's already "done" (feature-complete, not feature-incomplete)
-- Low maintenance burden (doesn't fight PHP)
-
-**But here's the key difference:**
-
-**Mini is forkable:**
-- 15,000 lines of transparent PHP
-- Any competent developer can maintain it
-- No complex build pipeline, no code generation
-- The code IS the documentation
-
-**Laravel is not forkable:**
-- 500,000+ lines across framework + ecosystem
-- Complex abstractions require deep understanding
-- Coordinating ecosystem packages is a full-time job
-
-**Honest assessment:**
-- Need guaranteed commercial support? → Laravel or Symfony
-- Need code that works in 2035 with minimal intervention? → Mini is safer
-- Need active feature development forever? → Neither framework guarantees that
-
-**Think about it:** How many Laravel 5.1 apps from 2015 still run on that version without costly upgrades? Mini apps have less upgrade pressure because there's less to upgrade.
+**The tradeoff.** Applications whose URLs do not map cleanly to a hierarchical filesystem layout (URL-as-token services, hash-based dispatch) are awkward in this paradigm. For those, attribute-based routing on controllers, or returning a PSR-15 handler from a route file, provides escape hatches. The filesystem paradigm is the default because it serves the majority case; the alternatives exist for cases where it does not fit.
 
 ---
 
-### "Small ecosystem means you're on your own"
+## Lazy loading throughout
 
-**This reframes as an advantage.**
+**The fact.** A "Hello World" Mini application uses approximately 300KB of memory. ORM, mailer, validator, i18n, sessions, auth — none of these load until the application touches them. Service definitions are closures that resolve on first access. Route files are read only when the URL matches them.
 
-**Mini's ecosystem IS PHP's ecosystem:**
+**What this motivates.**
 
-```php
-// Need queues?
-composer require symfony/messenger
-composer require bernard/bernard
-composer require php-resque/php-resque
+- The framework scales from a single endpoint to a full application platform without architectural changes. A small service does not pay for features it does not use.
+- Composer's autoloader and the OS filesystem cache are the only caches that matter. There is no framework-level compilation step that needs to be invalidated.
+- Cold-start time is roughly proportional to what the request actually needs, not to the framework's installed feature set.
 
-// Need search?
-composer require elasticsearch/elasticsearch
-composer require meilisearch/meilisearch-php
-
-// Need payments?
-composer require stripe/stripe-php
-composer require omnipay/omnipay
-
-// Need AWS?
-composer require aws/aws-sdk-php
-
-// Need PDF generation?
-composer require dompdf/dompdf
-composer require mpdf/mpdf
-```
-
-**Use any Composer package directly. Zero ceremony. Zero constraints.**
-
-**Laravel's "ecosystem" is actually constraining:**
-- Must use Laravel-specific wrappers (`laravel/cashier`, `laravel/scout`)
-- Can't upgrade underlying library without Laravel blessing
-- Packages lag behind upstream features
-- When Laravel changes, packages break
-- Limited to what Laravel wrapped and how they wrapped it
-
-**Example - Stripe Integration:**
-
-```php
-// Mini: Use Stripe's native API (full flexibility)
-composer require stripe/stripe-php
-
-$stripe = new \Stripe\StripeClient($_ENV['STRIPE_SECRET']);
-$intent = $stripe->paymentIntents->create([
-    'amount' => 2000,
-    'currency' => 'usd',
-    'payment_method_types' => ['card'],
-    'capture_method' => 'manual',  // Full control
-]);
-
-// Laravel: Use Cashier wrapper (convenient but limited)
-composer require laravel/cashier
-
-$user->charge(2000, 'pm_card_visa');
-// What if you need PaymentIntent options Cashier doesn't expose?
-// Now you're fighting the framework.
-```
-
-**The trade-off:**
-- Laravel: Standardized patterns (good for team consistency)
-- Mini: Full library APIs (good for flexibility and power)
-
-**Reality:** Laravel's ecosystem is mostly thin wrappers around standard PHP packages. You're not saving work - you're trading flexibility for convention.
+**The tradeoff.** Some indirection between code paths — for instance, `db()` resolves through the container on first call. This indirection is the cost of lazy loading. The cost is small enough that it has not measurably affected benchmarks.
 
 ---
 
-### "You'll build authentication, authorization, queues yourself"
+## PSR compatibility — consumer and provider
 
-**Let's be specific about what this means.**
+**The fact.** Mini's `require` section lists seven PSR interface packages, and its `provide` section declares implementations for five of them. The framework consumes PSR contracts internally and provides PSR contracts externally.
 
-#### Authentication (Included in Mini)
+**What this motivates.**
 
-```php
-// Mini provides the plumbing
-auth()->register($email, $password);  // Bcrypt hashing
-auth()->login($email, $password);     // Session management
-auth()->check();                      // Is user logged in?
-auth()->user();                       // Get current user
+- Any PSR-15 middleware or `RequestHandlerInterface` can mount inside a Mini route file. Slim, Mezzio, or any other PSR-15 app can be embedded.
+- Any PSR-compatible package on Packagist works in a Mini application. Mini does not compete with the ecosystem; it sits beneath it.
+- Application code that talks to PSR interfaces (`ServerRequestInterface`, `ResponseInterface`, `ContainerInterface`) is portable. An application built on Mini that one day needs to leave Mini can swap in any other PSR-compatible implementation without rewriting handlers.
 
-// You provide: User table schema
-// Time to working auth: 1-2 hours
-```
-
-**Laravel provides:**
-- More features (email verification, password reset emails, 2FA)
-- More opinions (must use Eloquent, must use Mail facade)
-- More abstraction (guards/providers/drivers complexity)
-
-**Trade-off:**
-- Mini: Write 50 lines for password reset emails using any mail library
-- Laravel: Get it free, but locked into Laravel's way
-
-#### Authorization (30 minutes)
-
-```php
-// Option 1: Simple role checks
-function requireRole($role) {
-    if (!in_array($role, auth()->user()['roles'] ?? [])) {
-        throw new AccessDeniedException();
-    }
-}
-
-// Option 2: Use a library
-composer require casbin/casbin
-// Works directly with Mini, no integration layer needed
-```
-
-**Laravel provides:** Gates and Policies (which are... functions you write anyway, just in specific locations).
-
-#### Job Queues (Pick Your Tool)
-
-```php
-// Option 1: Symfony Messenger (full-featured)
-composer require symfony/messenger
-// Configure transport, done. Works with Mini's db() directly.
-
-// Option 2: Redis queues
-composer require php-resque/php-resque
-// No Mini-specific integration needed
-
-// Option 3: Cron + CLI
-*/5 * * * * vendor/bin/mini run process-emails
-```
-
-**Laravel provides:** Unified queue API, `php artisan queue:work`, consistent patterns.
-
-**Trade-off:**
-- Mini: Choose your queue strategy (1 hour integration), full flexibility
-- Laravel: Standardized, but locked into Laravel's queue contracts
-
-#### The Real Question: "Are you comfortable being your own integrator?"
-
-**The answer:** If you can't integrate a Stripe library or AWS SDK, you can't build software. Period.
-
-This isn't a "Mini vs Laravel" question - it's a "can you program?" question.
-
-**Integration is not a burden - it's the job.** The question is whether you want a framework that:
-- **Integrates FOR you** (Laravel: standardized, but constrained)
-- **Stays OUT OF YOUR WAY** (Mini: direct, full flexibility)
-
-**For long-term systems where you need full control**, Mini's approach is cleaner. You're not "building integrations yourself" - you're using libraries as designed, without a translation layer.
+**The tradeoff.** PSR's design choices (immutable Request/Response, header normalization, stream semantics) are baked into Mini. A developer who finds PSR-7's immutability inconvenient is still in PSR-7 land.
 
 ---
 
-### "Harder to find developers who know it"
+## Aspects as Composer packages
 
-**This is the most legitimate hiring concern.**
+**The fact.** Modular contribution in Mini happens through "aspects" — Composer packages (typically under `aspects/` via Composer path repositories) that contribute routes, views, static assets, config, translations, migrations, and PHP code via PSR-4 + `autoload.files`. The `mini aspects` CLI scaffolds the boilerplate.
 
-**For hiring speed:**
-- Zero developers know Mini specifically
-- Thousands know Laravel
-- Agencies/consultancies need Laravel for staff fungibility
+**What this motivates.**
 
-**Counter-arguments:**
+- An aspect is structurally a real Composer package from day one. Extracting an aspect into a standalone published package later is a configuration change (move directory, change version constraint), not a refactor.
+- Aspects integrate via standard PHP mechanisms — Composer's autoloader, PSR-4 namespacing, `autoload.files` for bootstrap — not via a Mini-specific module registration API.
+- Inter-aspect dependencies are declared in each aspect's `composer.json` and resolved by Composer. The host application does not need to know that aspect A depends on aspect B.
+- The `paths` registries (`paths->routes`, `paths->views`, `paths->static`, etc.) allow each aspect to contribute resources at first-class registry paths. Host-app resources take precedence; aspect resources fill gaps.
 
-**1. Onboarding time:**
-- Mini: 2-4 hours to productive (read docs, write first route)
-- Laravel: 1-2 weeks to productive (facades, service container, Eloquent, Blade, middleware)
-
-**2. Quality signal:**
-- Mini attracts developers who want to understand their stack
-- Laravel attracts a mix (excellent to "Stack Overflow programmers")
-- Hiring "Laravel developers" doesn't guarantee quality
-
-**3. Maintainability:**
-- Any competent PHP dev can read Mini's source and understand it
-- Finding Laravel developers who understand service providers and container binding is hard
-
-**4. AI tooling reduces framework-specific expertise needs:**
-- Claude Code, Cursor, Copilot work extremely well with Mini
-- AI can read entire Mini framework in context window
-- Explicit code (Mini) vs magic (Laravel) = fewer AI hallucinations
-
-**When this matters:**
-- Agencies, consultancies, large rotating teams → Laravel wins
-- Product companies, small expert teams → Mini wins
-- Startups with technical founders → Mini wins
-- Startups with non-technical founders hiring fast → Laravel wins
-
-**Honest answer:** Optimizing for hiring speed in competitive markets? Choose Laravel. Optimizing for code quality and long-term maintainability? Mini's simplicity is an advantage.
+**The tradeoff.** Each aspect carries Composer ceremony: a `composer.json`, an `_bootstrap.php` (auto-generated by `mini aspects`), and a require entry in the host. The ceremony is small and partially automated, but it exists. For one-off endpoints the host's `_routes/` directory is fine; aspects are the right unit when a feature has more than a single file.
 
 ---
 
-### "Laravel's performance is unlikely to be a bottleneck"
+## Vertically integrated scaling stack
 
-**Often true, but incomplete analysis.**
+**The fact.** Mini is one layer of a three-layer stack designed by the same author:
 
-**Performance isn't just throughput - it's:**
+- **Mini** (framework) — what you write your application against.
+- **phasync** (coroutine library) — fiber-based concurrency primitives.
+- **Swerve** (application server) — coroutine-aware SAPI designed to run Mini applications with many concurrent long-lived requests per process.
 
-#### 1. Latency (User Experience)
-- Mini: 2ms bootstrap → API responses feel instant
-- Laravel: 50-100ms bootstrap → noticeable delay on every request
-- Matters for: Real-time systems, mobile apps, microservices
+The fiber-safe `$_GET`/`$_POST`/`$_COOKIE`/`$_SESSION` proxies, the streaming `HttpDispatcher` with its read-driven chunk loop, the immutable query builder, and the path registries are all designed to function correctly under coroutine scheduling.
 
-#### 2. Resource Efficiency (Cost)
-- Mini: ~5MB per worker
-- Laravel: ~50MB per worker
-- **10x difference** = run 10x more workers on same server
-- Matters for: Docker containers, serverless, cost-sensitive deployments
+**What this motivates.**
 
-#### 3. Developer Experience
-- Mini: Stack traces are 10 lines
-- Laravel: Stack traces are 100 lines through facades/middleware/providers
-- Matters for: Debugging speed, mental overhead, productivity
+- The path from a small PHP-FPM application today to a high-concurrency long-lived-process application tomorrow does not require rewriting handlers. Code that returns a `ResponseInterface` and uses the fiber-safe globals moves to Swerve without changes. Code that `echo`s and `header()`s does not move — this is why the documentation distinguishes the two paradigms.
+- The scaling story is owned end-to-end. Mini does not depend on the PHP ecosystem to deliver a coroutine runtime; the runtime is being built alongside.
 
-**Real numbers (typical VPS):**
-- Laravel: ~100 req/sec per worker, ~50MB per worker → 500 req/sec on $20/month VPS
-- Mini: ~1000 req/sec per worker, ~5MB per worker → 5000 req/sec on $20/month VPS
-
-**When Laravel performance is fine:**
-- Low-traffic sites (< 10 req/sec)
-- Heavy I/O workloads (database is bottleneck)
-- Rich frontend with minimal backend logic
-
-**When Mini performance matters:**
-- API backends serving mobile/frontend apps
-- Microservices handling high request rates
-- Real-time systems (webhooks, notifications)
-- Cost-sensitive deployments (every dollar matters)
-
-**Honest take:** For typical CRUD apps, Laravel's performance is fine. For API-heavy or high-scale systems, Mini's 10x efficiency translates to real cost savings and better UX.
+**The tradeoff.** Swerve is not yet released. The fiber-safe-globals story is currently a promise more than a demonstrated production behavior. Mini today, on FPM, behaves like any well-built PHP framework. Mini under Swerve is the design target, not the current state.
 
 ---
 
-## Mini's Hidden Advantage: AI-Native Architecture
+## Small enough to fork
 
-**This is a huge advantage that's rarely discussed.**
+**The fact.** Mini's `src/` directory is approximately 64,000 lines across 327 PHP files. The framework has zero non-PSR dependencies. The PSR-7 interface boundary is the application's actual contact with the framework. The Lindy stance ensures the framework's bets are on patterns that survive without maintainer attention (filesystem routing, intl extension, plain PHP templates).
 
-### Why Mini Works Exceptionally Well with Claude Code/Cursor/Copilot
+**What this motivates.**
 
-**1. Small, comprehensible codebase**
-- AI can read entire framework in context window (~15,000 lines)
-- No hidden magic for AI to hallucinate about
-- Clear cause→effect relationships
+- Continued existence of a Mini-based application does not depend on continued maintenance of Mini by its original author. A motivated single developer can read and maintain the entire framework.
+- A fork does not drag in transitive dependencies whose own maintenance status would need to be tracked.
+- The exit cost from Mini is bounded. Application code talks to PSR interfaces; if a fork becomes untenable, swapping in another PSR-compatible framework is feasible without rewriting the application logic.
 
-**2. Explicit over implicit**
-```php
-// Mini: AI sees exactly what happens
-$users = db()->query("SELECT * FROM users WHERE active = ?", [1]);
-// Clear: database connection, SQL query, parameter binding
-
-// Laravel: AI must guess through layers
-$users = DB::table('users')->where('active', 1)->get();
-// Where's the connection? What middleware ran? Which query builder?
-// AI often suggests outdated patterns or wrong facades
-```
-
-**3. Direct PHP patterns**
-- AI trained on PHP documentation
-- Mini uses standard PHP (PDO, intl, reflection)
-- Routes are files (AI understands filesystem)
-- No DSL or custom syntax to learn
-
-**4. Comprehensive documentation**
-- Every class has detailed docblocks
-- README files explain each feature
-- No magic methods (AI can see actual definitions)
-
-**Real impact:**
-- AI suggests correct code on first try (no "that's Laravel 7 syntax")
-- Debugging is transparent (AI can trace execution)
-- Refactoring is safe (AI sees all dependencies)
-
-**Compare to Laravel:**
-- Facades confuse dependency tracking
-- Magic methods produce hallucinations
-- Service provider bindings are opaque
-- AI often suggests outdated versions
-
-**In 2025 and beyond**, frameworks designed for human+AI collaboration will have significant advantages. Mini's transparent architecture is naturally AI-friendly.
+**The tradeoff.** 64K LOC is small for a framework with this much functionality (full RFC 5322 mail with streaming MIME, federated SQL engine, JSON-Schema validator + metadata, AST-based query parser, attribute-based and filesystem routing, sessions, hooks, paths, services, auth/authorizer, cache, i18n, migrations, CLI). Small does not mean unfinished — it means dense. Reading the source is part of the supported experience.
 
 ---
 
-## When to Choose What
+## What Mini is positioned for
 
-### Choose Mini When:
+The design choices above compose into a framework with a specific intended use:
 
-✅ **You value clarity and control over convention**
-- Want to understand what happens on every request
-- Prefer explicit over magical
-- Need to debug production issues quickly
+**Applications that you expect to run for a long time.** The longevity argument — engine-native APIs, zero non-PSR dependencies, PSR exit paths, fork-survivable — pays off at scale of years, not weeks.
 
-✅ **You're building for long-term stability (10+ years)**
-- Can't afford upgrade treadmill
-- Want predictable, stable codebase
-- Need code that survives framework trends
+**Applications where the architecture should be driven by the domain.** Mini does not provide a User model, an authentication scheme, a content type system, or any other domain-specific opinion. It provides infrastructure primitives. This is a strength when the application has its own architectural shape (wiki, CMS, CRM, social network, ticketing system, multi-tenant SaaS) and a weakness when the application would benefit from inheriting an opinionated architecture.
 
-✅ **You have a small, skilled team (1-5 developers)**
-- Can integrate libraries directly
-- Value code quality over hiring speed
-- Comfortable reading framework source
+**Applications built by developers who know what they want.** A team that has answered "how should our auth work, how should our data layer look, how should our routes be organized" benefits from a framework that does not impose other answers. A team without those answers benefits from a framework that provides them — Laravel, Symfony, and Rails are excellent at this.
 
-✅ **You're using AI coding tools extensively**
-- Claude Code, Cursor, Copilot, etc.
-- Want AI to understand your stack
-- Need transparent code for AI assistance
-
-✅ **Performance and resource efficiency matter**
-- API backends, microservices
-- Cost-sensitive deployments
-- High request rates
-
-✅ **You want direct access to Composer ecosystem**
-- Use any library without wrappers
-- Need full API flexibility
-- Want independent upgrades
-
-### Choose Laravel When:
-
-✅ **You need to hire quickly from broad talent pool**
-- Large or rotating teams
-- Agencies and consultancies
-- Staff fungibility matters
-
-✅ **You want standardized patterns and conventions**
-- Team consistency > individual flexibility
-- "The Laravel Way" for everything
-- Don't want architectural decisions
-
-✅ **You need batteries-included features with zero integration**
-- Email verification, password resets, 2FA out of box
-- Broadcasting, queues, notifications pre-configured
-- Admin panels (Nova), deployment tools (Forge)
-
-✅ **You need commercial support contracts**
-- Enterprise requirements
-- Vendor relationship needed
-- Official support channels
-
-✅ **You're optimizing for initial velocity over long-term stability**
-- MVP needs to ship fast
-- Will likely rewrite anyway
-- Framework churn is acceptable cost
+**Applications that may grow beyond PHP-FPM.** The vertical stack with phasync and Swerve targets workloads that PHP-FPM cannot handle efficiently — SSE, WebSockets, long-poll feeds, real-time updates, high-fan-out reads. Today, Mini runs on FPM. Tomorrow, the same code runs on Swerve.
 
 ---
 
-## The Human Factor: Developer Growth, Retention & Framework Rigidity
+## What Mini is not positioned for
 
-This point rarely makes it into technical comparisons, but it is one of the most important long-term factors for teams that plan to keep talent, grow talent, and avoid stagnation.
+**Tutorial-driven onboarding.** Mini does not ship with a "build a blog in 15 minutes" track because the framework does not assume what a blog should look like. A junior developer benefits more from Laravel's opinionated architecture education than from Mini's primitives.
 
-### Rigid Frameworks Shape Thinking — Often Narrowly
+**Pre-built admin UIs.** Mini provides validator + metadata that can drive form generation, but there is no ready-made admin scaffolding. An application that wants an admin UI builds one (or uses an aspect for it).
 
-After 20 years of hiring and managing developers, here's a pattern I've seen repeatedly:
-
-> Developers who spend 40% of their time navigating framework conventions, directory structures, facades, providers, lifecycle phases, and abstraction rules **stop using their brain creatively**.
-
-Not because they're lazy — because the framework trains them to:
-
-* Follow the "one true way"
-* Avoid stepping outside the blessed abstractions
-* Choose the framework's API over the underlying technology
-* Lean on magic instead of understanding what's happening
-
-Laravel is excellent at onboarding juniors quickly, but there is a downside: **it keeps them in Laravel-land**.
-
-They may ship features, but they often do not deeply understand:
-
-* HTTP message flow
-* SQL query planning
-* Transactions and isolation levels
-* Caching behavior
-* Unicode and locale rules
-* Session and cookie mechanics
-* Memory use and process lifecycle
-* Email MIME structure
-* IO blocking vs async models
-
-These things matter tremendously once the systems you build start succeeding.
-
-### Skill Growth Slows Under Heavy Abstraction
-
-When developers primarily learn:
-
-* "where to place your controller"
-* "what the Laravel way says"
-* "which facade to call for X"
-* "how to satisfy the command bus pattern"
-* "how the service provider bootstraps your class"
-
-…they *don't* learn the part that makes great seniors:
-
-* designing systems they understand end-to-end.
-
-The result is predictable:
-
-* Developers plateau early
-* They struggle to reason outside the framework
-* They hesitate to modify core behavior
-* They avoid reading the framework source
-* They look for new jobs because work becomes repetitive
-
-A rigid framework can produce productive mid-level developers — but **it often delays the emergence of true senior engineering capability**.
-
-Mini's philosophy intentionally avoids this trap:
-
-* You work with real PHP objects, real SQL, real HTTP, real MIME.
-* You understand your stack because it *is* your stack.
-* There's minimal magic and minimal ceremony.
-* Every abstraction is inspectable and plain.
-
-This fosters real engineering growth, not just framework comfort.
-
-### The Framework Fit Problem: "One Size Fits a Lot" Is Not "One Size Fits All"
-
-Laravel is a wonderful general-purpose framework.
-But no general framework can fit:
-
-* Real-time global systems
-* High-performance streaming systems
-* Multi-tenant global SaaS
-* Ultra-low latency APIs
-* Event-driven architectures
-* Long-running PHP runtimes (Swoole, Phasync)
-* Highly unconventional domains (custom protocols, HPC, ML pipelines)
-
-If your project succeeds and grows:
-
-* traffic goes up
-* requirements get more specialized
-* the system architecture evolves
-
-At that point you're still anchored to whatever decisions your framework made:
-
-* bootstrapping model
-* service container structure
-* middleware pipeline
-* ORM abstraction
-* baked-in conventions
-* synchronous assumptions
-* routing architecture
-
-Some teams manage to wrestle Laravel into shapes it was never meant for. Others face a complete rewrite.
-
-### Mini's Advantage: It Doesn't Get in the Way of Success
-
-Mini's small, PHP-first, explicit architecture makes it equally suitable as the starting point for:
-
-* a wiki engine (MediaWiki-scale)
-* a social platform (Facebook-scale)
-* a helpdesk system
-* a billing backend
-* a file processing pipeline
-* a distributed job system
-* a global low-latency API
-
-You're not fighting someone else's abstraction design.
-There is no architectural "gravity well" pulling you into a specific pattern.
-
-Mini is essentially a clean, coherent foundation:
-
-* fast bootstrap
-* predictable lifecycle
-* no global mutable static state
-* fiber-aware
-* works in classical PHP or long-running runtimes
-* easy to extend because it doesn't hide anything
-
-If you end up building something huge, Mini *scales with you*, because the architecture remains yours.
-
-### Developers Prefer Systems They Understand
-
-From a retention perspective:
-
-* Developers stay longer when they feel ownership
-* Developers grow faster when they work close to the metal
-* Developers become senior faster when they design instead of follow
-* Developers produce better systems when they can reason about every layer
-
-Frameworks like Laravel are fantastic teaching tools and productive scaffolds.
-
-But for teams building software that must operate for decades, must scale, or must be deeply understood, a small transparent framework like Mini is a fundamentally better foundation — both technically and humanly.
+**Ecosystem-of-a-thousand-tutorials energy.** Mini's documentation, while thorough per module, does not have the depth of community content that frameworks with a decade of head start have. This will change with adoption; it is not where the framework is today.
 
 ---
 
-## The Truth: Different Tools for Different Contexts
+## Summary
 
-**Mini isn't "better than Laravel" - it's better for certain contexts.**
+| Choice | Motivation | Cost |
+|---|---|---|
+| Zero non-PSR dependencies | Audit surface = framework source; no supply chain | Implements more in-source than wrapper-style frameworks |
+| Engine-native APIs | Stability horizon = PHP's stability horizon | Requires intl/PDO extensions |
+| Filesystem routing | Visible URL structure, kernel-cached lookup, no compilation | Awkward for non-hierarchical URLs (attribute routing exists as escape hatch) |
+| Lazy loading | Scales from prototype to platform without rewrite | Some container-resolution indirection |
+| PSR-everywhere | Composable with the entire Packagist ecosystem | PSR design choices (immutability, etc.) baked in |
+| Aspects as Composer packages | Modules are standard PHP packages; extraction is config-only | Per-aspect ceremony (mitigated by `mini aspects`) |
+| Vertical stack with phasync/Swerve | Scaling path owned end-to-end | Swerve not yet released |
+| ~64K LOC, no transitive deps | Forkable by one developer; survives author absence | Less feature surface than batteries-included frameworks |
 
-| Your Constraint | Best Choice |
-|----------------|-------------|
-| Hiring speed | Laravel |
-| Code clarity | Mini |
-| Long-term stability | Mini |
-| Team coordination | Laravel |
-| Performance/cost | Mini |
-| AI-assisted development | Mini |
-| Commercial support | Laravel/Symfony |
-| Ecosystem "batteries" | Laravel |
-| Direct library integration | Mini |
-| Developer growth to senior | Mini |
-
-**Laravel is optimized for team coordination and rapid hiring.**
-
-**Mini is optimized for code clarity and long-term stability.**
-
-**Choose based on your actual constraint.**
-
----
-
-## Final Thought
-
-> "Frameworks designed for release cycles optimize for change.
-> Frameworks designed for decades optimize for stability.
->
-> Mini wraps what won't change: PDO, intl, reflection.
-> That's not a limitation - it's a feature."
-
-**When you value:**
-- Understanding over inheritance
-- Stability over features
-- Clarity over convenience
-- Decades over releases
-
-**Mini isn't a compromise - it's the right tool.**
-
----
-
-## Getting Started
-
-If Mini's philosophy resonates with you:
-
-1. **Read the main [README.md](../README.md)** - Get started in 4 commands
-2. **Browse [REFERENCE.md](../REFERENCE.md)** - Complete API reference
-3. **Check [feature documentation](../src/)** - Each feature has detailed README
-4. **Try it** - `composer require fubber/mini` and build something
-
-**Mini isn't trying to replace Laravel. It's offering a different path:**
-
-Build less. Understand more. Depend on less. Run for decades.
+Each row is a deliberate choice with a known tradeoff. The framework is consistent in its choices — every choice in column 2 reinforces every other choice in column 2. That consistency is what makes the design coherent rather than a collection of features.
