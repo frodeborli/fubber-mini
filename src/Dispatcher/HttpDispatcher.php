@@ -5,7 +5,7 @@ namespace mini\Dispatcher;
 use mini\Mini;
 use mini\Converter\ConverterRegistryInterface;
 use mini\Http\ResponseAlreadySentException;
-use Psr\Http\Message\{ServerRequestInterface, ResponseInterface, UploadedFileInterface};
+use Psr\Http\Message\{ServerRequestInterface, ResponseInterface, StreamInterface, UploadedFileInterface};
 use Psr\Http\Server\{RequestHandlerInterface, MiddlewareInterface};
 use mini\Http\Message\{ServerRequest, Stream, UploadedFile};
 
@@ -358,18 +358,150 @@ class HttpDispatcher
      */
     private function emitResponse(ResponseInterface $response): void
     {
-        // Send status code
-        http_response_code($response->getStatusCode());
+        $body = $response->getBody();
+        $size = $this->resolveBodySize($response, $body);
+        $rangeable = $body->isSeekable() && $size !== null;
 
-        // Send headers
+        // Advertise Range support whenever we can actually honor it.
+        if ($rangeable && !$response->hasHeader('Accept-Ranges')) {
+            $response = $response->withHeader('Accept-Ranges', 'bytes');
+        }
+
+        // Apply Range request if possible. Only single byte-ranges — multi-range
+        // requires multipart/byteranges responses, which we don't generate.
+        $startOffset = 0;
+        $remaining = $size; // null = unknown length, stream until eof
+
+        $request = $this->currentServerRequest;
+        $rangeHeader = $request !== null ? $request->getHeaderLine('Range') : '';
+
+        if ($rangeable
+            && $rangeHeader !== ''
+            && $response->getStatusCode() === 200
+            && !$response->hasHeader('Content-Range')
+        ) {
+            $parsed = $this->parseRangeHeader($rangeHeader, $size);
+            if ($parsed === false) {
+                $response = $response
+                    ->withStatus(416)
+                    ->withHeader('Content-Range', "bytes */$size")
+                    ->withHeader('Content-Length', '0');
+                $remaining = 0;
+            } elseif ($parsed !== null) {
+                [$start, $end] = $parsed;
+                $startOffset = $start;
+                $remaining = $end - $start + 1;
+                $response = $response
+                    ->withStatus(206)
+                    ->withHeader('Content-Range', "bytes $start-$end/$size")
+                    ->withHeader('Content-Length', (string) $remaining);
+            }
+        }
+
+        http_response_code($response->getStatusCode());
         foreach ($response->getHeaders() as $name => $values) {
             foreach ($values as $value) {
                 header("$name: $value", false);
             }
         }
 
-        // Send body
-        echo $response->getBody();
+        // Long downloads must not be killed by max_execution_time.
+        @set_time_limit(0);
+
+        // Drop any output buffering layers (ini output_buffering, ob_start
+        // elsewhere) so chunks go to the client immediately instead of
+        // accumulating in PHP-side buffers.
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+
+        // Stream body in chunks so multi-GB responses don't materialize in
+        // memory and so the client sees bytes promptly. A future coroutine-aware
+        // StreamInterface can have a writer coroutine feeding the stream while
+        // this loop reads from it.
+        if ($body->isSeekable() && $startOffset > 0) {
+            $body->seek($startOffset);
+        } elseif ($body->isSeekable() && $startOffset === 0) {
+            $body->rewind();
+        }
+
+        while ($remaining === null || $remaining > 0) {
+            if (connection_aborted() || $body->eof()) {
+                break;
+            }
+            $chunkSize = $remaining !== null ? min(65536, $remaining) : 65536;
+            $buf = $body->read($chunkSize);
+            if ($buf === '') {
+                break;
+            }
+            echo $buf;
+            flush();
+            if ($remaining !== null) {
+                $remaining -= strlen($buf);
+            }
+        }
+    }
+
+    /**
+     * Resolve body size in bytes, preferring the Content-Length header set by
+     * the application, falling back to the stream's reported size. Returns
+     * null when the size is not known — in that case the dispatcher streams
+     * until EOF and cannot honor Range requests.
+     */
+    private function resolveBodySize(ResponseInterface $response, StreamInterface $body): ?int
+    {
+        $headerLen = $response->getHeaderLine('Content-Length');
+        if ($headerLen !== '' && ctype_digit($headerLen)) {
+            return (int) $headerLen;
+        }
+        $size = $body->getSize();
+        return $size === null ? null : (int) $size;
+    }
+
+    /**
+     * Parse a `Range: bytes=...` header against a known total size.
+     *
+     * Returns [start, end] (inclusive) on a satisfiable single range,
+     * false when unsatisfiable (caller must respond 416),
+     * null when unparseable or multi-range (caller falls back to 200 full body).
+     *
+     * @return array{0:int,1:int}|false|null
+     */
+    private function parseRangeHeader(string $header, int $size): array|false|null
+    {
+        if (!preg_match('/^\s*bytes=(.+)$/i', $header, $m)) {
+            return null;
+        }
+        $spec = trim($m[1]);
+        if ($spec === '' || str_contains($spec, ',')) {
+            return null;
+        }
+        if (!preg_match('/^(\d*)-(\d*)$/', $spec, $r)) {
+            return null;
+        }
+        [$_, $startStr, $endStr] = $r;
+        if ($startStr === '' && $endStr === '') {
+            return null;
+        }
+        if ($startStr === '') {
+            // suffix range: last N bytes
+            $n = (int) $endStr;
+            if ($n === 0) {
+                return false;
+            }
+            $start = max(0, $size - $n);
+            $end = $size - 1;
+        } else {
+            $start = (int) $startStr;
+            $end = $endStr === '' ? $size - 1 : (int) $endStr;
+        }
+        if ($start > $end || $start >= $size) {
+            return false;
+        }
+        if ($end >= $size) {
+            $end = $size - 1;
+        }
+        return [$start, $end];
     }
 
     /**
