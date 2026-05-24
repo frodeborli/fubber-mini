@@ -215,12 +215,27 @@ class Router implements RequestHandlerInterface
                 throw new ResponseAlreadySentException();
             }
 
+            // 5b. ResponseAggregate → resolve to the actual response and let
+            //     the rest of the dispatch chain handle it. Mirrors PHP's
+            //     IteratorAggregate pattern.
+            if ($returnValue instanceof \mini\Http\ResponseAggregate) {
+                $returnValue = $returnValue->getResponse();
+            }
+
             // 6. Check if return value is already a response
             if ($returnValue instanceof ResponseInterface) {
                 return $returnValue;
             }
 
-            // 7. Check if return value is a PSR-15 request handler
+            // 7. Closure → wrap in ConverterHandler so it benefits from typed
+            //    parameter injection ($_0/$_1 wildcards, request and container
+            //    services by type). Lets routes write:
+            //        return Mini::$mini->get(X::class)->method(...);
+            if ($returnValue instanceof \Closure) {
+                $returnValue = new \mini\Controller\ConverterHandler($returnValue);
+            }
+
+            // 8. Check if return value is a PSR-15 request handler
             if ($returnValue instanceof RequestHandlerInterface) {
                 // Strip the matched URL prefix from the request target for
                 // scoped routing — e.g. /tests/router/ matched at prefix

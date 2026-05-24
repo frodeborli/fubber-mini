@@ -2,6 +2,7 @@
 
 namespace mini\Controller;
 
+use mini\Mini;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Server\RequestHandlerInterface;
@@ -96,25 +97,59 @@ class ConverterHandler implements RequestHandlerInterface
 
         $args = [];
 
-        // Build arguments from request attributes (URL parameters set by Router)
+        // Resolution order for each parameter:
+        //   1. $_0, $_1, ... → positional capture from 'mini.pathcomponents'
+        //      (the same array that backs $_GET[0], $_GET[1], ... — nearest
+        //      wildcard at index 0).
+        //   2. Class-typed parameter — inject the current ServerRequest if the
+        //      type matches, otherwise resolve from the service container.
+        //   3. Named match against request attributes (URL captures set by
+        //      Controller\Router live here, plus anything middleware added).
+        //   4. Default value, then nullable → null, then throw.
         foreach ($reflection->getParameters() as $param) {
             $name = $param->getName();
+            $type = $param->getType();
 
-            // Get from request attributes (Router stores URL parameters here)
+            // 1. $_N positional wildcards
+            if (preg_match('/^_(\d+)$/', $name, $m)) {
+                $components = $request->getAttribute('mini.pathcomponents', []);
+                $idx = (int) $m[1];
+                if (isset($components[$idx])) {
+                    $value = $components[$idx];
+                    if ($type instanceof \ReflectionNamedType && $type->isBuiltin()) {
+                        settype($value, $type->getName());
+                    }
+                    $args[] = $value;
+                    continue;
+                }
+                // fall through to defaults/nullable/throw
+            }
+
+            // 2. Class-typed injection
+            if ($type instanceof \ReflectionNamedType && !$type->isBuiltin()) {
+                $typeName = $type->getName();
+                if (is_a($request, $typeName)) {
+                    $args[] = $request;
+                    continue;
+                }
+                if (Mini::$mini->has($typeName)) {
+                    $args[] = Mini::$mini->get($typeName);
+                    continue;
+                }
+            }
+
+            // 3. Named match against request attributes
             $value = $request->getAttribute($name);
-
             if ($value !== null) {
                 $args[] = $value;
                 continue;
             }
 
-            // Use default value if available
+            // 4. Default / nullable / throw
             if ($param->isDefaultValueAvailable()) {
                 $args[] = $param->getDefaultValue();
                 continue;
             }
-
-            // Allow null if parameter is nullable
             if ($param->allowsNull()) {
                 $args[] = null;
                 continue;
