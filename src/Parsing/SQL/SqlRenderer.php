@@ -439,7 +439,6 @@ class SqlRenderer
         }
 
         // Render without parentheses for simple SELECTs
-        // Only add parentheses if needed for nested UNIONs
         $left = $this->render($node->left);
         $right = $this->render($node->right);
 
@@ -447,12 +446,22 @@ class SqlRenderer
             $op .= ' ALL';
         }
 
-        // Wrap in parens only if nested UNION
-        $needsLeftParen = $node->left instanceof UnionNode;
-        $needsRightParen = $node->right instanceof UnionNode;
+        // UNION / INTERSECT / EXCEPT are associative *within the same
+        // operator + ALL flag*, so `A UNION B UNION C` doesn't need any
+        // grouping — and adding parens there is actively harmful when
+        // this whole node sits inside a SubqueryNode (IN-clause subquery):
+        // the resulting `IN ((SELECT … UNION SELECT …) UNION SELECT …)`
+        // gets parsed by SQLite as `IN (<scalar subquery> UNION …)`
+        // and rejected with a "near UNION" syntax error.
+        //
+        // Only wrap when the nested operator OR the ALL-flag differs —
+        // those cases actually need the explicit grouping.
+        $needsParens = static fn(\mini\Parsing\SQL\AST\ASTNode $child) =>
+            $child instanceof UnionNode
+            && ($child->operator !== $node->operator || $child->all !== $node->all);
 
-        $leftSql = $needsLeftParen ? "($left)" : $left;
-        $rightSql = $needsRightParen ? "($right)" : $right;
+        $leftSql  = $needsParens($node->left)  ? "($left)"  : $left;
+        $rightSql = $needsParens($node->right) ? "($right)" : $right;
 
         return "$leftSql $op $rightSql";
     }
