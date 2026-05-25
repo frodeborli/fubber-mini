@@ -61,13 +61,22 @@
         "bin/mini",
         "bin/mini.bat",
         "bin/mini.cmd",
-        "bin/mini.php",
-        "bin/mini-translations.php",
-        "bin/mini-migrations.php",
-        "bin/mini-benchmark.php",
-        "bin/mini-docs.php",
-        "bin/mini-db.php"
+        "bin/mini.php"
     ],
+    "extra": {
+        "mini": {
+            "commands": {
+                "serve":        { "script": "bin/mini-serve.php",        "description": "Start development server" },
+                "benchmark":    { "script": "bin/mini-benchmark.php",    "description": "Benchmark framework performance" },
+                "translations": { "script": "bin/mini-translations.php", "description": "Manage translation files" },
+                "migrations":   { "script": "bin/mini-migrations.php",   "description": "Run database migrations with tracking and rollback" },
+                "docs":         { "script": "bin/mini-docs.php",         "description": "Browse PHP documentation" },
+                "test":         { "script": "bin/mini-test.php",         "description": "Run tests" },
+                "db":           { "script": "bin/mini-db.php",           "description": "Interactive database shell (use -v for VirtualDatabase)" },
+                "aspects":      { "script": "bin/mini-aspects.php",      "description": "Sync aspect bundles with Composer" }
+            }
+        }
+    },
     "require": {
         "php": ">=8.3",
         "symfony/polyfill-intl-icu": "^1.25",

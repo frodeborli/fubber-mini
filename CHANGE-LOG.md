@@ -4,6 +4,31 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## CLI: composer-driven subcommand discovery, `vdb` removed, signal forwarding (2026-05-25)
+
+**BREAKING CHANGE**
+
+The `mini` CLI no longer hardcodes its subcommands. The dispatcher (`bin/mini.php`) now discovers subcommands by reading `extra.mini.commands` from each installed package's `composer.json` (plus the host project's own). The framework's own subcommands are declared in `fubber/mini`'s `composer.json` `extra` section on equal footing with any aspect or third-party package.
+
+### What changed
+
+- **`vdb` subcommand removed.** Use `mini db -v` or `mini db --virtual` instead — the modern `ArgManager` in `bin/mini-db.php` handles the flag natively.
+- **Subcommand contribution is open.** Any package can declare `extra.mini.commands.<name> = { script: "...", description: "..." }` and the script becomes a `mini <name>` subcommand.
+- **Dispatcher forwards termination signals.** `SIGINT`, `SIGTERM`, `SIGHUP` sent to the dispatcher process are forwarded to the spawned subcommand instead of leaving it orphaned. Implemented via `proc_open` + `pcntl_signal_dispatch` poll loop (the only reliable pattern, since `proc_close`'s blocking waitpid doesn't yield to PHP-level signal handlers).
+- **`mini-*.php` scripts no longer published as `vendor/bin/` binaries.** They're dispatched via `vendor/bin/mini <name>` only.
+
+### What you may need to do
+
+- Replace any `vendor/bin/mini vdb` with `vendor/bin/mini db -v`.
+- Replace any references to `vendor/bin/mini-translations`, `vendor/bin/mini-migrations`, etc., with the dispatched form (`vendor/bin/mini translations`, etc.).
+- If you maintained a fork that added subcommands to `bin/mini.php`'s `$availableCommands` array, migrate to declaring them in `extra.mini.commands` in your package's `composer.json`.
+
+## CLI: `mini serve` rewritten for modern ArgManager + signal-safe fallback (2026-05-25)
+
+**BREAKING CHANGE** (only if you were importing `bin/mini-serve.php` directly)
+
+`bin/mini-serve.php` was using a removed `ArgManager::withSupportedArgs()` API and direct `$args->opts[]` array access, so any invocation with arguments was crashing. Rewritten against the current `ArgManager` API (`withFlag`, `withRequiredValue`, accessed via `getFlag`/`getOption`). The banner now writes to STDERR so it survives `pcntl_exec`. The non-`pcntl_exec` fallback now uses `proc_open` + a `pcntl_signal_dispatch` poll loop to forward SIGINT/SIGTERM/SIGHUP to the child cleanly.
+
 ## Database: model() function, provide\* convention, Authorization integration (2026-02-19)
 
 **BREAKING CHANGE**
