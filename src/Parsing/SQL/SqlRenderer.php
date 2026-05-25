@@ -438,7 +438,6 @@ class SqlRenderer
             );
         }
 
-        // Render without parentheses for simple SELECTs
         $left = $this->render($node->left);
         $right = $this->render($node->right);
 
@@ -446,24 +445,27 @@ class SqlRenderer
             $op .= ' ALL';
         }
 
-        // UNION / INTERSECT / EXCEPT are associative *within the same
-        // operator + ALL flag*, so `A UNION B UNION C` doesn't need any
-        // grouping — and adding parens there is actively harmful when
-        // this whole node sits inside a SubqueryNode (IN-clause subquery):
-        // the resulting `IN ((SELECT … UNION SELECT …) UNION SELECT …)`
-        // gets parsed by SQLite as `IN (<scalar subquery> UNION …)`
-        // and rejected with a "near UNION" syntax error.
+        // Render compound selects flat — no parentheses around either
+        // operand. Two reasons:
         //
-        // Only wrap when the nested operator OR the ALL-flag differs —
-        // those cases actually need the explicit grouping.
-        $needsParens = static fn(\mini\Parsing\SQL\AST\ASTNode $child) =>
-            $child instanceof UnionNode
-            && ($child->operator !== $node->operator || $child->all !== $node->all);
-
-        $leftSql  = $needsParens($node->left)  ? "($left)"  : $left;
-        $rightSql = $needsParens($node->right) ? "($right)" : $right;
-
-        return "$leftSql $op $rightSql";
+        //   1. SQLite doesn't accept a parenthesised compound select
+        //      as the operand of another compound select:
+        //          (SELECT … UNION SELECT …) UNION SELECT …
+        //      → "near '(': syntax error". So a renderer that emits
+        //      that form produces SQL it can't execute against SQLite.
+        //   2. UNION / UNION ALL / INTERSECT / EXCEPT are all equal-
+        //      precedence + left-associative in SQLite. Our parser
+        //      builds the AST that way; rendering flat preserves
+        //      left-to-right semantics on re-parse, including across
+        //      different operators (`A UNION B EXCEPT C` evaluates as
+        //      `(A UNION B) EXCEPT C`, matching the AST).
+        //
+        // Right-associative AST trees (only producible by explicitly
+        // parenthesised input) would lose grouping under this rule —
+        // when a real use case for those emerges, render them via a
+        // SELECT * FROM ( … ) wrapper instead of `( … )` so SQLite
+        // still parses the output.
+        return "$left $op $right";
     }
 
     private function renderSubquery(SubqueryNode $node): string
