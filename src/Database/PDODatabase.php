@@ -413,7 +413,7 @@ class PDODatabase implements DatabaseInterface
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute($values);
+            $stmt->execute(array_map(sqlval(...), $values));
             return $this->lastInsertId() ?? '';
         } catch (PDOException $e) {
             throw new Exception("Insert failed: " . $e->getMessage());
