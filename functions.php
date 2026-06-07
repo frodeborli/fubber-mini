@@ -183,9 +183,21 @@ function bootstrap(): void
         @ob_end_clean();
     }
 
-    // Set up error handler (converts errors to exceptions)
+    // Set up error handler (converts errors to exceptions).
+    //
+    // User-level non-fatal severities (E_USER_WARNING, E_USER_NOTICE,
+    // E_USER_DEPRECATED) are passed through to PHP's default handling
+    // instead of escalated. In vanilla PHP these are logged and execution
+    // continues; surprising callers by throwing changes the documented
+    // contract of trigger_error() for library code that wants to signal
+    // "something noteworthy happened, but keep going". Real bugs
+    // (E_WARNING, E_NOTICE, E_RECOVERABLE_ERROR, E_USER_ERROR, …) still
+    // escalate.
     set_error_handler(function($severity, $message, $file, $line) {
         if (!(error_reporting() & $severity)) {
+            return false;
+        }
+        if ($severity & (E_USER_WARNING | E_USER_NOTICE | E_USER_DEPRECATED)) {
             return false;
         }
         throw new \ErrorException($message, 0, $severity, $file, $line);

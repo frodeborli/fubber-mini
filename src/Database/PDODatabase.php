@@ -241,15 +241,45 @@ class PDODatabase implements DatabaseInterface
 
         try {
             $result = $task($this);
-            $this->lazyPdo()->commit();
+            $pdo = $this->lazyPdo();
+            // MySQL implicitly commits on DDL (CREATE/ALTER/DROP/TRUNCATE/
+            // RENAME). When that happens mid-task, PDO::inTransaction()
+            // flips to false and a literal commit() would raise "no active
+            // transaction". The work is already durable; warn so the
+            // caller knows the transaction boundary they asked for was
+            // not actually honored, then proceed.
+            if ($pdo->inTransaction()) {
+                $pdo->commit();
+            } else {
+                trigger_error(
+                    "Database transaction was implicitly committed mid-task "
+                    . "(typically a DDL statement on MySQL). The transaction "
+                    . "boundary was not honored — partial work cannot be "
+                    . "rolled back.",
+                    E_USER_WARNING,
+                );
+            }
             $this->inTransaction = false;
             return $result;
 
         } catch (\Throwable $e) {
-            try {
-                $this->lazyPdo()->rollBack();
-            } catch (PDOException $rollbackException) {
-                error_log("Transaction rollback failed: " . $rollbackException->getMessage());
+            $pdo = $this->lazyPdo();
+            if ($pdo->inTransaction()) {
+                try {
+                    $pdo->rollBack();
+                } catch (PDOException $rollbackException) {
+                    error_log("Transaction rollback failed: " . $rollbackException->getMessage());
+                }
+            } else {
+                // Can't roll back — an earlier statement (DDL on MySQL)
+                // already implicitly committed. Surface that fact, then
+                // let the original throwable propagate as the caller asked.
+                trigger_error(
+                    "Database transaction failed after an implicit commit "
+                    . "(typically a DDL statement on MySQL). Work prior to "
+                    . "the exception is permanent and cannot be rolled back.",
+                    E_USER_WARNING,
+                );
             }
             $this->inTransaction = false;
             throw $e;
