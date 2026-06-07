@@ -213,12 +213,7 @@ Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
 function sqlval(mixed $value): string|int|float|bool|null
 {
     if ($value === null || is_scalar($value)) {
-        // PDOStatement::execute(array $params) binds every value as
-        // PARAM_STR. PHP's cast (string) false === '', which SQLite
-        // happily stores as TEXT but MySQL STRICT and Postgres reject
-        // for INT/BOOL columns. Coerce booleans to 0/1 here so all
-        // three backends behave identically.
-        return is_bool($value) ? (int) $value : $value;
+        return $value;
     }
 
     $converted = convert($value, 'sql-value');

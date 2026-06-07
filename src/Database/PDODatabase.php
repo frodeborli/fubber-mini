@@ -111,7 +111,7 @@ class PDODatabase implements DatabaseInterface
                 }
 
                 $stmt = $this->lazyPdo()->prepare($sql);
-                $stmt->execute(array_map(sqlval(...), $params));
+                self::bindAndExecute($stmt, $params);
 
                 while ($row = $stmt->fetch(PDO::FETCH_OBJ)) {
                     yield $row;
@@ -129,7 +129,7 @@ class PDODatabase implements DatabaseInterface
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute(array_map(sqlval(...), $params));
+            self::bindAndExecute($stmt, $params);
             $result = $stmt->fetch(PDO::FETCH_OBJ);
             return $result ?: null;
         } catch (PDOException $e) {
@@ -144,7 +144,7 @@ class PDODatabase implements DatabaseInterface
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute(array_map(sqlval(...), $params));
+            self::bindAndExecute($stmt, $params);
             return $stmt->fetchColumn();
         } catch (PDOException $e) {
             throw new Exception("Query field failed: " . $e->getMessage());
@@ -158,7 +158,7 @@ class PDODatabase implements DatabaseInterface
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute(array_map(sqlval(...), $params));
+            self::bindAndExecute($stmt, $params);
             return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
         } catch (PDOException $e) {
             throw new Exception("Query column failed: " . $e->getMessage());
@@ -172,7 +172,7 @@ class PDODatabase implements DatabaseInterface
     {
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute(array_map(sqlval(...), $params));
+            self::bindAndExecute($stmt, $params);
             return $stmt->rowCount();
         } catch (PDOException $e) {
             throw new Exception("Exec failed: " . $e->getMessage());
@@ -186,6 +186,46 @@ class PDODatabase implements DatabaseInterface
     {
         $id = $this->lazyPdo()->lastInsertId();
         return $id !== false ? $id : null;
+    }
+
+    /**
+     * Bind each value with a PDO::PARAM_* type chosen from its PHP type,
+     * then execute the statement.
+     *
+     * PDOStatement::execute(array $params) binds every value as PARAM_STR.
+     * That conflates types in driver-specific ways:
+     *
+     *   - PHP `false` → string `''`, which MySQL STRICT and Postgres reject
+     *     for INT/BOOL columns; SQLite stores literal '' in INTEGER (silent
+     *     data corruption).
+     *   - Postgres BOOLEAN won't accept the integer literal `1` either;
+     *     it needs a real boolean, which PDO emits when bound with
+     *     PARAM_BOOL.
+     *   - PHP `null` strict-mode comparisons can be ambiguous unless
+     *     bound as PARAM_NULL.
+     *
+     * Routing every callsite through one helper that types each value
+     * keeps Mini portable across the three drivers it actually ships
+     * dialect support for (and avoids cross-driver bug whack-a-mole).
+     *
+     * `sqlval()` is still invoked first so non-scalar inputs (objects
+     * with a registered sql-value converter) get reduced to a scalar
+     * before typing.
+     */
+    private static function bindAndExecute(\PDOStatement $stmt, array $params): void
+    {
+        $i = 1;
+        foreach ($params as $raw) {
+            $value = sqlval($raw);
+            $type = match (true) {
+                $value === null => \PDO::PARAM_NULL,
+                is_bool($value) => \PDO::PARAM_BOOL,
+                is_int($value)  => \PDO::PARAM_INT,
+                default         => \PDO::PARAM_STR,
+            };
+            $stmt->bindValue($i++, $value, $type);
+        }
+        $stmt->execute();
     }
 
     /**
@@ -370,7 +410,7 @@ class PDODatabase implements DatabaseInterface
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute(array_map(sqlval(...), $params));
+            self::bindAndExecute($stmt, $params);
             return $stmt->rowCount();
         } catch (PDOException $e) {
             throw new Exception("Delete failed: " . $e->getMessage());
@@ -388,7 +428,7 @@ class PDODatabase implements DatabaseInterface
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute(array_map(sqlval(...), $params));
+            self::bindAndExecute($stmt, $params);
             return $stmt->rowCount();
         } catch (PDOException $e) {
             throw new Exception("Update failed: " . $e->getMessage());
@@ -413,7 +453,7 @@ class PDODatabase implements DatabaseInterface
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
-            $stmt->execute(array_map(sqlval(...), $values));
+            self::bindAndExecute($stmt, $values);
             return $this->lastInsertId() ?? '';
         } catch (PDOException $e) {
             throw new Exception("Insert failed: " . $e->getMessage());
