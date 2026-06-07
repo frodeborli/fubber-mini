@@ -45,6 +45,7 @@
             "src/Table/functions.php",
             "src/Template/functions.php",
             "src/Logger/functions.php",
+            "src/Mail/functions.php",
             "src/Auth/functions.php",
             "src/CLI/functions.php",
             "src/UUID/functions.php",
