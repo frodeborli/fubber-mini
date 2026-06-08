@@ -412,13 +412,20 @@ trait ServerRequestTrait {
     }
 
     /**
-     * Validate an array as per the {@see self::withUploadedFiles()} function.
+     * Validate an array tree as per the {@see self::withUploadedFiles()} function.
+     *
+     * PSR-7 allows nested arrays of UploadedFileInterface instances to support
+     * HTML array field names like "files[]" or "files[avatar]".
      */
     protected static function isValidUploadedFilesArray(array $uploadedFiles): bool {
         foreach ($uploadedFiles as $uploadedFile) {
-            if (!($uploadedFile instanceof UploadedFileInterface)) {
-                return false;
+            if ($uploadedFile instanceof UploadedFileInterface) {
+                continue;
             }
+            if (is_array($uploadedFile) && self::isValidUploadedFilesArray($uploadedFile)) {
+                continue;
+            }
+            return false;
         }
         return true;
     }
