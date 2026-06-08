@@ -25,6 +25,38 @@ use mini\Mini;
 class Renderer implements RendererInterface
 {
     /**
+     * Resolve a layout path like Razor: starting from the current template's
+     * directory, walk up toward the root checking each level.
+     *
+     * If the layout contains a '/' it's treated as an explicit path and
+     * returned as-is (no directory walking).
+     *
+     * @param string $layout Layout filename (e.g. '_layout.php')
+     * @param string $template The template that called extend()
+     * @return string Resolved layout path relative to the views root
+     */
+    private function resolveLayout(string $layout, string $template): string
+    {
+        if (str_contains($layout, '/')) {
+            return $layout;
+        }
+
+        $pathsRegistry = Mini::$mini->paths->views;
+        $parts = explode('/', trim($template, '/'));
+        array_pop($parts);
+
+        while (count($parts) > 0) {
+            $candidate = implode('/', $parts) . '/' . $layout;
+            if ($pathsRegistry->findFirst($candidate)) {
+                return $candidate;
+            }
+            array_pop($parts);
+        }
+
+        return $layout;
+    }
+
+    /**
      * Find and include stacked _viewstart.php files for a template path
      *
      * Searches from root to the template's directory, including each _viewstart.php found.
@@ -120,11 +152,14 @@ class Renderer implements RendererInterface
             $ctx->blocks['content'] = $output;
         }
 
-        // If this template extends another, recurse upward
+        // If this template extends another, recurse upward.
+        // Resolve layout like Razor: walk from the current template's directory
+        // up to root, checking each level for the layout file.
         if ($ctx->layout) {
+            $resolvedLayout = $this->resolveLayout($ctx->layout, $template);
             $newVars = $vars;
             $newVars['__blocks'] = $ctx->blocks;
-            return $this->render($ctx->layout, $newVars);
+            return $this->render($resolvedLayout, $newVars);
         }
 
         // Otherwise, this is the topmost template — render final output
