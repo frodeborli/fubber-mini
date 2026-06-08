@@ -23,6 +23,7 @@ final class TemplateContext
     public array $blocks = [];
     private array $stack = [];
     private ?string $defaultLayout = null;
+    private bool $hasOwnBlocks = false;
 
     /**
      * Set the default layout (called from viewstart processing)
@@ -45,7 +46,7 @@ final class TemplateContext
         if ($this->layout !== null) {
             throw new \LogicException('extend() called twice - only one parent layout allowed');
         }
-        if ($this->blocks) {
+        if ($this->hasOwnBlocks) {
             throw new \LogicException('extend() must be called before defining blocks');
         }
         $this->layout = $file ?? $this->defaultLayout ?? throw new \LogicException(
@@ -64,6 +65,7 @@ final class TemplateContext
      */
     public function block(string $name, ?string $value = null): void
     {
+        $this->hasOwnBlocks = true;
         if ($value !== null) {
             $this->blocks[$name] = $value;
             return;

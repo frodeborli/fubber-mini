@@ -47,7 +47,7 @@ class Renderer implements RendererInterface
 
         while (count($parts) > 0) {
             $candidate = implode('/', $parts) . '/' . $layout;
-            if ($pathsRegistry->findFirst($candidate)) {
+            if ($candidate !== $template && $pathsRegistry->findFirst($candidate)) {
                 return $candidate;
             }
             array_pop($parts);
