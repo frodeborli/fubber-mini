@@ -244,6 +244,10 @@ class Email implements EmailInterface
             return $addrSpec;
         }
 
+        // Strip CR/LF to prevent header injection via the display name
+        // (e.g. "Bob\r\nBcc: victim@x.com"). Mirrors withSubject() sanitization.
+        $displayName = preg_replace("/\r\n|\r|\n/", ' ', $displayName);
+
         // Check if display name needs quoting
         if (preg_match('/[()<>@,;:\\\\".\[\]]/', $displayName)) {
             $escaped = addcslashes($displayName, '"\\');

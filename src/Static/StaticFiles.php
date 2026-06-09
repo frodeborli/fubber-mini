@@ -77,7 +77,22 @@ class StaticFiles implements MiddlewareInterface
             return null;
         }
 
-        return $filePath;
+        // Containment check: the resolved real path must live inside one of the
+        // registered static roots. Without this, a request path containing "../"
+        // resolves through string concatenation and escapes _static/
+        // (e.g. "/../../../etc/passwd"). file_exists() would happily confirm it.
+        $real = realpath($filePath);
+        if ($real === false) {
+            return null;
+        }
+        foreach (Mini::$mini->paths->static->getPaths() as $root) {
+            $realRoot = realpath($root);
+            if ($realRoot !== false && str_starts_with($real, $realRoot . \DIRECTORY_SEPARATOR)) {
+                return $real;
+            }
+        }
+
+        return null;
     }
 
     /**

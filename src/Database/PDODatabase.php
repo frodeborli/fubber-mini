@@ -448,8 +448,9 @@ class PDODatabase implements DatabaseInterface
         $values = array_values($data);
         $placeholders = implode(', ', array_fill(0, count($data), '?'));
 
-        $columnList = implode(', ', $columns);
-        $sql = "INSERT INTO $table ($columnList) VALUES ($placeholders)";
+        $quotedTable = $this->quoteIdentifier($table);
+        $columnList = implode(', ', array_map(fn($c) => $this->quoteIdentifier($c), $columns));
+        $sql = "INSERT INTO $quotedTable ($columnList) VALUES ($placeholders)";
 
         try {
             $stmt = $this->lazyPdo()->prepare($sql);
@@ -477,16 +478,24 @@ class PDODatabase implements DatabaseInterface
         $values = array_values($data);
         $placeholders = implode(', ', array_fill(0, count($data), '?'));
 
+        // Quote identifiers up front so every dialect builder receives safe,
+        // already-quoted table/column names. in_array() comparisons inside the
+        // builders stay valid because columns and conflictColumns are quoted
+        // consistently.
+        $quotedTable = $this->quoteIdentifier($table);
+        $quotedColumns = array_map(fn($c) => $this->quoteIdentifier($c), $columns);
+        $quotedConflictColumns = array_map(fn($c) => $this->quoteIdentifier($c), $conflictColumns);
+
         $dialect = $this->getDialect();
 
         // Build dialect-specific UPSERT SQL
         $sql = match($dialect) {
-            SqlDialect::MySQL => $this->buildMySQLUpsert($table, $columns, $placeholders, $conflictColumns),
-            SqlDialect::Postgres => $this->buildPostgresUpsert($table, $columns, $placeholders, $conflictColumns),
-            SqlDialect::Sqlite => $this->buildSqliteUpsert($table, $columns, $placeholders, $conflictColumns),
-            SqlDialect::SqlServer => $this->buildSqlServerUpsert($table, $columns, $values, $conflictColumns),
-            SqlDialect::Oracle => $this->buildOracleUpsert($table, $columns, $values, $conflictColumns),
-            SqlDialect::Generic => $this->buildPostgresUpsert($table, $columns, $placeholders, $conflictColumns), // Use Postgres syntax as generic
+            SqlDialect::MySQL => $this->buildMySQLUpsert($quotedTable, $quotedColumns, $placeholders, $quotedConflictColumns),
+            SqlDialect::Postgres => $this->buildPostgresUpsert($quotedTable, $quotedColumns, $placeholders, $quotedConflictColumns),
+            SqlDialect::Sqlite => $this->buildSqliteUpsert($quotedTable, $quotedColumns, $placeholders, $quotedConflictColumns),
+            SqlDialect::SqlServer => $this->buildSqlServerUpsert($quotedTable, $quotedColumns, $values, $quotedConflictColumns),
+            SqlDialect::Oracle => $this->buildOracleUpsert($quotedTable, $quotedColumns, $values, $quotedConflictColumns),
+            SqlDialect::Generic => $this->buildPostgresUpsert($quotedTable, $quotedColumns, $placeholders, $quotedConflictColumns), // Use Postgres syntax as generic
         };
 
         try {

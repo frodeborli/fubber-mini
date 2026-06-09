@@ -167,7 +167,7 @@ trait StreamTrait {
      */
     public function seek($offset, $whence = \SEEK_SET): void {
         $this->assertUsable();
-        if (-1 === fseek($this->stream, $whence)) {
+        if (-1 === fseek($this->stream, $offset, $whence)) {
             throw new \RuntimeException("Unable to seek in stream");
         }
     }
