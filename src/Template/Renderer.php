@@ -126,10 +126,9 @@ class Renderer implements RendererInterface
             $vars = $viewstartVars['vars'];
         }
 
-        // Merge blocks from lower-level (child) into current context BEFORE rendering
-        // This ensures $this->show() calls in parent templates can access child blocks
+        // Pass child blocks as inherited — accessible via show() but won't block extend()
         if (isset($vars['__blocks'])) {
-            $ctx->blocks = $vars['__blocks'] + $ctx->blocks;
+            $ctx->inheritBlocks($vars['__blocks']);
         }
 
         // Render template with $this bound to context
@@ -158,12 +157,12 @@ class Renderer implements RendererInterface
         if ($ctx->layout) {
             $resolvedLayout = $this->resolveLayout($ctx->layout, $template);
             $newVars = $vars;
-            $newVars['__blocks'] = $ctx->blocks;
+            $newVars['__blocks'] = $ctx->allBlocks();
             return $this->render($resolvedLayout, $newVars);
         }
 
         // Otherwise, this is the topmost template — render final output
         // If we have output (from a layout), return it; otherwise return content block
-        return $output !== '' ? $output : ($ctx->blocks['content'] ?? '');
+        return $output !== '' ? $output : ($ctx->allBlocks()['content'] ?? '');
     }
 }

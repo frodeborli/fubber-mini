@@ -21,6 +21,7 @@ final class TemplateContext
 {
     public ?string $layout = null;
     public array $blocks = [];
+    private array $inherited = [];
     private array $stack = [];
     private ?string $defaultLayout = null;
     private bool $hasOwnBlocks = false;
@@ -31,6 +32,14 @@ final class TemplateContext
     public function setDefaultLayout(?string $layout): void
     {
         $this->defaultLayout = $layout;
+    }
+
+    /**
+     * Import blocks from a child template (called by Renderer before include)
+     */
+    public function inheritBlocks(array $blocks): void
+    {
+        $this->inherited = $blocks;
     }
 
     /**
@@ -96,7 +105,15 @@ final class TemplateContext
      */
     public function show(string $name, string $default = ''): void
     {
-        echo $this->blocks[$name] ?? $default;
+        echo $this->blocks[$name] ?? $this->inherited[$name] ?? $default;
+    }
+
+    /**
+     * Get all blocks (own + inherited) for passing up to the next parent
+     */
+    public function allBlocks(): array
+    {
+        return $this->blocks + $this->inherited;
     }
 
     /**
