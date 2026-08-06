@@ -4,6 +4,17 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## VDB: writes are deferred until a statement finishes reading (2026-08-06)
+
+**BREAKING CHANGE** (behavioral; also a new limit that can reject previously-accepted statements)
+
+Mutations are now logged during the read and applied afterwards, via `mini\Database\PendingWrites`. Previously `INSERT ... SELECT` inserted while iterating its lazy source, so a statement reading the table it writes fed its own output back into the scan: **`INSERT INTO t SELECT ... FROM t` never terminated**, growing the table until memory ran out. It now terminates with the standard result (the source as it was when the statement began), matching SQLite, PostgreSQL and MySQL.
+
+- **`VirtualDatabase::setMaxMaterializedRows(?int)` added**, default **1,000,000**. Because writes must be buffered until the read completes, a statement whose source yields more rows than the cap now throws a `RuntimeException` naming the cap and how to raise it, instead of exhausting memory. Statements writing more than a million rows in one go must raise the cap (or pass `null` to disable it).
+- **A failed statement now writes nothing.** The cap trips during the read phase, before any row is applied — previously a partially-applied mutation was possible.
+- **`UPDATE` with row-context expressions** (`SET n = n + 1`) already collected changes before applying them; it now goes through the same mechanism, and the "requires a primary key, InMemoryTable, or ArrayTable" error is raised before any work rather than part-way through applying.
+- **`setQueryTimeout()` is documented as best effort**, which is what it has always been. It is checked while a SELECT's rows are pulled (every 100 rows), so it bounds long scans and runaway result sets. It does not bound time inside a single backing-table call, and it does not apply to INSERT/UPDATE/DELETE. It is a guard rail, not a security boundary — see `src/Database/Virtual/README.md`.
+
 ## Release polish: strict alias columns, PSR-17 claim dropped, table projection (2026-08-06)
 
 **BREAKING CHANGES**

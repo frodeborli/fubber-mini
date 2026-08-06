@@ -120,7 +120,7 @@ Mini is **SQL-first**. The immutable `mini\Database\PartialQuery` is the primary
 
 Override `query()` to scope rows by user/tenant; the write guards inherit that scope automatically.
 
-`mini\Database\VirtualDatabase` is a full federated SQL engine. It can register any `TableInterface` (CSV, JSON, remote API, another `PartialQuery`, etc.) as a virtual table and execute SQL across heterogeneous sources. Supports `queryTimeout` for safely accepting user-provided SQL via an API.
+`mini\Database\VirtualDatabase` is a full federated SQL engine. It can register any `TableInterface` (CSV, JSON, remote API, another `PartialQuery`, etc.) as a virtual table and execute SQL across heterogeneous sources. Offers `setQueryTimeout()` and `setMaxMaterializedRows()` as **best-effort** guard rails when accepting user-provided SQL — they make runaway queries fail loudly, they are not a security boundary (see `src/Database/Virtual/README.md`).
 
 ## Validation and metadata
 

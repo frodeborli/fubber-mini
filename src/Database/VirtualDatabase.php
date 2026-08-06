@@ -109,6 +109,9 @@ class VirtualDatabase implements DatabaseInterface
     /** Maximum query execution time in seconds (null = no limit) */
     private ?float $queryTimeout = null;
 
+    /** Maximum rows buffered for one mutation; see setMaxMaterializedRows() */
+    private ?int $maxMaterializedRows = 1_000_000;
+
     /** Query start time for timeout tracking */
     private ?float $queryStartTime = null;
 
@@ -176,13 +179,53 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
-     * Set maximum query execution time in seconds
+     * Set maximum query execution time in seconds - BEST EFFORT
+     *
+     * This is a cooperative limit, not a hard one. The deadline is checked
+     * while a SELECT's rows are being pulled (every 100 rows), so it bounds
+     * long scans and runaway result sets. It does NOT bound:
+     *
+     * - time spent inside a single backing-table call (a slow remote
+     *   TableInterface can block indefinitely; give it its own timeout),
+     * - statements that are not SELECTs - INSERT/UPDATE/DELETE run to
+     *   completion (their unbounded cases are bounded by the row cap, see
+     *   setMaxMaterializedRows()),
+     * - work that produces no rows to iterate, such as a sort or hash build
+     *   over a very large input.
+     *
+     * Treat it as a guard rail that makes runaway SELECTs fail loudly, not
+     * as a security boundary. When accepting untrusted SQL, combine it with
+     * setMaxMaterializedRows(), a memory_limit, and a request-level timeout.
      *
      * @param float|null $seconds Maximum time in seconds, null to disable
      */
     public function setQueryTimeout(?float $seconds): self
     {
         $this->queryTimeout = $seconds;
+        return $this;
+    }
+
+    /**
+     * Set the maximum number of rows the engine will buffer for one mutation
+     *
+     * A mutation whose source reads the table it writes (`INSERT INTO t
+     * SELECT ... FROM t`) must buffer its source rows before applying any
+     * change - otherwise the new rows feed back into the scan and the
+     * statement never terminates. Buffering makes it terminate; this cap
+     * makes a genuinely enormous source fail loudly with an actionable
+     * error instead of exhausting memory.
+     *
+     * Defaults to 1,000,000 rows. Raise it for legitimate bulk copies, or
+     * lower it when accepting untrusted SQL.
+     *
+     * @param int|null $rows Maximum buffered rows, null to disable the cap
+     */
+    public function setMaxMaterializedRows(?int $rows): self
+    {
+        if ($rows !== null && $rows < 1) {
+            throw new \InvalidArgumentException('Max materialized rows must be at least 1, or null to disable');
+        }
+        $this->maxMaterializedRows = $rows;
         return $this;
     }
 
@@ -5431,8 +5474,7 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function executeInsertSelect(InsertStatement $ast, MutableTableInterface $table): int
     {
-        $results = $this->executeSelect($ast->select);
-
+        // Halloween protection: materialize the source before inserting.
         // Use provided column names, or fall back to table's column order
         if (!empty($ast->columns)) {
             $columnNames = array_map(fn($col) => $col->getName(), $ast->columns);
@@ -5446,10 +5488,14 @@ class VirtualDatabase implements DatabaseInterface
             $pkColumn = $this->findPrimaryKeyColumn($table);
         }
 
-        $count = 0;
-        $lastId = 0;
+        // Writes are logged during the read and applied after it finishes -
+        // see PendingWrites. Applying during the scan would feed the new rows
+        // back into it and `INSERT INTO t SELECT ... FROM t` would never
+        // terminate.
+        $writes = new PendingWrites('INSERT ... SELECT', $this->maxMaterializedRows);
+        $inserted = 0;
 
-        foreach ($results as $row) {
+        foreach ($this->executeSelect($ast->select) as $row) {
             $rowArray = [];
             $i = 0;
             foreach ((array)$row as $value) {
@@ -5458,17 +5504,23 @@ class VirtualDatabase implements DatabaseInterface
                 $i++;
             }
 
-            // REPLACE: delete existing row with same PK first
+            // REPLACE: the delete is logged ahead of its insert and applied in
+            // that order, so the row is replaced rather than duplicated.
             if ($ast->replace && $pkColumn !== null && isset($rowArray[$pkColumn])) {
-                $this->deleteExistingRow($table, $pkColumn, $rowArray[$pkColumn]);
+                $writes->delete($pkColumn, $rowArray[$pkColumn]);
             }
 
-            $lastId = $table->insert($rowArray);
-            $count++;
+            $writes->insert($rowArray);
+            $inserted++;
         }
 
-        $this->lastInsertId = (string) $lastId;
-        return $count;
+        // Read is over - now it is safe to write
+        $writes->apply($table);
+
+        $this->lastInsertId = (string) $writes->lastInsertId();
+
+        // Rows inserted, not operations applied (a REPLACE logs a delete too)
+        return $inserted;
     }
 
     /**
@@ -5588,7 +5640,6 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function executeUpdateWithRowContext(MutableTableInterface $table, TableInterface $query, array $updates): int
     {
-        $count = 0;
         $pkColumn = null;
 
         // Find primary key column for targeted updates
@@ -5599,11 +5650,19 @@ class VirtualDatabase implements DatabaseInterface
             }
         }
 
-        // Collect all updates first (evaluate expressions with current row values)
-        // Then apply them. This prevents issues where updates affect subsequent rows.
-        $pendingUpdates = [];
+        // Log every update during the scan and apply them afterwards - writing
+        // mid-scan would let an updated row change the rows still to be read.
+        $writes = new PendingWrites('UPDATE', $this->maxMaterializedRows);
 
-        // Iterate over matching rows
+        // Rows without a primary key are addressed by rowid, which only the
+        // built-in tables expose. Fail before doing any work rather than
+        // part-way through applying.
+        if ($pkColumn === null && !($table instanceof InMemoryTable || $table instanceof ArrayTable)) {
+            throw new \RuntimeException(
+                'UPDATE with self-referencing expressions requires a primary key, InMemoryTable, or ArrayTable'
+            );
+        }
+
         foreach ($query as $rowid => $row) {
             $changes = [];
             foreach ($updates as $update) {
@@ -5611,37 +5670,18 @@ class VirtualDatabase implements DatabaseInterface
                 $changes[$colName] = $this->evaluator->evaluate($update['value'], $row);
             }
 
-            // Store for later update, using either primary key or rowid
             if ($pkColumn !== null) {
                 $pkValue = $row->{$pkColumn} ?? null;
                 if ($pkValue !== null) {
-                    $pendingUpdates[] = ['pk' => $pkColumn, 'value' => $pkValue, 'changes' => $changes];
+                    $writes->update($pkColumn, $pkValue, $changes);
                 }
             } else {
-                // Use rowid for tables without primary key (InMemoryTable yields rowid as key)
-                $pendingUpdates[] = ['rowid' => $rowid, 'changes' => $changes];
+                // InMemoryTable and ArrayTable accept eq() on the rowid they yield as key
+                $writes->update('_rowid_', $rowid, $changes);
             }
         }
 
-        // Apply all updates
-        foreach ($pendingUpdates as $pending) {
-            if (isset($pending['pk'])) {
-                $rowQuery = $table->eq($pending['pk'], $pending['value']);
-            } else {
-                // For InMemoryTable, we can use rowid via eq on _rowid_
-                // But _rowid_ is internal to SQLite. Use a workaround - build WHERE clause manually
-                if ($table instanceof InMemoryTable || $table instanceof ArrayTable) {
-                    // InMemoryTable and ArrayTable support eq with _rowid_ column
-                    $rowQuery = $table->eq('_rowid_', $pending['rowid']);
-                } else {
-                    throw new \RuntimeException("UPDATE with self-referencing expressions requires a primary key, InMemoryTable, or ArrayTable");
-                }
-            }
-            $table->update($rowQuery, $pending['changes']);
-            $count++;
-        }
-
-        return $count;
+        return $writes->apply($table);
     }
 
     private function executeDelete(DeleteStatement $ast): int

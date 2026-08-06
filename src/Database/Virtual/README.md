@@ -111,11 +111,30 @@ $engine->registerModel('posts', Post::class);
 
 ## Accepting User-Provided SQL
 
-The engine supports a query timeout, making it safe to expose SQL to API consumers:
+The engine offers two guard rails. Both are **best effort** — they make runaway
+queries fail loudly, they are not a security boundary:
 
 ```php
-$engine->setQueryTimeout(2.0);  // seconds; QueryTimeoutException on excess
+$engine->setQueryTimeout(2.0);           // seconds; QueryTimeoutException on excess
+$engine->setMaxMaterializedRows(50_000); // cap rows buffered for one mutation
 ```
+
+`setQueryTimeout()` is cooperative: the deadline is checked while a SELECT's rows
+are pulled (every 100 rows), so it bounds long scans and runaway result sets. It
+does **not** bound time spent inside a single backing-table call (a slow remote
+`TableInterface` can block indefinitely — give it its own timeout), and it does
+not apply to INSERT/UPDATE/DELETE, which run to completion.
+
+`setMaxMaterializedRows()` bounds the other unbounded case. A mutation whose
+source reads the table it writes (`INSERT INTO t SELECT ... FROM t`) must buffer
+its source before writing, or the new rows feed back into the scan and the
+statement never terminates. Buffering makes it terminate correctly; the cap
+(default 1,000,000 rows) makes an enormous source fail with an actionable error
+instead of exhausting memory.
+
+Exposing SQL to untrusted callers needs more than these: combine them with a PHP
+`memory_limit`, a request-level timeout, and `registerModel()` so row-level
+authorization applies to SQL as well.
 
 ## Temporary Tables
 
