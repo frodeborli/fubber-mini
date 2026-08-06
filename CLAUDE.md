@@ -147,3 +147,4 @@ Override `query()` to scope rows by user/tenant; the write guards inherit that s
 - Run targeted tests: `php bin/mini test tests/<Module>/` from the repo root.
 - Zero-dependency guarantee: never add a non-PSR runtime dependency. Mini provides the implementations.
 - Fail fast, be strict, never guess what a caller meant. Don't overengineer; don't underengineer.
+- **Every bug you find gets a regression test, in the same change as the fix.** A bug found by reading code or by review had no test covering it — that absence is why it survived. Prove the test works: revert the fix, watch the test fail, restore it. Test the invariant, not just the reported symptom. `tests/Database/PartialQuery.astcache.php` is the model — it asserts "composing a query is never observable by a later query built from the same SQL string", which is the property that was violated, rather than the one query that happened to expose it.
