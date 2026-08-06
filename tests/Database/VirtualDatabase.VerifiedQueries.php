@@ -2,7 +2,7 @@
 /**
  * VirtualDatabase Verified Queries - CLI Integration Tests
  *
- * These tests run actual CLI queries against `bin/mini vdb` and compare
+ * These tests run actual CLI queries against `bin/mini db -v` and compare
  * the output to known-good results. This freezes working query behavior.
  *
  * Run with: bin/mini test tests/Database/VirtualDatabase.VerifiedQueries.php
@@ -21,7 +21,7 @@ $test = new class extends Test {
     private function query(string $sql, string $format = 'csv'): string
     {
         $cmd = sprintf(
-            'bin/mini vdb --format=%s %s 2>&1',
+            'bin/mini db -v --format=%s %s 2>&1',
             escapeshellarg($format),
             escapeshellarg($sql)
         );

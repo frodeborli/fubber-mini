@@ -1502,12 +1502,22 @@ class VirtualDatabase implements DatabaseInterface
             }
         }
 
-        // Use predicate pushdown for all multi-table queries with WHERE
-        // This pushes simple predicates (eq/lt/gt/like with constants) to tables before joins
+        // Use predicate pushdown for multi-table queries with WHERE.
+        // This pushes simple predicates (eq/lt/gt/like with constants) to tables
+        // before joins. Outer joins are excluded: the pushdown planner rebuilds
+        // joins from equi-join predicates with inner semantics, and pushing
+        // WHERE into the null-extended side of an outer join is not valid.
         $hasMultipleTables = !empty($ast->joins);
         $hasWhere = $ast->where !== null;
+        $hasOuterJoin = false;
+        foreach ($ast->joins as $join) {
+            if (in_array(strtoupper($join->joinType), ['LEFT', 'LEFT OUTER', 'RIGHT', 'RIGHT OUTER', 'FULL', 'FULL OUTER'], true)) {
+                $hasOuterJoin = true;
+                break;
+            }
+        }
 
-        if ($hasMultipleTables && $hasWhere) {
+        if ($hasMultipleTables && $hasWhere && !$hasOuterJoin) {
             // Limit tables to avoid exponential explosion
             $tableCount = 1 + count($ast->joins);
             if ($tableCount > 8) {
@@ -2370,11 +2380,21 @@ class VirtualDatabase implements DatabaseInterface
                 : $readableWhere;
         }
 
-        // Use predicate pushdown for all multi-table queries with WHERE
+        // Use predicate pushdown for multi-table queries with WHERE.
+        // Outer joins are excluded: the pushdown planner rebuilds joins from
+        // equi-join predicates with inner semantics, and pushing WHERE into
+        // the null-extended side of an outer join is not valid.
         $hasMultipleTables = !empty($ast->joins);
         $hasWhere = $ast->where !== null;
+        $hasOuterJoin = false;
+        foreach ($ast->joins as $join) {
+            if (in_array(strtoupper($join->joinType), ['LEFT', 'LEFT OUTER', 'RIGHT', 'RIGHT OUTER', 'FULL', 'FULL OUTER'], true)) {
+                $hasOuterJoin = true;
+                break;
+            }
+        }
 
-        if ($hasMultipleTables && $hasWhere) {
+        if ($hasMultipleTables && $hasWhere && !$hasOuterJoin) {
             // Limit tables to avoid exponential explosion
             $tableCount = 1 + count($ast->joins);
             if ($tableCount > 8) {
@@ -2458,10 +2478,18 @@ class VirtualDatabase implements DatabaseInterface
             $tables[$joinAlias] = $this->getTable($joinTableName)->withAlias($joinAlias);
         }
 
-        // 2. Optimize and flatten WHERE into AND-connected predicates
+        // 2. Optimize and flatten WHERE into AND-connected predicates.
+        //    JOIN ... ON conditions participate on equal footing: with inner
+        //    semantics, ON is equivalent to a WHERE predicate, and the
+        //    equi-join graph below needs them to connect the tables.
         $predicates = [];
         $optimizedWhere = $ast->where !== null ? $this->optimizer->optimize($ast->where) : null;
         $this->flattenAndPredicates($optimizedWhere, $predicates);
+        foreach ($ast->joins as $join) {
+            if ($join->condition !== null) {
+                $this->flattenAndPredicates($this->optimizer->optimize($join->condition), $predicates);
+            }
+        }
 
         // 3. Classify predicates and push single-table ones
         $remainingPredicates = [];

@@ -19,7 +19,7 @@ $test = new class extends Test {
 
     private function query(string $sql): string
     {
-        $cmd = sprintf('bin/mini vdb --format=csv %s 2>&1', escapeshellarg($sql));
+        $cmd = sprintf('bin/mini db -v --format=csv %s 2>&1', escapeshellarg($sql));
         return trim(shell_exec($cmd));
     }
 

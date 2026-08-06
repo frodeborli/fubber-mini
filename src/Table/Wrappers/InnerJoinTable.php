@@ -131,40 +131,19 @@ class InnerJoinTable extends AbstractTable
         $skipped = 0;
         $emitted = 0;
 
-        // Buffer for handling duplicate keys
+        // Buffer for handling duplicate keys. Collecting a left-run advances
+        // $leftIter past the run, so right rows are matched against the
+        // buffered run key ($currentLeftKey), not $leftIter->current().
         $leftBuffer = [];
         $currentLeftKey = null;
+        $haveBuffer = false;
 
-        while ($leftIter->valid() && $rightIter->valid()) {
-            $leftRow = $leftIter->current();
+        while ($rightIter->valid()) {
             $rightRow = $rightIter->current();
-            $leftKey = $leftRow->$leftCol;
             $rightKey = $rightRow->$rightCol;
 
-            if ($leftKey < $rightKey) {
-                // Left is behind, advance it
-                $leftIter->next();
-                $leftBuffer = [];
-                $currentLeftKey = null;
-            } elseif ($leftKey > $rightKey) {
-                // Right is behind, advance it
-                $rightIter->next();
-            } else {
-                // Keys match - collect all left rows with this key
-                if ($currentLeftKey !== $leftKey) {
-                    $leftBuffer = [];
-                    $currentLeftKey = $leftKey;
-                    while ($leftIter->valid()) {
-                        $lr = $leftIter->current();
-                        if ($lr->$leftCol !== $leftKey) {
-                            break;
-                        }
-                        $leftBuffer[] = $lr;
-                        $leftIter->next();
-                    }
-                }
-
-                // Emit all combinations with current right row
+            // Current right row matches the buffered left run
+            if ($haveBuffer && $currentLeftKey === $rightKey) {
                 foreach ($leftBuffer as $lr) {
                     if ($skipped++ < $offset) {
                         continue;
@@ -174,8 +153,41 @@ class InnerJoinTable extends AbstractTable
                         return;
                     }
                 }
-
                 $rightIter->next();
+                continue;
+            }
+
+            if (!$leftIter->valid()) {
+                // Left exhausted and buffer doesn't match: no more matches
+                // possible since both sides are ascending.
+                return;
+            }
+
+            $leftKey = $leftIter->current()->$leftCol;
+
+            if ($leftKey < $rightKey) {
+                // Left is behind, advance it
+                $leftIter->next();
+                $leftBuffer = [];
+                $currentLeftKey = null;
+                $haveBuffer = false;
+            } elseif ($leftKey > $rightKey) {
+                // Right is behind, advance it
+                $rightIter->next();
+            } else {
+                // Keys match - collect all left rows with this key; the
+                // buffered-run branch above emits the combinations.
+                $leftBuffer = [];
+                $currentLeftKey = $leftKey;
+                $haveBuffer = true;
+                while ($leftIter->valid()) {
+                    $lr = $leftIter->current();
+                    if ($lr->$leftCol !== $leftKey) {
+                        break;
+                    }
+                    $leftBuffer[] = $lr;
+                    $leftIter->next();
+                }
             }
         }
     }
