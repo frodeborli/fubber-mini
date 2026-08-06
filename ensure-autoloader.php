@@ -25,9 +25,13 @@ $cwdComposer = $cwd . '/composer.json';
 if (file_exists($cwdComposer)) {
     $composer = json_decode(file_get_contents($cwdComposer), true);
     if (($composer['name'] ?? '') === 'fubber/mini') {
-        // Find autoloader by walking up (it's in parent project's vendor/)
+        // Standalone checkout with its own vendor/ (composer install run in the repo)
+        if (file_exists($cwd . '/vendor/autoload.php')) {
+            $autoloaderPath = $cwd . '/vendor/autoload.php';
+        }
+        // Otherwise find autoloader by walking up (it's in parent project's vendor/)
         $dir = dirname($cwd);
-        while ($dir !== '/' && $dir !== '') {
+        while ($autoloaderPath === null && $dir !== '/' && $dir !== '') {
             if (file_exists($dir . '/vendor/autoload.php')) {
                 $autoloaderPath = $dir . '/vendor/autoload.php';
                 break;
