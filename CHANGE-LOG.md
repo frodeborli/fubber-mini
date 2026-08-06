@@ -4,6 +4,22 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## VDB: pluggable scalar functions, CAST, and Core SQL scalar syntax (2026-08-06)
+
+**BREAKING CHANGES**
+
+An audit against the SQL standard's conformance taxonomy found the engine's coverage inverted: it implemented *optional* feature packages (CTEs, recursive CTEs, window functions, `INTERSECT`) while missing *Core* (mandatory) scalar features. This closes the scalar gap and makes the function library pluggable.
+
+- **`VirtualDatabase::createFunction(string $name, callable $fn, int $argCount = -1): bool` added**, mirroring the existing `createAggregate()` and `SQLite3::createFunction`. Names are case-insensitive, and **registering an existing name replaces it, built-ins included** — deliberate, so you can swap in banker's rounding or a multibyte `LENGTH`.
+- **The built-in scalar library moved out of the evaluator's hardcoded `match` into `src/Database/StandardFunctions.php`**, registered through that same public API. Behavior is unchanged for every existing function; the library now doubles as the worked example for adding your own.
+- **`CAST(expr AS type)` implemented** with SQLite coercion semantics for INTEGER/INT, REAL/FLOAT/DOUBLE, TEXT/VARCHAR/CHAR, NUMERIC/DECIMAL, BOOLEAN, BLOB. **Previously `CAST(x)` parsed as a bare function call and returned its argument unchanged; that stub is gone, and `CAST(x)` without `AS type` is now a syntax error.**
+- **`LIKE … ESCAPE '<char>'` implemented** (and `NOT LIKE … ESCAPE`). A multi-character or empty escape raises "ESCAPE expression must be a single character". `ESCAPE` is a soft keyword, so columns named `escape` still parse.
+- **Standard scalar spellings added**: `POSITION(x IN y)`, `SUBSTRING(x FROM y [FOR z])`, `TRIM([LEADING|TRAILING|BOTH] [chars] FROM x)`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `OCTET_LENGTH`. Every pre-existing comma spelling (`SUBSTR`, `TRIM(x)`, `INSTR`, `LENGTH`) is unchanged. Note `CHARACTER_LENGTH` is byte-based like the existing `LENGTH` — making it multibyte-aware would have silently changed `LENGTH`'s contract.
+- **Fail-fast arity checking**: fixed-arity built-ins now reject a wrong argument count (`UPPER('a','b')` → "UPPER() expects 1 argument, 2 given") instead of ignoring extra arguments. Genuinely optional-argument functions (TRIM, ROUND, SUBSTR, CONCAT, COALESCE) remain variadic.
+- **LIKE without ESCAPE treats backslash as a literal character.** Previously `\%` was mangled into a wildcard by the old regex construction. Use `ESCAPE '\'` for escaping behavior.
+- **API:** new AST node `mini\Parsing\SQL\AST\CastNode` (extends `FunctionCallNode`, so generic AST walks keep working). `LikeOperation::__construct()` gained a 4th optional parameter `?ASTNode $escape` and a public `$escape` property — **code that reconstructs a `LikeOperation` must forward it or the ESCAPE clause is silently lost.**
+- `LIKE … ESCAPE` is evaluated row-by-row rather than pushed down to `TableInterface::like()`, and is rejected inside OR-predicate pushdown with an explicit message.
+
 ## VDB: writes are deferred until a statement finishes reading (2026-08-06)
 
 **BREAKING CHANGE** (behavioral; also a new limit that can reject previously-accepted statements)

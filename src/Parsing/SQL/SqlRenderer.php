@@ -25,6 +25,7 @@ use mini\Parsing\SQL\AST\{
     BetweenOperation,
     ExistsOperation,
     FunctionCallNode,
+    CastNode,
     CaseWhenNode,
     WindowFunctionNode,
     NiladicFunctionNode,
@@ -255,6 +256,8 @@ class SqlRenderer
             $node instanceof LikeOperation => $this->renderLike($node),
             $node instanceof BetweenOperation => $this->renderBetween($node),
             $node instanceof ExistsOperation => $this->renderExists($node),
+            // CastNode is a FunctionCallNode, so it has to come first
+            $node instanceof CastNode => $this->renderCast($node),
             $node instanceof FunctionCallNode => $this->renderFunction($node),
             $node instanceof CaseWhenNode => $this->renderCase($node),
             $node instanceof WindowFunctionNode => $this->renderWindow($node),
@@ -640,7 +643,8 @@ class SqlRenderer
         $left = $this->render($node->left);
         $pattern = $this->render($node->pattern);
         $op = $node->negated ? 'NOT LIKE' : 'LIKE';
-        return "$left $op $pattern";
+        $escape = $node->escape !== null ? ' ESCAPE ' . $this->render($node->escape) : '';
+        return "$left $op $pattern$escape";
     }
 
     private function renderBetween(BetweenOperation $node): string
@@ -659,9 +663,20 @@ class SqlRenderer
         return "$op $subquery";
     }
 
+    private function renderCast(CastNode $node): string
+    {
+        return 'CAST(' . $this->render($node->arguments[0]) . ' AS ' . $node->castType . ')';
+    }
+
     private function renderFunction(FunctionCallNode $node): string
     {
         $name = strtoupper($node->name);
+
+        // POSITION keeps its SQL:2003 syntax so the output re-parses
+        if ($name === 'POSITION' && count($node->arguments) === 2) {
+            return 'POSITION(' . $this->render($node->arguments[0])
+                . ' IN ' . $this->render($node->arguments[1]) . ')';
+        }
 
         if (empty($node->arguments)) {
             // Functions like COUNT(*) have no real arguments
@@ -789,7 +804,8 @@ class SqlRenderer
             $node instanceof LikeOperation => new LikeOperation(
                 $this->renameIdentifier($node->left, $oldName, $newName),
                 $this->renameIdentifier($node->pattern, $oldName, $newName),
-                $node->negated
+                $node->negated,
+                $node->escape === null ? null : $this->renameIdentifier($node->escape, $oldName, $newName)
             ),
             $node instanceof BetweenOperation => new BetweenOperation(
                 $this->renameIdentifier($node->expression, $oldName, $newName),
@@ -800,6 +816,11 @@ class SqlRenderer
             $node instanceof ExistsOperation => new ExistsOperation(
                 new SubqueryNode($this->renameIdentifier($node->subquery->query, $oldName, $newName)),
                 $node->negated
+            ),
+            // CastNode is a FunctionCallNode, so it has to come first
+            $node instanceof CastNode => new CastNode(
+                $this->renameIdentifier($node->arguments[0], $oldName, $newName),
+                $node->castType
             ),
             $node instanceof FunctionCallNode => new FunctionCallNode(
                 $node->name,

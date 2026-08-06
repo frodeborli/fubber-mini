@@ -107,6 +107,9 @@ class AstParameterBinder
             $new = clone $node;
             $new->left = $this->bindNode($node->left);
             $new->pattern = $this->bindNode($node->pattern);
+            if ($node->escape !== null) {
+                $new->escape = $this->bindNode($node->escape);
+            }
             return $new;
         }
 

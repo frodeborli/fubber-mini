@@ -30,6 +30,7 @@ use mini\Parsing\SQL\AST\{
     PlaceholderNode,
     JoinNode,
     CaseWhenNode,
+    CastNode,
     WithStatement
 };
 
@@ -796,7 +797,7 @@ class SqlParser
             }
             if ($this->match(SqlLexer::T_LIKE)) {
                 $pattern = $this->parseAdditive();
-                return new LikeOperation($left, $pattern, negated: true);
+                return new LikeOperation($left, $pattern, negated: true, escape: $this->parseOptionalEscape());
             }
             if ($this->match(SqlLexer::T_BETWEEN)) {
                 return $this->parseBetweenOperation($left, negated: true);
@@ -816,7 +817,7 @@ class SqlParser
         // Handle LIKE clause
         if ($this->match(SqlLexer::T_LIKE)) {
             $pattern = $this->parseAdditive();
-            return new LikeOperation($left, $pattern, negated: false);
+            return new LikeOperation($left, $pattern, negated: false, escape: $this->parseOptionalEscape());
         }
 
         // Handle BETWEEN clause
@@ -825,6 +826,18 @@ class SqlParser
         }
 
         return $left;
+    }
+
+    /**
+     * Optional ESCAPE '<char>' after a LIKE pattern
+     *
+     * ESCAPE is not a reserved word in the lexer - a column may legitimately be
+     * called "escape" - so it is recognised as a soft keyword, only in the one
+     * position where it can occur.
+     */
+    private function parseOptionalEscape(): ?ASTNode
+    {
+        return $this->matchSoftKeyword('ESCAPE') ? $this->parseAtom() : null;
     }
 
     private function parseBetweenOperation(ASTNode $left, bool $negated): BetweenOperation
@@ -1005,6 +1018,22 @@ class SqlParser
         if ($token['type'] === SqlLexer::T_IDENTIFIER) {
             $next = $this->peek();
             if ($next['type'] === SqlLexer::T_LPAREN) {
+                // Two "functions" whose arguments are separated by a keyword
+                // rather than a comma. They cannot be expressed as an ordinary
+                // call, so the grammar carries them.
+                $upper = strtoupper($token['value']);
+                if ($upper === 'CAST') {
+                    return $this->parseCastExpression();
+                }
+                if ($upper === 'POSITION') {
+                    return $this->parsePositionExpression();
+                }
+                if ($upper === 'SUBSTRING' || $upper === 'SUBSTR') {
+                    return $this->parseSubstringExpression();
+                }
+                if ($upper === 'TRIM') {
+                    return $this->parseTrimExpression();
+                }
                 return $this->parseFunctionCall();
             }
 
@@ -1064,6 +1093,188 @@ class SqlParser
             $this->sql,
             $token['pos'] ?? strlen($this->sql)
         );
+    }
+
+    /**
+     * CAST(expr AS type)
+     *
+     * The type name is kept as written (length and precision included) and
+     * resolved to an affinity when the cast is evaluated.
+     */
+    private function parseCastExpression(): CastNode
+    {
+        $this->expect(SqlLexer::T_IDENTIFIER); // CAST
+        $this->expect(SqlLexer::T_LPAREN);
+        $expr = $this->parseExpression();
+        $this->expect(SqlLexer::T_AS);
+        $type = $this->parseTypeName();
+        $this->expect(SqlLexer::T_RPAREN);
+
+        return new CastNode($expr, $type);
+    }
+
+    /**
+     * A type name in CAST: INTEGER, VARCHAR(255), DECIMAL(10,2), DOUBLE PRECISION
+     */
+    private function parseTypeName(): string
+    {
+        $token = $this->current();
+        if ($token['type'] !== SqlLexer::T_IDENTIFIER) {
+            throw new SqlSyntaxException(
+                "Expected a type name after AS in CAST(...)",
+                $this->sql,
+                $token['pos']
+            );
+        }
+
+        $name = strtoupper($token['value']);
+        $this->pos++;
+
+        // Multi-word type names: DOUBLE PRECISION, UNSIGNED BIG INT
+        while ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
+            $name .= ' ' . strtoupper($this->current()['value']);
+            $this->pos++;
+        }
+
+        // Length / precision, which SQLite ignores for CAST but must accept
+        if ($this->match(SqlLexer::T_LPAREN)) {
+            $args = [];
+            do {
+                $args[] = $this->expect(SqlLexer::T_NUMBER)['value'];
+            } while ($this->match(SqlLexer::T_COMMA));
+            $this->expect(SqlLexer::T_RPAREN);
+            $name .= '(' . implode(',', $args) . ')';
+        }
+
+        return $name;
+    }
+
+    /**
+     * POSITION(substring IN string) - SQL:2003 syntax for INSTR(string, substring)
+     *
+     * Lowered onto a plain two-argument POSITION call so the standard function
+     * registry can implement it; only the argument separator is grammar.
+     */
+    private function parsePositionExpression(): FunctionCallNode
+    {
+        $this->expect(SqlLexer::T_IDENTIFIER); // POSITION
+        $this->expect(SqlLexer::T_LPAREN);
+
+        // parseAdditive, not parseExpression: the latter would swallow the IN
+        $needle = $this->parseAdditive();
+
+        if (!$this->match(SqlLexer::T_IN)) {
+            $curr = $this->current();
+            throw new SqlSyntaxException(
+                "POSITION requires the form POSITION(substring IN string)",
+                $this->sql,
+                $curr['pos']
+            );
+        }
+
+        $haystack = $this->parseAdditive();
+        $this->expect(SqlLexer::T_RPAREN);
+
+        return new FunctionCallNode('POSITION', [$needle, $haystack]);
+    }
+
+    /**
+     * SUBSTRING(x FROM y [FOR z]) - SQL:2003 spelling of SUBSTR(x, y[, z])
+     *
+     * Both spellings produce the same call, so there is one implementation.
+     */
+    private function parseSubstringExpression(): FunctionCallNode
+    {
+        $name = $this->expect(SqlLexer::T_IDENTIFIER)['value'];
+        $this->expect(SqlLexer::T_LPAREN);
+
+        $args = [$this->parseExpression()];
+
+        if ($this->match(SqlLexer::T_FROM)) {
+            $args[] = $this->parseExpression();
+            if ($this->matchSoftKeyword('FOR')) {
+                $args[] = $this->parseExpression();
+            }
+        } else {
+            while ($this->match(SqlLexer::T_COMMA)) {
+                $args[] = $this->parseExpression();
+            }
+        }
+
+        $this->expect(SqlLexer::T_RPAREN);
+
+        return new FunctionCallNode($name, $args);
+    }
+
+    /**
+     * TRIM([LEADING|TRAILING|BOTH] [chars] FROM x) - SQL:2003 spelling
+     *
+     * Lowered onto the existing TRIM/LTRIM/RTRIM functions: the specification
+     * picks the function and the operands are put in (string, chars) order.
+     * The comma form TRIM(x, chars) keeps working.
+     */
+    private function parseTrimExpression(): FunctionCallNode
+    {
+        $this->expect(SqlLexer::T_IDENTIFIER); // TRIM
+        $this->expect(SqlLexer::T_LPAREN);
+
+        $spec = null;
+        foreach (['LEADING', 'TRAILING', 'BOTH'] as $candidate) {
+            if ($this->matchSoftKeyword($candidate)) {
+                $spec = $candidate;
+                break;
+            }
+        }
+
+        $chars = null;
+
+        if ($this->match(SqlLexer::T_FROM)) {
+            // TRIM(BOTH FROM x) / TRIM(FROM x)
+            $target = $this->parseExpression();
+        } else {
+            $first = $this->parseExpression();
+            if ($this->match(SqlLexer::T_FROM)) {
+                // TRIM([spec] chars FROM x)
+                $chars = $first;
+                $target = $this->parseExpression();
+            } elseif ($spec !== null) {
+                $curr = $this->current();
+                throw new SqlSyntaxException(
+                    "Expected FROM in TRIM($spec ... FROM ...)",
+                    $this->sql,
+                    $curr['pos']
+                );
+            } else {
+                // TRIM(x) / TRIM(x, chars)
+                $target = $first;
+                if ($this->match(SqlLexer::T_COMMA)) {
+                    $chars = $this->parseExpression();
+                }
+            }
+        }
+
+        $this->expect(SqlLexer::T_RPAREN);
+
+        $function = match ($spec) {
+            'LEADING' => 'LTRIM',
+            'TRAILING' => 'RTRIM',
+            default => 'TRIM',
+        };
+
+        return new FunctionCallNode($function, $chars === null ? [$target] : [$target, $chars]);
+    }
+
+    /**
+     * Consume an identifier used as a keyword (FOR, LEADING, ...) if present
+     */
+    private function matchSoftKeyword(string $keyword): bool
+    {
+        $token = $this->current();
+        if ($token['type'] === SqlLexer::T_IDENTIFIER && strtoupper($token['value']) === $keyword) {
+            $this->pos++;
+            return true;
+        }
+        return false;
     }
 
     private function parseFunctionCall(): FunctionCallNode|WindowFunctionNode

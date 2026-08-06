@@ -171,6 +171,46 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Register a custom scalar function
+     *
+     * Mirrors SQLite3::createFunction. The callback receives the evaluated
+     * argument values and returns the result; NULL handling is the function's
+     * own business, exactly as it is for a SQLite user function.
+     *
+     * ```php
+     * $vdb->createFunction('SLUGIFY', fn(?string $s) => $s === null
+     *     ? null
+     *     : strtolower(trim(preg_replace('/[^a-z0-9]+/i', '-', $s), '-')), 1);
+     *
+     * $vdb->query("SELECT SLUGIFY(title) AS slug FROM posts");
+     * ```
+     *
+     * Names are case-insensitive and there is a single registry, so
+     * **registering a name that already exists replaces it** - including the
+     * built-ins in {@see StandardFunctions}. That is deliberate: it is how an
+     * application overrides ROUND() with banker's rounding, or LENGTH() with a
+     * multibyte-aware version, without forking the engine.
+     *
+     * $argCount is enforced before the callback runs: -1 accepts any number of
+     * arguments, anything else fails with an SQL-level error naming the
+     * function and the expected and actual counts.
+     *
+     * Constructs whose *syntax* is part of the grammar - CAST(x AS type),
+     * POSITION(x IN y), LIKE ... ESCAPE - cannot be expressed as a callable and
+     * are implemented natively; registering those names has no effect on how
+     * they parse.
+     *
+     * @param string $name Function name (case-insensitive)
+     * @param callable $fn Called with the evaluated arguments: function(...$args): mixed
+     * @param int $argCount Expected argument count (-1 for variable)
+     */
+    public function createFunction(string $name, callable $fn, int $argCount = -1): bool
+    {
+        $this->evaluator->registerFunction($name, $fn, $argCount);
+        return true;
+    }
+
+    /**
      * Check if a function name is a registered aggregate
      */
     public function isAggregate(string $name): bool
@@ -6017,6 +6057,11 @@ class VirtualDatabase implements DatabaseInterface
             if (!$this->expressionIsConstant($node->pattern)) {
                 return $this->filterByExpression($table, $node);
             }
+            // TableInterface::like() has no notion of an escape character, so
+            // an escaped pattern is evaluated row by row instead.
+            if ($node->escape !== null) {
+                return $this->filterByExpression($table, $node);
+            }
             $column = $this->resolveColumnForTable($this->buildQualifiedColumnName($node->left), $table);
             $pattern = $this->evaluator->evaluate($node->pattern, null);
             // NULL pattern makes both LIKE and NOT LIKE UNKNOWN for every row
@@ -6225,9 +6270,10 @@ class VirtualDatabase implements DatabaseInterface
             return $node->expression instanceof IdentifierNode;
         }
 
-        // LIKE with column and pattern
+        // LIKE with column and pattern (an ESCAPE clause cannot be pushed down)
         if ($node instanceof LikeOperation) {
-            return $node->left instanceof IdentifierNode
+            return $node->escape === null
+                && $node->left instanceof IdentifierNode
                 && ($node->pattern instanceof LiteralNode || ($node->pattern instanceof PlaceholderNode && $node->pattern->isBound));
         }
 
@@ -6746,6 +6792,9 @@ class VirtualDatabase implements DatabaseInterface
             if ($node->negated) {
                 throw new \RuntimeException("NOT LIKE not yet supported in OR predicates");
             }
+            if ($node->escape !== null) {
+                throw new \RuntimeException("LIKE ... ESCAPE not yet supported in OR predicates");
+            }
             $column = $this->buildQualifiedColumnName($node->left);
             $pattern = $this->evaluator->evaluate($node->pattern, null);
             return (new \mini\Table\Predicate())->like($column, $pattern);
@@ -6815,6 +6864,9 @@ class VirtualDatabase implements DatabaseInterface
             }
             if ($node->negated) {
                 throw new \RuntimeException("NOT LIKE not yet supported in OR predicates");
+            }
+            if ($node->escape !== null) {
+                throw new \RuntimeException("LIKE ... ESCAPE not yet supported in OR predicates");
             }
             $column = $this->buildQualifiedColumnName($node->left);
             $pattern = $this->evaluator->evaluate($node->pattern, null);

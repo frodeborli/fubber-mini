@@ -34,7 +34,7 @@
 - Developers already expect SQL dialect differences (MySQL vs PostgreSQL vs SQLite)
 - When we built the SQL engine for virtual tables (`src/Database/Virtual/`):
   - Did the hard work rather than create leaky abstractions
-  - Grew into a federated engine with SQL:2003 coverage (joins, CTEs, window functions, set algebra) across heterogeneous table sources
+  - Grew into a federated engine running a practical SQL subset (joins, CTEs, core window functions, set algebra) across heterogeneous table sources
   - Honest about remaining dialect gaps (see `src/Database/KNOWN-LIMITATIONS.md`)
 - DatabaseInterface does "chunk up" SQL (where clauses, `PartialQuery::order('col DESC, other ASC')`)
 - **Pragmatic compromise:** Reduce boilerplate while requiring SQL knowledge

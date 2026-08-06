@@ -12,10 +12,14 @@ class LikeOperation extends ASTNode
     public ASTNode $pattern;
     public bool $negated;
 
-    public function __construct(ASTNode $left, ASTNode $pattern, bool $negated = false)
+    /** ESCAPE character expression, or null when the pattern has no escape */
+    public ?ASTNode $escape;
+
+    public function __construct(ASTNode $left, ASTNode $pattern, bool $negated = false, ?ASTNode $escape = null)
     {
         $this->left = $left;
         $this->pattern = $pattern;
         $this->negated = $negated;
+        $this->escape = $escape;
     }
 }

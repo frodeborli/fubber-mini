@@ -1,4 +1,29 @@
-# VirtualDatabase Status
+# VirtualDatabase — Supported SQL
+
+VirtualDatabase runs a **practical subset of SQL with SQLite-compatible
+spellings**, not standard-conformant SQL. It is not a SQL:2003 implementation
+and does not aim to become one.
+
+Read that as a deliberate scope, not an apology. The engine exists to run
+*sensible* SQL over heterogeneous sources from PHP — a CSV file, a JSON
+document, a remote API and a database table joined in one query. It is not
+built to be pushed to the edge, and it is not a general-purpose RDBMS: for a
+workload that needs window frames, `MERGE` and `GROUPING SETS`, use a database
+that has them, and register it as a source.
+
+Where a construct exists in both standard and SQLite spelling, **the SQLite
+spelling is the supported one** — `SUBSTR(x, y, z)`, not
+`SUBSTRING(x FROM y FOR z)`. SQLite is this engine's reference implementation
+and the test suite differentially cross-checks against `sqlite3`.
+
+Scalar functions are **pluggable**: the built-ins below are registered through
+the same public `createFunction()` API available to you, so an unsupported
+function is usually a few lines of PHP away rather than a wall. Aggregates
+likewise via `createAggregate()`. See `src/Database/Virtual/README.md`.
+
+The engine also enforces deliberate limits (joined tables per query, recursion
+depth, buffered writes) so that a runaway query fails with an actionable error
+instead of consuming the process. See `mini\Database\Limits`.
 
 ## Working
 
@@ -113,13 +138,63 @@ WITH cte1 AS (...), cte2 AS (SELECT * FROM cte1 WHERE ...) SELECT * FROM cte2  -
 WITH RECURSIVE nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < 10) SELECT * FROM nums
 ```
 
-## Not Working
+## Not Supported
+
+Verified by probing the engine (2026-08-06). Each entry fails with a parse or
+"unknown function" error — none of them silently returns a wrong answer.
+
+**Standard spellings of things that work under another name**
 
 ```sql
--- Double quotes for strings (use single quotes instead)
-SELECT * FROM products WHERE name = "Widget"   -- use 'Widget' instead
+CHAR_LENGTH(x)                      -- use LENGTH(x)
+SUBSTRING(x FROM y FOR z)           -- use SUBSTR(x, y, z)
+TRIM(BOTH ' ' FROM x)               -- use TRIM(x), LTRIM(x), RTRIM(x)
+POSITION(x IN y)                    -- use INSTR(y, x)
+MOD(a, b)                           -- use a % b
 ```
+
+**Not implemented**
+
+```sql
+-- Expressions and predicates
+SELECT * FROM t WHERE (a, b) = (1, 2)          -- row value constructors
+SELECT * FROM t WHERE a IS DISTINCT FROM b
+SELECT * FROM t WHERE x SIMILAR TO 'a%'
+SELECT * FROM (VALUES (1), (2)) AS v(x)        -- VALUES as a table
+SELECT EXTRACT(YEAR FROM d) FROM t
+SELECT POWER(2, 3), SQRT(9)                    -- register via createFunction()
+
+-- Joins and set operations
+SELECT * FROM a NATURAL JOIN b
+SELECT * FROM a JOIN b USING (id)              -- use ON a.id = b.id
+SELECT x FROM a UNION CORRESPONDING SELECT x FROM b
+
+-- Grouping and aggregate extensions
+GROUP BY ROLLUP(x) / CUBE(x) / GROUPING SETS ((x), ())
+COUNT(*) FILTER (WHERE cond)
+
+-- Window functions beyond the core four
+SUM(x) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+SELECT ROW_NUMBER() OVER w FROM t WINDOW w AS (ORDER BY id)   -- named windows
+LAG, LEAD, NTILE, FIRST_VALUE, LAST_VALUE, PERCENT_RANK, CUME_DIST
+
+-- Statements and clauses
+MERGE INTO ...                                 -- no MERGE statement
+SELECT * FROM t, LATERAL (SELECT ...) l
+SELECT * FROM t ORDER BY x NULLS LAST
+
+-- Lexing
+SELECT * FROM products WHERE name = "Widget"   -- double quotes are identifiers,
+                                               -- not strings; use 'Widget'
+```
+
+`ROW_NUMBER`, `RANK` and `DENSE_RANK` with `PARTITION BY` / `ORDER BY` are
+supported; window *frames* are not, so those three are the useful set.
 
 ## Notes
 
-All SQL:2003 core features are now implemented (as of 2025-12-22).
+Keep this file honest. It is cited as the coverage authority by
+`src/Database/Virtual/README.md`, and an evaluator who hits an undocumented gap
+in the first five minutes will not trust anything else the docs claim. If you
+add a feature, move its line from "Not Supported" to "Working" in the same
+change — and add a test.

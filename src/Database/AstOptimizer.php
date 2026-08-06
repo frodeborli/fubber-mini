@@ -125,7 +125,7 @@ class AstOptimizer
 
             // NOT LIKE → LIKE with negated flag (toggle)
             if ($inner instanceof LikeOperation) {
-                return new LikeOperation($inner->left, $inner->pattern, !$inner->negated);
+                return new LikeOperation($inner->left, $inner->pattern, !$inner->negated, $inner->escape);
             }
 
             // NOT BETWEEN already handled above, but if inner is non-negated BETWEEN
@@ -193,7 +193,8 @@ class AstOptimizer
             return new LikeOperation(
                 $this->rewriteNegations($node->left),
                 $this->rewriteNegations($node->pattern),
-                $node->negated
+                $node->negated,
+                $node->escape
             );
         }
 

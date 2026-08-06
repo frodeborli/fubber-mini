@@ -38,7 +38,7 @@ Breaking changes are recorded in `CHANGE-LOG.md` — check it when behavior diff
 Mini is more complete than the documentation lets on. Before claiming a feature is missing, reinventing one, or reaching for `composer require`: **read the relevant `src/<Module>/README.md` and its source.** Things that commonly surprise:
 
 - `src/Hooks/` provides full WordPress-action and WordPress-filter equivalents (`Event`, `Trigger`, `Handler`, `Filter`, `PerItemTriggers`, `StateMachine`) — typed and generic.
-- `src/Database/Virtual/` is a federated SQL engine with SQL:2003 coverage (CTEs, recursive CTEs, joins, subqueries, window functions, set algebra) — not just a testing tool.
+- `src/Database/Virtual/` is a federated SQL engine — not just a testing tool. It runs a practical SQL subset with SQLite-compatible spellings (CTEs incl. recursive, joins, subqueries, set algebra, GROUP BY/HAVING, the core window functions), **not** standard-conformant SQL. `src/Database/VDB-STATUS.md` is the authoritative supported/unsupported matrix — read it before claiming a construct works. Scalar functions and aggregates are pluggable via `createFunction()` / `createAggregate()`.
 - `src/Validator/` + `src/Metadata/` together cover JSON Schema validation *and* annotation export.
 - `src/Mail/` is a from-scratch RFC 5322 implementation with streaming MIME — not a wrapper around Symfony Mailer.
 
