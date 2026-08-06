@@ -3,7 +3,6 @@
 namespace mini\Router;
 
 use mini\Mini;
-use mini\Http\ResponseAlreadySentException;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Server\RequestHandlerInterface;
@@ -22,31 +21,31 @@ use RuntimeException;
  * 2. Annotates request with route info
  * 3. Includes controller file
  * 4. Handles controller return value:
- *    - null → throw ResponseAlreadySentException (classical PHP)
  *    - ResponseInterface → return it
- *    - Other → convert to ResponseInterface
+ *    - RequestHandlerInterface → invoke it with the (prefix-scoped) request
+ *    - Closure → wrapped in ConverterHandler (an inline RequestHandler)
+ *    - ResponseAggregate → resolved via getResponse()
+ *    - Anything else (including no return / direct output) → RuntimeException
  *
- * Controllers can:
- * - Use classical PHP (echo/header) and return nothing
- * - Return a ResponseInterface
- * - Return any value that can be converted to ResponseInterface
+ * Route files declare WHAT handles a URL prefix — they must return a
+ * PSR-15 RequestHandlerInterface or a PSR-7 ResponseInterface. Producing
+ * output directly (echo/header) is an error: it ties the application to
+ * one-process-per-request SAPIs and is not portable to Fiber-based
+ * coroutine runtimes.
  *
  * Example controllers:
  * ```php
- * // _routes/ping.php - Return string (converted to JSON response 
- * // like all scalars and JsonSerializable that don't have a specific converter)
+ * // _routes/users/__DEFAULT__.php - Mount a controller (pattern-based sub-routing)
  * <?php
- * return "pong";
+ * return new UserController();
  *
- * // _routes/api/users.php - Return array (converted to JSON response)
+ * // _routes/ping.php - Return a response directly
  * <?php
- * return ['users' => iterator_to_array(db()->query("SELECT * FROM users"))];
+ * return new \mini\Http\Message\Response('pong');
  *
- * // _routes/legacy.php - Classical PHP
+ * // _routes/time.php - Inline handler; return value converted via converters
  * <?php
- * header('Content-Type: text/html');
- * echo render('legacy-page');
- * // Returns nothing - throws ResponseAlreadySentException
+ * return fn() => ['time' => date('c')];
  * ```
  */
 class Router implements RequestHandlerInterface
@@ -65,7 +64,7 @@ class Router implements RequestHandlerInterface
      *
      * @param ServerRequestInterface $request
      * @return ResponseInterface
-     * @throws ResponseAlreadySentException If controller uses classical PHP output
+     * @throws RuntimeException If the route file does not return a valid handler or response
      * @throws \Throwable Any exception thrown by controller
      */
     public function handle(ServerRequestInterface $request): ResponseInterface
@@ -210,9 +209,15 @@ class Router implements RequestHandlerInterface
                 $this->mountPath = null;
             }
 
-            // 5. Handle null return (classical PHP)
-            if ($returnValue === null) {
-                throw new ResponseAlreadySentException();
+            // 5. Route files must return something; require() returns 1 when
+            //    the file has no return statement.
+            if ($returnValue === null || $returnValue === 1) {
+                throw new RuntimeException(
+                    "Route file '$handlerFile' did not return a value. Route files must " .
+                    'return a Psr\Http\Server\RequestHandlerInterface (e.g. a controller ' .
+                    'extending mini\Controller\AbstractController) or a ' .
+                    'Psr\Http\Message\ResponseInterface.'
+                );
             }
 
             // 5b. ResponseAggregate → resolve to the actual response and let
@@ -269,17 +274,13 @@ class Router implements RequestHandlerInterface
                 return $returnValue->handle($request);
             }
 
-            // 8. Convert to response
-            $response = \mini\convert($returnValue, ResponseInterface::class);
-
-            if ($response === null) {
-                throw new \RuntimeException(
-                    'Controller returned ' . get_debug_type($returnValue) .
-                    ' but no converter is registered to convert it to ResponseInterface'
-                );
-            }
-
-            return $response;
+            // 8. Anything else is a contract violation
+            throw new RuntimeException(
+                "Route file '$handlerFile' returned " . get_debug_type($returnValue) . '. ' .
+                'Route files must return a Psr\Http\Server\RequestHandlerInterface or a ' .
+                'Psr\Http\Message\ResponseInterface. To return data, use a Closure ' .
+                '(converted via the converter registry) or a controller method.'
+            );
         }
     }
 
@@ -292,22 +293,20 @@ class Router implements RequestHandlerInterface
 
     private static function runControllerFile(string $filePath)
     {
-        // TODO: We should detect if the controller uses \header() etc - and trigger an error
         ob_start();
-        $result = (static function() use ($filePath) { return require $filePath; })();
-        $output = ob_get_clean();
-        if ($result === 1 && ($output !== '' || headers_sent() || headers_list() !== [])) {
-            // In the case that the controller returns 1 explicitly, we want to avoid treating the
-            // response as HTML, so we must check that either there is output, or headers were set or sent
-            echo $output;
-            return null;
-        } else {
-            // return value takes precedence over output buffer
-            if ($output !== '') {
-                throw new RuntimeException("Controller file '$filePath' produced unexpected output. Controllers must either use classical PHP output (echo/header) and return nothing, or return a value (which will be converted to a response). Mixing both is not allowed.");
-            }
-            return $result;
+        try {
+            $result = (static function() use ($filePath) { return require $filePath; })();
+        } finally {
+            $output = ob_get_clean();
         }
+        if ($output !== '') {
+            throw new RuntimeException(
+                "Route file '$filePath' produced output directly (echo/print). " .
+                'Route files must not produce output; they must return a ' .
+                'Psr\Http\Server\RequestHandlerInterface or Psr\Http\Message\ResponseInterface.'
+            );
+        }
+        return $result;
     }
 
     /**

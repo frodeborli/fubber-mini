@@ -111,37 +111,39 @@ $post = db()->queryOne("SELECT * FROM posts WHERE id = ?", [$postId]);
 
 ```php
 // _routes/register.php
-session();
+return function() {
+    session();
 
-$userId = uuid();
+    $userId = uuid();
 
-db()->exec(
-    "INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)",
-    [$userId, $_POST['email'], password_hash($_POST['password'], PASSWORD_DEFAULT)]
-);
+    db()->exec(
+        "INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)",
+        [$userId, $_POST['email'], password_hash($_POST['password'], PASSWORD_DEFAULT)]
+    );
 
-$_SESSION['user_id'] = $userId;
+    $_SESSION['user_id'] = $userId;
 
-header('Location: /dashboard');
+    return new \mini\Http\Message\Response('', ['Location' => '/dashboard'], 302);
+};
 ```
 
 ### API Resource Identifiers
 
 ```php
 // _routes/api/posts.php
-header('Content-Type: application/json');
+return function() {
+    $postId = uuid();
 
-$postId = uuid();
+    db()->exec(
+        "INSERT INTO posts (id, title, content, author_id) VALUES (?, ?, ?, ?)",
+        [$postId, $_POST['title'], $_POST['content'], $_SESSION['user_id']]
+    );
 
-db()->exec(
-    "INSERT INTO posts (id, title, content, author_id) VALUES (?, ?, ?, ?)",
-    [$postId, $_POST['title'], $_POST['content'], $_SESSION['user_id']]
-);
-
-echo json_encode([
-    'id' => $postId,
-    'url' => "/api/posts/$postId"
-]);
+    return [  // → JSON response via the converter registry
+        'id' => $postId,
+        'url' => "/api/posts/$postId"
+    ];
+};
 ```
 
 ### Session Tokens

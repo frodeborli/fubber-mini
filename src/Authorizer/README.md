@@ -228,12 +228,11 @@ $users = User::all();
 ### API Authorization
 
 ```php
-// _routes/api/posts/{id}.php
-$post = Post::find($id);
+// _routes/api/posts/_.php
+$post = Post::find($_GET[0]);
 
 if (!can(Ability::Update, $post)) {
-    http_response_code(403);
-    exit(json_encode(['error' => 'Forbidden']));
+    throw new \mini\Exceptions\AccessDeniedException();  // → 403 response
 }
 ```
 

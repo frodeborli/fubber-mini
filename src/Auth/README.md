@@ -172,12 +172,11 @@ redirect('/');
 <?php
 // _routes/api/protected.php
 
-// Framework will catch exception and show _errors/401.php
+// Framework will catch exception and show the 401 error page
 auth()->requireLogin();
 
 // Protected API logic
-header('Content-Type: application/json');
-echo json_encode(['data' => $secretData]);
+return fn() => ['data' => $secretData];  // → JSON response
 ```
 
 ### Custom Error Pages

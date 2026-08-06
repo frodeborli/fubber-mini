@@ -4,6 +4,25 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Router: route files must return a RequestHandler or Response (2026-08-06)
+
+**BREAKING CHANGE**
+
+The `_routes/` contract is now strict: a route file must return a PSR-15 `RequestHandlerInterface` (typically a controller extending `mini\Controller\AbstractController`) or a PSR-7 `ResponseInterface`. A `Closure` is still accepted and wrapped in `ConverterHandler` as an inline handler, and `ResponseAggregate` still resolves via `getResponse()`. The "classical PHP" routing paradigm (echo/header, return nothing) is removed — it tied applications to one-process-per-request SAPIs and cannot survive the move to Fiber-based coroutine runtimes. It also invited poor architecture: coding agents in particular abused it to dump output inline instead of composing handlers.
+
+### What changed
+
+- **Direct output from a route file is now a `RuntimeException`.** Any echo/print during route file inclusion is an error; the router no longer forwards buffered output.
+- **Returning nothing (or `null`) is now a `RuntimeException`.** Previously this signalled "response already sent".
+- **`mini\Http\ResponseAlreadySentException` is deleted**, along with `HttpDispatcher`'s catch-and-ignore of it.
+- **Scalar/array returns from route files are no longer auto-converted to responses.** Conversion via the converter registry still applies to Closure and controller-method return values — that is where "return data" belongs.
+
+### What you may need to do
+
+- Routes using echo/header: return `new \mini\Http\Message\Response($body, $headers)` instead.
+- Routes returning scalars/arrays directly: wrap in a Closure (`return fn() => $data;`) or move into a controller method.
+- Remove any `throw new ResponseAlreadySentException()` and any `catch` of it.
+
 ## CLI: composer-driven subcommand discovery, `vdb` removed, signal forwarding (2026-05-25)
 
 **BREAKING CHANGE**

@@ -185,7 +185,7 @@ The `provide*` prefix makes it immediately clear that:
 
 ## Core Principles
 
-- **Let PHP patterns survive**: `$_GET`, `$_POST` is great for productivity, so let devs use it. It's readable and efficient. We've replaced them with ArrayAccess implementations that map to the psr-7 RequestInterface of the current request. And let developers use `echo`, `header()`, `http_response_code()` when they need to - most applications aren't going to be running like long lived event loop applications.
+- **Let PHP patterns survive**: `$_GET`, `$_POST` is great for productivity, so let devs use it. It's readable and efficient. We've replaced them with ArrayAccess implementations that map to the psr-7 RequestInterface of the current request. The output side is stricter: routes return a `Response` (or a handler that produces one) instead of using `echo`/`header()` — direct output cannot survive long lived event loop runtimes, which is where Mini is headed.
 - **Native locale**: `\Locale::setDefault()`, `date_default_timezone_set()` is how you configure the current request's locale and timezone - why abstract that away?
 - **Native intl**: `MessageFormatter`, `NumberFormatter`, `IntlDateFormatter` - we've wired this all up with `mini\t()` and `mini\fmt()` and you should use it everywhere.
 - **File-based routing**: Just like how web servers have done routing for decades. But Mini allows you to say that pattern based routing takes over from here. So you can mount a controller which has pattern based routing by simply returning it from a __DEFAULT__.php file in your routes directory. You can use a `_.php` file or `_` as a catch all point. The value is mapped to $_GET[0..n] in reverse order.
@@ -238,20 +238,11 @@ For bigger projects, make a controller for the feature you need - for example a 
 
 For simpler features, create whatever object oriented design you want - and return a PSR-7 Response from the file: `_routes/service-status.php`: `<?php return new MarkdownRenderer('docs/service-status.md');`.
 
-For trivial API endpoints, like a get-time endpoint in /api/server-time, create a `_routes/api/get-time.php`: `<?php return gmdate('c');`. This functionality leverages the mini\converters() feature to translate a scalar value to a ResponseInterface.
+For trivial API endpoints, like a get-time endpoint in /api/server-time, create a `_routes/api/get-time.php`: `<?php return fn() => gmdate('c');`. The Closure acts as an inline RequestHandler with typed parameter injection, and its return value leverages the mini\converters() feature to translate scalars, arrays and domain objects to a ResponseInterface.
 
 Display an error page: Simply throw an exception. The HTTP dispatcher with catch that exception, and invoke the exception converter registry to translate the exception into a ResponseInterface.
 
-And this is what most frameworks forbids: **Old-school PHP**.
-It is legal for a router file to echo output directly and send headers using `echo` and `header()`. PHP will automatically ensure your output is using chunked transfer encoding and it just works and the framework expects you to do this some times.
-
-```php
-// _routes/users.php
-header('Content-Type: application/json');
-echo json_encode(db()->query("SELECT * FROM users")->fetchAll());
-```
-
-**Don't mix** psr style with direct output, it will trigger an exception.
+**No direct output.** A route file must return a `RequestHandlerInterface` or a `ResponseInterface` (or a `Closure`/`ResponseAggregate`). It may not `echo` or call `header()` — direct output during route file inclusion throws a `RuntimeException`, as does returning nothing or returning scalars/arrays from the file itself. Direct output ties the application to one-process-per-request SAPIs and cannot survive Fiber-based coroutine runtimes; route files declare WHAT handles a URL prefix, they are not a place to produce output.
 
 **Redirect** and **Reroute**: A router file can inform the router to reroute the request again using `throw new Reroute(...)` or `throw new Redirect(...)`.
 

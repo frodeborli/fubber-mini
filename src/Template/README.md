@@ -37,7 +37,7 @@ No configuration needed - Mini automatically finds templates in `_views/`.
 
 ```php
 // _routes/settings.php
-echo render('settings.php', ['user' => $currentUser]);
+return new mini\Http\Message\HtmlResponse(render('settings.php', ['user' => $currentUser]));
 ```
 
 ```php
@@ -85,7 +85,7 @@ echo render('settings.php', ['user' => $currentUser]);
 **Render:**
 ```php
 // _routes/index.php
-echo render('home.php');
+return new mini\Http\Message\HtmlResponse(render('home.php'));
 ```
 
 ## Template Helpers
@@ -495,8 +495,10 @@ Rendering errors are caught and returned as strings for easier debugging during 
 
 ```php
 // _routes/api/user.php
-header('Content-Type: application/json');
-echo render('api/user.json.php', ['user' => $user]);
+return new mini\Http\Message\Response(
+    render('api/user.json.php', ['user' => $user]),
+    ['Content-Type' => 'application/json']
+);
 ```
 
 ```php

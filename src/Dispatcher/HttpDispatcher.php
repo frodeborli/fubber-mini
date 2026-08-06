@@ -4,7 +4,6 @@ namespace mini\Dispatcher;
 
 use mini\Mini;
 use mini\Converter\ConverterRegistryInterface;
-use mini\Http\ResponseAlreadySentException;
 use Psr\Http\Message\{ServerRequestInterface, ResponseInterface, StreamInterface, UploadedFileInterface};
 use Psr\Http\Server\{RequestHandlerInterface, MiddlewareInterface};
 use mini\Http\Message\{ServerRequest, Stream, UploadedFile};
@@ -230,11 +229,6 @@ class HttpDispatcher
 
                 // Process request through middleware chain
                 $response = $handler->handle($serverRequest);
-
-            } catch (ResponseAlreadySentException $e) {
-                // Response already sent using classical PHP (echo/header)
-                // Nothing more to do - but still trigger after-request hook
-                return;
 
             } catch (\Throwable $e) {
                 // Convert exception to response

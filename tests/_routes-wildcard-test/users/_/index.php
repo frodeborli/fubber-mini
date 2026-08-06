@@ -1,8 +1,6 @@
 <?php
 // Test wildcard directory with index: matches /users/{anything}/
-header('Content-Type: application/json');
-echo json_encode([
+return new \mini\Http\Message\Response(json_encode([
     'handler' => 'users/_/index.php',
     'user_id' => $_GET[0] ?? null,
-]);
-return null;
+]), ['Content-Type' => 'application/json']);

@@ -260,24 +260,6 @@ return $dispatcher;
 
 **Environment Variables:** None - HttpDispatcher uses Mini singleton settings
 
-## Advanced: Response Already Sent
-
-If you use classical PHP (`echo`, `header()`) in your routes, throw `ResponseAlreadySentException` to signal that the response was already sent:
-
-```php
-<?php
-// _routes/legacy/endpoint.php
-
-// Old-school PHP output
-header('Content-Type: text/plain');
-echo "Hello World";
-
-// Signal that response was already sent (optional - dispatcher handles this automatically)
-throw new \mini\Http\ResponseAlreadySentException();
-```
-
-HttpDispatcher catches this exception and skips response emission.
-
 ## Dispatcher Scope
 
 HttpDispatcher is **Singleton** - one instance manages all requests. However, `$currentServerRequest` is updated per-request, making it fiber-safe for concurrent request handling.

@@ -1,3 +1,3 @@
 <?php
-// Return query parameter or default to "pong"
-return $_GET['say'] ?? 'pong';
+// Inline handler: return query parameter or default to "pong"
+return fn() => $_GET['say'] ?? 'pong';

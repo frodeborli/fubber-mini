@@ -19,7 +19,7 @@ Mini is designed for decades, not release cycles. If a pattern worked for 40 yea
 
 - **Zero dependencies** - Only PSR interfaces. Fork it safely. No forced upgrade cycles.
 - **<1ms bootstrap** - Services and routes lazy-load from files only when needed.
-- **Native PHP** - `$_GET`, `$_POST`, `echo`, `header()` all work. No magic.
+- **Native PHP** - `$_GET`, `$_POST`, `$_COOKIE`, `$_SESSION` work as request-scoped, fiber-safe proxies. No magic.
 - **Explicit over magic** - No autowiring. Locate dependencies via `db()`, `cache()`, `auth()`.
 
 ## Feature Quick Reference
@@ -43,34 +43,27 @@ When implementing features, **read the README.md in each `src/` subdirectory**.
 
 ## Key Patterns
 
-### Routing - Multiple Styles
+### Routing - One Contract
 
-Route files can return different types. Mini's `converter` system handles the response:
+Route files must return a PSR-15 `RequestHandlerInterface`, a PSR-7 `ResponseInterface`, a `Closure` (inline handler) or a `mini\Http\ResponseAggregate`. Closure return values go through Mini's `converter` system:
 
 ```php
 // _routes/api/ping.php → /api/ping
-<?php return ['time' => gmdate('c')];  // Array → JSON response
+<?php return fn() => ['time' => gmdate('c')];  // Array → JSON response
 
 // _routes/api/users.php → /api/users
-<?php return iterator_to_array(db()->table('users')->limit(100));  // Array → JSON response
+<?php return fn() => iterator_to_array(db()->table('users')->limit(100));  // Array → JSON response
 
 // _routes/api/users/_.php → /api/users/123 (wildcard)
-<?php return User::find($_GET[0]);  // Entity → JSON via converter (if JsonSerializable)
+<?php return fn() => User::find($_GET[0]);  // Entity → JSON via converter (if JsonSerializable)
 
 // _routes/dashboard.php → /dashboard
 <?php return new Response(200, [], render('dashboard.php', ['user' => auth()->user()]));
 ```
 
-All scalars (`string|int|float|bool`), arrays, `stdClass`, and `JsonSerializable` objects convert to JSON responses via the same converter.
+All scalars (`string|int|float|bool`), arrays, `stdClass`, and `JsonSerializable` objects returned from Closures and controller methods convert to JSON responses via the same converter.
 
-**Old-school PHP works too** - useful for quick prototypes or streaming responses:
-```php
-// _routes/users.php
-<?php
-header('Content-Type: application/json');
-echo json_encode(db()->table('users')->all());
-```
-*Note: `echo`/`header()` style works great for traditional PHP-FPM. If you later need 10k req/sec on async runtimes (Swoole, ReactPHP), refactor to return PSR-7 responses.*
+**No direct output** — `echo`/`header()` in a route file throws a `RuntimeException`, as does returning nothing or returning data from the file itself. Direct output ties an application to one-process-per-request SAPIs and cannot survive Fiber-based coroutine runtimes.
 
 **Mount controllers** for pattern-based routing within a path:
 ```php

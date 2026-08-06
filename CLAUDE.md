@@ -51,15 +51,14 @@ When encountering a fail-fast exception, the correct response is usually to fix 
 
 Filesystem-based: `_routes/<path>.php` maps to URL `/<path>`. Wildcards: `_.php` matches a single file segment, `_/` matches a directory segment. Captured values land in `$_GET[0]`, `$_GET[1]`, ... (nearest wildcard at index 0).
 
-Route files **should** return one of:
+Route files **must** return one of:
 
 - A `Psr\Http\Message\ResponseInterface` (e.g. `mini\Http\Message\JsonResponse`, `HtmlResponse`, `FileResponse`, `Response`).
 - A `mini\Http\ResponseAggregate` — a class with `getResponse(): ResponseInterface`, resolved lazily before dispatch continues.
-- A `Closure` — invoked with **typed parameter injection** (see below).
+- A `Closure` — invoked with **typed parameter injection** (see below); its return value is converted via the converter registry (e.g. a plain array → `JsonResponse`).
 - A `Psr\Http\Server\RequestHandlerInterface` — sub-router for a subtree, typically from `__DEFAULT__.php`.
-- Any value with a registered converter (e.g. a plain array → `JsonResponse`).
 
-Routes *can* use `header()` and `echo` directly, but that ties them to SAPI runtimes and prevents portability to coroutine runtimes. Route files should handle dependency lookup and parameter mapping; business logic belongs in the handlers they delegate to.
+Anything else throws a `RuntimeException`: no `header()`/`echo` (direct output during route file inclusion throws), no returning nothing, no returning scalars/arrays from the file itself — "return data" belongs in Closure and controller-method return values. Direct output ties an application to SAPI runtimes and is not portable to coroutine runtimes. Route files should handle dependency lookup and parameter mapping; business logic belongs in the handlers they delegate to.
 
 ### Typed parameter injection (Closure / controller methods)
 

@@ -7,7 +7,7 @@
 ```bash
 composer require fubber/mini
 mkdir _routes
-echo '<?php return date("c");' > _routes/time.php
+echo '<?php return fn() => date("c");' > _routes/time.php
 composer exec mini serve
 ```
 
@@ -44,7 +44,7 @@ Mini provides composable, well-implemented functionality for many concerns in mo
 
 * **[Router](./src/Router/README.md)**: File-based routing where paths map directly to `_routes/` files. Supports wildcards (`_.php`), dynamic segments, controller mounting via `__DEFAULT__.php`, and PSR-15 handler integration. For pattern based routing, combine file based routing with [Controllers](./src/Controller/README.md).
 
-* **[Http](./src/Http/README.md)**: PSR-7 compliant request/response objects, HTTP exceptions, and customizable error pages. Mini also supports native PHP output (`echo`, `header()`) alongside PSR-7.
+* **[Http](./src/Http/README.md)**: PSR-7 compliant request/response objects, HTTP exceptions, and customizable error pages.
 
 * **[Session](./src/Session/README.md)**: Transparent session management that replaces `$_SESSION` with a fiber-safe proxy. Auto-starts on access, integrates with async runtimes.
 
@@ -129,9 +129,9 @@ Mini is built on a **Lindy perspective**: if a pattern has worked for 40 years, 
 
 **Embrace PHP's short-lived request cycle.** PHP bootstraps fresh for each request - no memory leaks, no stale state, predictable cleanup. We optimize for this reality instead of fighting it.
 
-**Multiple routing paradigms.** `_routes/` files can return a PSR-7 `ResponseInterface`, a value (converted via the converter registry), a controller with route attributes, or a PSR-15 `RequestHandlerInterface`. They can also fall back to classic `echo` and `header()` — handy for prototyping, but tied to the SAPI process model. Handlers that return a `Response` are portable across SAPIs and future coroutine runtimes; handlers that `echo` are not.
+**One routing contract.** `_routes/` files declare *what* handles a URL prefix: they must return a PSR-15 `RequestHandlerInterface` (typically a controller extending `mini\Controller\AbstractController`) or a PSR-7 `ResponseInterface`. A `Closure` is also accepted — it acts as an inline RequestHandler with typed parameter injection, and its return value (arrays, strings, domain objects) is converted to a response via the converter registry. Route files are not a place to produce output: `echo`/`header()` in a route file throws — direct output is tied to the SAPI process model and cannot survive the move to Fiber-based coroutine runtimes.
 
-**Fiber-safe globals.** `$_GET`, `$_POST`, `$_COOKIE`, `$_SESSION` are `ArrayAccess` proxies routing to the current PSR-7 request context — works in FPM, Swoole, ReactPHP, and Fiber-based async. (Use these freely. `echo`, `header()`, `die()` do not have the same coroutine-safety — see "Two Paradigms" below.)
+**Fiber-safe globals.** `$_GET`, `$_POST`, `$_COOKIE`, `$_SESSION` are `ArrayAccess` proxies routing to the current PSR-7 request context — works in FPM, Swoole, ReactPHP, and Fiber-based async. (Use these freely. `echo`, `header()`, `die()` are not available in routes at all — see "One Paradigm" below.)
 
 **Full-stack, lazy-loaded.** ORM, auth, i18n, templates, validation — all included, nothing loads until touched. Hello World uses ~300KB.
 
@@ -180,7 +180,7 @@ $router->addRoute('GET', '/users/{id}', [UserController::class, 'show']);
 
 **Request/Response:**
 - `$_GET`, `$_POST`, `$_COOKIE`, `$_SESSION` — request-scoped `ArrayAccess` proxies, fiber-safe; use freely in any environment
-- `header()`, `http_response_code()`, `echo`, `die` — direct output, **SAPI-only**; convenient for prototypes, but won't survive a move to a coroutine runtime. Return a `Response` instead when you want portability.
+- `header()`, `http_response_code()`, `echo`, `die` — **not available in routes**; direct output during route handling throws. The dispatcher emits the `Response` you return. (Direct output is SAPI-only and cannot survive a move to a coroutine runtime.)
 - `\Locale::setDefault()`, `date_default_timezone_set()` — engine-level configuration
 
 **Helpers when they genuinely simplify:**
@@ -211,62 +211,45 @@ This "soft dependency" pattern means:
 - Create `_config/Psr/Log/LoggerInterface.php` to return your logger
 - Framework loads these automatically - no service registration needed
 
-## Two Paradigms: Portable First, Native When You're in a Hurry
+## One Paradigm: Declare a Handler, Return a Response
 
-Mini supports both PSR-7 (return a `Response`) and the native PHP pattern (`echo` + `header()`). **The two are not equivalent.** PSR-7 handlers are portable across SAPIs and future coroutine runtimes; `echo`-based routes are tied to one-process-per-request SAPIs (FPM, mod_php, RoadRunner).
+Route files declare *what* handles a URL prefix. They must return one of:
 
-The recommended path: use the fiber-safe globals (`$_GET`, `$_POST`, `$_COOKIE`, `$_SESSION`) however you like, but **return a `Response`** rather than `echo`-ing. The native form is fine for quick prototypes — graduate to a `Response` before the route is doing real work.
-
-### PSR-7 Pattern (Recommended)
-
-Use PSR-7 `ServerRequestInterface` and `ResponseInterface` for portable, framework-agnostic code:
-
-```php
-// _routes/api/users.php
-use Psr\Http\Message\ServerRequestInterface;
-use Psr\Http\Message\ResponseInterface;
-
-return function(ServerRequestInterface $request): ResponseInterface {
-    $id = $request->getQueryParams()['id'] ?? null;
-
-    $response = response();
-    $response->getBody()->write(json_encode(['user' => $id]));
-    return $response->withHeader('Content-Type', 'application/json');
-};
-```
-
-**When to use:** anything that needs to be portable to non-SAPI runtimes (Swoole, ReactPHP, phasync), libraries, packages, sub-applications (Slim, Symfony), and tests.
-
-### Native PHP Pattern (Prototypes, SAPI-only)
-
-Use PHP's native output for quick prototypes. **Not portable to coroutine runtimes** — `echo`, `header()`, `die()` write to process-global state that has no per-coroutine equivalent in SAPIs like Swoole/ReactPHP/phasync.
+- A PSR-15 `RequestHandlerInterface` — typically a controller extending `mini\Controller\AbstractController` with pattern-based sub-routing
+- A PSR-7 `ResponseInterface` — a direct response
+- A `Closure` — an inline handler with typed parameter injection; its return value is converted to a response via the converter registry
+- A `mini\Http\ResponseAggregate` — resolved via `getResponse()`
 
 ```php
-// _routes/api/users.php
-$id = $_GET['id'] ?? null;
-
-header('Content-Type: application/json');
-echo json_encode(['user' => $id]);
+// _routes/users/__DEFAULT__.php — a controller handles the /users/* subtree
+return new UserController();  // extends AbstractController, pattern-based sub-routing
 ```
 
-**When to use:** rapid prototyping in a SAPI environment (FPM, mod_php, RoadRunner). Migrate to the PSR-7 form once the route is real.
+```php
+// _routes/ping.php — direct response
+return new \mini\Http\Message\Response('pong');
+```
 
-### How They Coexist
+```php
+// _routes/time.php — inline handler; return value converted (here: array → JSON)
+return fn() => ['time' => date('c')];
+```
+
+**Direct output is an error.** A route file that `echo`s, calls `header()`, or returns nothing throws a `RuntimeException`. Returning scalars or arrays directly from a route *file* also throws — "return data and let the converter turn it into a response" is what Closure and controller-method *return values* are for.
+
+Earlier versions of Mini also accepted the classical PHP pattern (`echo` + `header()` in the route file). It was removed: direct output ties an application to one-process-per-request SAPIs and cannot survive the move to Fiber-based coroutine runtimes (phasync-style async is where Mini is headed). It also invited poor architecture — output produced during routing instead of composable handlers.
+
+### The Fiber-Safe Globals Stay
 
 Mini provides **request-scoped proxies** for `$_GET`, `$_POST`, `$_COOKIE`, `$_SESSION` that resolve against the current PSR-7 `ServerRequest`:
 
 - **In SAPI environments** (FPM, CGI, mod_php): proxies read from PHP's native superglobals
 - **In non-SAPI environments** (Swoole, ReactPHP, phasync with Fibers): proxies read from the per-coroutine PSR-7 request
 
-This is the part that's truly environment-agnostic. The output side is not symmetric:
+Use them freely in handlers — they are environment-agnostic and remain the recommended way to read request data. It is only the *output* side that must go through a `Response`:
 
-- Returning a `ResponseInterface` works in every runtime — SAPI today, coroutines tomorrow.
-- `echo`/`header()`/`die()` write to process-global state. They work fine in SAPI runtimes, but a coroutine runtime would need every concurrent request to share one output stream — which it can't. Routes that rely on direct output will need to be rewritten before they can run under Swoole/ReactPHP/phasync.
-
-The practical guidance:
 - **Sub-application mounting:** PSR-15 sub-apps (Slim, Mezzio, etc.) plug in without conflicts because everyone speaks `Response`.
-- **Gradual complexity:** start with `$_GET` and `echo` for a quick prototype, but graduate to returning a `Response` before the route earns its keep.
-- **Future async support:** the fiber-safe globals already work everywhere. Routes that return a `Response` will Just Work in a coroutine runtime; routes that `echo` will not.
+- **Future async support:** the fiber-safe globals already work everywhere, and handlers that return a `Response` will Just Work in a coroutine runtime.
 
 ## Installation
 
@@ -290,7 +273,7 @@ Create your first route:
 ```php
 // _routes/index.php
 <?php
-echo "<h1>Hello, World!</h1>";
+return new mini\Http\Message\HtmlResponse("<h1>Hello, World!</h1>");
 ```
 
 Start the development server:
@@ -351,17 +334,19 @@ Use `_` as a filename or directory name to match any single path segment:
 
 ```php
 // _routes/users/_.php - Matches /users/123, /users/john, /users/anything
-$userId = $_GET[0];  // Captured value: "123", "john", "anything"
-$user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$userId]);
-echo json_encode($user);
+return function() {
+    $userId = $_GET[0];  // Captured value: "123", "john", "anything"
+    return db()->queryOne("SELECT * FROM users WHERE id = ?", [$userId]);  // → JSON
+};
 ```
 
 ```php
 // _routes/users/_/posts/_.php - Matches /users/{userId}/posts/{postId}
-$postId = $_GET[0];   // Rightmost wildcard (nearest to file)
-$userId = $_GET[1];   // Next wildcard to the left
-$post = db()->queryOne("SELECT * FROM posts WHERE id = ? AND user_id = ?", [$postId, $userId]);
-echo json_encode($post);
+return function() {
+    $postId = $_GET[0];   // Rightmost wildcard (nearest to file)
+    $userId = $_GET[1];   // Next wildcard to the left
+    return db()->queryOne("SELECT * FROM posts WHERE id = ? AND user_id = ?", [$postId, $userId]);
+};
 ```
 
 **Wildcard behavior:**
@@ -387,23 +372,21 @@ The router automatically redirects to ensure consistency:
 - If only `_/index.php` exists: `/users/123` → 301 redirect to `/users/123/`
 - If both exist: Each URL serves its respective file (no redirect)
 
-**What route files can return:**
-- PSR-7 `ResponseInterface` — recommended; portable to non-SAPI runtimes
-- `Closure` — invoked with typed parameter injection (see "Mounting a module's handler method" in `docs/web-apps.md`); great for one-line delegation to a service method
-- Controller instance with route attributes
-- PSR-15 `RequestHandlerInterface` (e.g. a mounted Slim/Mezzio app)
-- Nothing — `echo` directly to the SAPI output stream (prototypes only; not coroutine-portable)
+**What route files must return** (anything else — including no return or direct output — throws a `RuntimeException`):
+- PSR-15 `RequestHandlerInterface` — a controller extending `AbstractController`, or e.g. a mounted Slim/Mezzio app
+- PSR-7 `ResponseInterface` — a direct response
+- `Closure` — an inline handler with typed parameter injection (see "Mounting a module's handler method" in `docs/web-apps.md`); its return value is converted via the converter registry; great for one-line delegation to a service method
+- `mini\Http\ResponseAggregate` — resolved via `getResponse()`
 
 ```php
-// _routes/users.php - PSR-7 response (recommended)
+// _routes/users.php - PSR-7 response
 use mini\Http\Message\JsonResponse;
 return new JsonResponse(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
 ```
 
 ```php
-// _routes/users.php - Direct output (prototype / SAPI-only)
-header('Content-Type: application/json');
-echo json_encode(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
+// _routes/users.php - Inline handler; returned array is converted to JSON
+return fn() => ['users' => db()->query("SELECT * FROM users")->fetchAll()];
 ```
 
 ### Controller-Based Routing
@@ -496,15 +479,17 @@ throw new \mini\Exceptions\BadRequestException('Invalid email format');       //
 
 ### Dynamic Routes with `__DEFAULT__.php`
 
-Handle dynamic segments with pattern matching:
+The usual way to handle a dynamic subtree is returning a controller (see above). For plain path remapping, `__DEFAULT__.php` can also throw a `Reroute` with pattern → request-path mappings:
 
 ```php
 // _routes/blog/__DEFAULT__.php
-return [
-    '/' => 'index.php',                              // /blog/
-    '/{slug}' => fn($slug) => "post.php?slug=$slug", // /blog/my-post
-    '/{year}/{month}' => 'archive.php',              // /blog/2025/11
-];
+use mini\Router\Reroute;
+
+throw new Reroute([
+    '/' => '_index',                               // /blog/        → _index.php
+    '/{slug}' => fn($slug) => "_post?slug=$slug",  // /blog/my-post → _post.php
+    '/{year}/{month}' => fn($year, $month) => "_archive?year=$year&month=$month",
+]);
 ```
 
 ## Mounting Sub-Applications

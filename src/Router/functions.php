@@ -17,10 +17,11 @@ use mini\Lifetime;
  * File-based routing that maps URLs to PHP files in _routes/ directory.
  * Implements PSR-15 RequestHandlerInterface for standard HTTP request handling.
  *
- * The Router resolves request paths to controller files and handles their return values:
- * - null → ResponseAlreadySentException (classical PHP echo/header)
+ * The Router resolves request paths to route files and handles their return values:
  * - ResponseInterface → return as-is
- * - Other → convert to ResponseInterface using converter system
+ * - RequestHandlerInterface → invoked with the prefix-scoped request
+ * - Closure → wrapped in ConverterHandler (inline handler)
+ * - Anything else (including direct echo/header output) → RuntimeException
  */
 
 // Register routes path registry

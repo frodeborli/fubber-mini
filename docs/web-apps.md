@@ -61,12 +61,12 @@ The router automatically redirects to ensure consistency:
 - If only `_/index.php` exists: `/users/123` → 301 redirect to `/users/123/`
 - If both exist: Each URL serves its respective file (no redirect)
 
-### What Route Files Can Return
+### What Route Files Must Return
 
-Route files can return different types of values:
+A route file must return a PSR-15 `RequestHandlerInterface`, a PSR-7 `ResponseInterface`, a `Closure` (inline handler) or a `mini\Http\ResponseAggregate`. Anything else — no return, direct output (`echo`/`header()`), scalars or arrays returned from the file itself — throws a `RuntimeException`.
 
 ```php
-// 1. PSR-7 Response (recommended — portable to coroutine runtimes)
+// 1. PSR-7 Response
 use mini\Http\Message\JsonResponse;
 return new JsonResponse(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
 ```
@@ -75,12 +75,6 @@ return new JsonResponse(['users' => db()->query("SELECT * FROM users")->fetchAll
 // 2. PSR-7 HTML Response
 use mini\Http\Message\HtmlResponse;
 return new HtmlResponse(render('users.php', ['users' => $users]));
-```
-
-```php
-// 3. Nothing — native PHP output (SAPI-only; not coroutine-portable)
-header('Content-Type: application/json');
-echo json_encode(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
 ```
 
 ```php
@@ -98,12 +92,7 @@ return new UsersPage();
 ```
 
 ```php
-// 4. Array (auto-converted to JSON response)
-return ['users' => db()->query("SELECT * FROM users")->fetchAll()];
-```
-
-```php
-// 5. PSR-15 RequestHandlerInterface
+// 4. PSR-15 RequestHandlerInterface
 return new class implements RequestHandlerInterface {
     public function handle(ServerRequestInterface $request): ResponseInterface {
         return new Response('Hello');
@@ -112,11 +101,17 @@ return new class implements RequestHandlerInterface {
 ```
 
 ```php
-// 6. Closure (first-class callable) — typed parameter injection
+// 5. Closure (inline handler) — typed parameter injection; the return value
+//    is converted via the converter registry (array → JSON, etc.)
+return fn() => ['users' => db()->query("SELECT * FROM users")->fetchAll()];
+```
+
+```php
+// 6. Closure via first-class callable syntax — delegate to a method
 return (new SupportTicket)->handleUserSupportTicket(...);
 ```
 
-**Important:** Returning a plain string creates a `text/plain` response, not HTML. For HTML responses, always use `HtmlResponse` or a class that extends it.
+**Important:** When a Closure returns a plain string, it converts to a `text/plain` response, not HTML. For HTML responses, always use `HtmlResponse` or a class that extends it.
 
 ### Mounting a module's handler method
 

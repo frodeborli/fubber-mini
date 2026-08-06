@@ -9,7 +9,9 @@ Mini's router is **convention-driven, not configuration-heavy**. URL paths map d
 - **Hierarchical scoping** - `__DEFAULT__.php` for dynamic routes within directories
 - **Security by convention** - Files starting with `_` are NOT publicly accessible
 - **Pattern matching** - FastRoute-inspired syntax: `{id}`, `{slug:\w+}`
-- **Native PHP** - Routes use `$_GET`, `$_POST`, `$_COOKIE` directly (request-scoped, fiber-safe)
+- **Native PHP** - Handlers read `$_GET`, `$_POST`, `$_COOKIE` directly (request-scoped, fiber-safe)
+
+**The route file contract:** a route file declares *what* handles a URL prefix. It must return a PSR-15 `RequestHandlerInterface` (typically a controller extending `mini\Controller\AbstractController`), a PSR-7 `ResponseInterface`, a `Closure` (an inline handler — its return value is converted to a response via the converter registry), or a `mini\Http\ResponseAggregate` (resolved via `getResponse()`). Producing output directly (`echo`, `header()`) or returning anything else throws a `RuntimeException` — direct output ties the application to one-process-per-request SAPIs and is not portable to Fiber-based coroutine runtimes.
 
 ## Setup
 
@@ -67,16 +69,16 @@ Captured: $_GET[0] = '100', $_GET[1] = '200'
 <?php
 // _routes/users/_.php - handles /users/{anything}
 
-$userId = $_GET[0];  // Captured from URL
-$user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$userId]);
+return function() {
+    $userId = $_GET[0];  // Captured from URL
+    $user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$userId]);
 
-if (!$user) {
-    http_response_code(404);
-    echo json_encode(['error' => 'User not found']);
-    exit;
-}
+    if (!$user) {
+        throw new \mini\Exceptions\NotFoundException('User not found');
+    }
 
-echo json_encode($user);
+    return $user;  // Converted to a JSON response via the converter registry
+};
 ```
 
 **Security:**
@@ -94,8 +96,7 @@ Result: 404 (framework-reserved files not accessible)
 <?php
 // _routes/users.php
 
-header('Content-Type: application/json');
-echo json_encode(db()->query("SELECT * FROM users"));
+return fn() => db()->query("SELECT * FROM users")->fetchAll();  // array → JSON response
 ```
 
 ### Route with Parameters (via $_GET)
@@ -104,41 +105,43 @@ echo json_encode(db()->query("SELECT * FROM users"));
 <?php
 // _routes/user.php
 
-$id = $_GET['id'] ?? null;
+return function() {
+    $id = $_GET['id'] ?? null;
 
-if (!$id) {
-    http_response_code(400);
-    echo json_encode(['error' => 'User ID required']);
-    exit;
-}
+    if (!$id) {
+        throw new \mini\Exceptions\BadRequestException('User ID required');
+    }
 
-$user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$id]);
+    $user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$id]);
 
-if (!$user) {
-    http_response_code(404);
-    echo json_encode(['error' => 'User not found']);
-    exit;
-}
+    if (!$user) {
+        throw new \mini\Exceptions\NotFoundException('User not found');
+    }
 
-echo json_encode($user);
+    return $user;  // → JSON response
+};
 ```
 
 ### Dynamic Routing with Patterns
+
+For pattern-based sub-routing, the usual choice is mounting a controller (`return new BlogController();` — see [Controller documentation](../Controller/README.md)). For plain path remapping, `__DEFAULT__.php` can throw a `Reroute` with pattern → request-path mappings (targets are request paths, resolved from the `__DEFAULT__.php` directory — they may point to underscore-prefixed files):
 
 ```php
 <?php
 // _routes/blog/__DEFAULT__.php
 
-return [
-    '/' => 'posts/index.php',  // /blog/ → _routes/blog/posts/index.php
-    '/{slug}' => fn($slug) => "posts/view.php?slug=$slug",  // /blog/hello-world
-    '/{year:\d{4}}/{month:\d{2}}' => fn($year, $month) => "posts/archive.php?year=$year&month=$month",
-];
+use mini\Router\Reroute;
+
+throw new Reroute([
+    '/' => '_index',  // /blog/ → _routes/blog/_index.php
+    '/{slug}' => fn($slug) => "_view?slug=$slug",  // /blog/hello-world
+    '/{year:\d{4}}/{month:\d{2}}' => fn($year, $month) => "_archive?year=$year&month=$month",
+]);
 ```
 
 ```php
 <?php
-// _routes/blog/posts/view.php
+// _routes/blog/_view.php
 
 use mini\Http\Message\HtmlResponse;
 
@@ -150,23 +153,36 @@ return new HtmlResponse(render('blog/post', ['post' => $post]));
 
 ### API Routes with RESTful Patterns
 
+Method-aware routing belongs in a controller — mount one for the subtree:
+
 ```php
 <?php
-// _routes/api/__DEFAULT__.php
+// _routes/api/users/__DEFAULT__.php
 
-return [
-    '/users' => fn() => match($_SERVER['REQUEST_METHOD']) {
-        'GET' => 'users/index.php',
-        'POST' => 'users/create.php',
-        default => false  // 404
-    },
-    '/users/{id:\d+}' => fn($id) => match($_SERVER['REQUEST_METHOD']) {
-        'GET' => "users/show.php?id=$id",
-        'PUT' => "users/update.php?id=$id",
-        'DELETE' => "users/delete.php?id=$id",
-        default => false
-    },
-];
+use mini\Controller\AbstractController;
+use mini\Controller\Attributes\{GET, POST, PUT, DELETE};
+
+return new class extends AbstractController {
+    #[GET('/')]
+    public function index(): array
+    {
+        return db()->query("SELECT * FROM users")->fetchAll();
+    }
+
+    #[POST('/')]
+    public function create(): array
+    {
+        db()->exec("INSERT INTO users (name) VALUES (?)", [$_POST['name']]);
+        return ['id' => db()->lastInsertId()];
+    }
+
+    #[GET('/{id:\d+}/')]
+    public function show(int $id): array
+    {
+        return db()->queryOne("SELECT * FROM users WHERE id = ?", [$id])
+            ?? throw new \mini\Exceptions\NotFoundException();
+    }
+};
 ```
 
 ### Protected Routes
@@ -175,19 +191,21 @@ return [
 <?php
 // _routes/admin/__DEFAULT__.php
 
+use mini\Router\Reroute;
+
 // Require authentication for all admin routes
 auth()->requireLogin()->requireRole('admin');
 
-return [
-    '/' => 'dashboard.php',
-    '/users' => 'users.php',
-    '/settings' => 'settings.php',
-];
+throw new Reroute([
+    '/' => '_dashboard',
+    '/users' => '_users',
+    '/settings' => '_settings',
+]);
 ```
 
 ```php
 <?php
-// _routes/admin/dashboard.php
+// _routes/admin/_dashboard.php
 
 use mini\Http\Message\HtmlResponse;
 
@@ -204,64 +222,63 @@ return new HtmlResponse(render('admin/dashboard', ['stats' => $stats]));
 <?php
 // _routes/api/v1/__DEFAULT__.php
 
-return [
-    '/posts' => 'posts/index.php',
-    '/posts/{id:\d+}' => fn($id) => "posts/show.php?id=$id",
-];
+use mini\Router\Reroute;
+
+throw new Reroute([
+    '/posts' => '_posts/index',
+    '/posts/{id:\d+}' => fn($id) => "_posts/show?id=$id",
+]);
 ```
 
 ```php
 <?php
 // _routes/api/v2/__DEFAULT__.php
 
-return [
-    '/posts' => 'posts/index.php',  // Different implementation from v1
-    '/posts/{uuid:[a-f0-9-]+}' => fn($uuid) => "posts/show.php?uuid=$uuid",
-];
+use mini\Router\Reroute;
+
+throw new Reroute([
+    '/posts' => '_posts/index',  // Different implementation from v1
+    '/posts/{uuid:[a-f0-9-]+}' => fn($uuid) => "_posts/show?uuid=$uuid",
+]);
 ```
 
 ### Pattern Matching with Type Casting
+
+Typed URL parameters are a controller feature — declare the type on the method parameter:
 
 ```php
 <?php
 // _routes/products/__DEFAULT__.php
 
-return [
-    '/{id:\d+}' => function(int $id) {
+use mini\Controller\AbstractController;
+use mini\Controller\Attributes\GET;
+
+return new class extends AbstractController {
+    #[GET('/{id:\d+}/')]
+    public function show(int $id): array
+    {
         // $id is automatically cast to int based on type hint
-        $product = db()->queryOne("SELECT * FROM products WHERE id = ?", [$id]);
-        echo json_encode($product);
-    },
-];
+        return db()->queryOne("SELECT * FROM products WHERE id = ?", [$id]);
+    }
+};
 ```
 
 ### Conditional Routing
 
-```php
-<?php
-// _routes/blog/__DEFAULT__.php
-
-return [
-    '/preview/{id:\d+}' => function($id) {
-        // Only show preview if user is admin
-        if (!auth()->hasRole('admin')) {
-            return false;  // 404 for non-admins
-        }
-        return "posts/preview.php?id=$id";
-    },
-];
-```
-
-### Global Routes Configuration
+Guard inside the handler and throw to produce a 404 (or 401/403):
 
 ```php
 <?php
-// config/routes.php (fallback when no file-based route matches)
+// _routes/blog/_preview.php — target of '/preview/{id:\d+}' => fn($id) => "_preview?id=$id"
 
-return [
-    '/old-blog/{slug}' => fn($slug) => "/blog/$slug",  // Redirect pattern
-    '/legacy/users' => fn() => "/api/users",
-];
+return function() {
+    // Only show preview if user is admin
+    if (!auth()->hasRole('admin')) {
+        throw new \mini\Exceptions\NotFoundException();  // 404 for non-admins
+    }
+    $post = db()->queryOne("SELECT * FROM posts WHERE id = ?", [$_GET['id']]);
+    return new \mini\Http\Message\HtmlResponse(render('blog/preview', ['post' => $post]));
+};
 ```
 
 ### Trailing Slash Handling
@@ -276,24 +293,44 @@ _routes/users.php       → Handles /users
 _routes/users/index.php → Handles /users/
 ```
 
-## Route Handler Return Values
+## Route File Return Values
 
-Handlers (callables) can return:
+Every route file (including `__DEFAULT__.php`) must return one of:
 
-1. **String** - Treated as internal redirect to another route file
+1. **PSR-15 `RequestHandlerInterface`** - e.g. a controller extending `AbstractController`, or a mounted Slim/Mezzio app
 ```php
-return 'posts/view.php?id=123';
+return new UserController();
 ```
 
-2. **false** - Triggers 404
+2. **PSR-7 `ResponseInterface`** - a direct response
 ```php
-return false;
+return new \mini\Http\Message\Response('pong');
 ```
 
-3. **null/void** - Handler echoed output directly
+3. **`Closure`** - an inline handler with typed parameter injection; the return value is converted via the converter registry
 ```php
-echo json_encode($data);  // No return
+return fn() => ['time' => date('c')];  // array → JSON response
 ```
+
+4. **`mini\Http\ResponseAggregate`** - resolved via `getResponse()`
+
+Anything else — no return, `echo`/`header()` output, scalars, arrays — throws a `RuntimeException`. "Return data, get a response" applies to *Closure and controller-method return values*, not to the route file itself.
+
+### Reroute Target Values
+
+Patterns in a `Reroute` (thrown from `__DEFAULT__.php`) map to targets that are **request paths** (not filenames), resolved from the `__DEFAULT__.php` directory:
+
+1. **String** - a request path, query parameters allowed
+```php
+'/create' => '_create',  // resolves to _create.php
+```
+
+2. **Closure** - invoked with the captured pattern parameters (matched by name); must return a request path string
+```php
+'/{id}/' => fn($id) => "_view?id=$id",
+```
+
+Reroute targets may point to underscore-prefixed files (internal routing), and the routed-to file is subject to the same return-value contract as any route file.
 
 ## Pattern Syntax
 
@@ -329,27 +366,18 @@ echo json_encode($data);  // No return
 ```php
 // config/mini/Router/Router.php
 
-use mini\Router\Router;
-
-// Pre-configure routes for entire application
-$router = new Router([
-    '/health' => fn() => '{"status":"ok"}',
-]);
-
-return $router;
+// Return your own Router instance (or subclass) to customize routing
+return new mini\Router\Router();
 ```
 
 ## Error Handling
 
-Router throws `mini\Http\NotFoundException` when no route matches, which the framework catches and routes to `_errors/404.php`:
+Router throws `mini\Exceptions\NotFoundException` when no route matches. The dispatcher converts it to a 404 response, rendered from the `_views/errors/404.php` template if your application provides one (framework defaults otherwise):
 
 ```php
-<?php
-// _errors/404.php
-
-http_response_code(404);
-header('Content-Type: application/json');
-echo json_encode(['error' => 'Not Found', 'path' => $_SERVER['REQUEST_URI']]);
+<?php // _views/errors/404.php - a template, rendered by the error handler ?>
+<h1><?= h(t('Page not found')) ?></h1>
+<p><?= h($_SERVER['REQUEST_URI']) ?></p>
 ```
 
 ## Mounting PSR-15 Applications
@@ -400,52 +428,21 @@ return new class implements RequestHandlerInterface {
 };
 ```
 
-### Registering Custom Handlers
-
-You can register your own handlers for __DEFAULT__.php return values:
-
-```php
-<?php
-// config/mini/Router/Router.php
-
-$router = new mini\Router\Router();
-
-// Register handler for custom types
-$router->defaultHandlers->listen(function($result, $routeInfo) {
-    if ($result instanceof MyCustomApp) {
-        $result->run();
-        return true; // Handled
-    }
-    return null; // Not handled
-});
-
-return $router;
-```
-
 ### __DEFAULT__.php Return Value Handling
 
-The router processes __DEFAULT__.php return values in this order:
-
-1. **null** - Assumes response was sent directly (like regular route files)
-2. **Registered handlers** - Checks `$router->defaultHandlers` listeners
-3. **PSR-15 RequestHandler** - Built-in support via `RequestHandlerInterface`
-4. **Array** - Treats as route patterns (default Mini behavior)
+`__DEFAULT__.php` follows the same contract as every other route file — it must return a `RequestHandlerInterface`, a `ResponseInterface`, a `Closure`, or a `ResponseAggregate`. When it returns a PSR-15 handler, the matched URL prefix is stripped from the request target so the handler sees paths scoped to its subtree:
 
 ```php
 <?php
 // _routes/example/__DEFAULT__.php
 
-// Option 1: Send response directly, return null
-echo json_encode(['direct' => 'response']);
-return null;
-
-// Option 2: Return PSR-15 handler
+// Option 1: Mount a PSR-15 handler (controller, Slim app, ...) for the subtree
 return new SlimApp();
 
-// Option 3: Return routes array
-return [
-    '/{id}' => fn($id) => "item.php?id=$id"
-];
+// Option 2: Pattern-based path remapping via Reroute
+throw new mini\Router\Reroute([
+    '/{id}' => fn($id) => "_item?id=$id"
+]);
 ```
 
 ## Router Scope

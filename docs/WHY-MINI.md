@@ -104,7 +104,7 @@ The fiber-safe `$_GET`/`$_POST`/`$_COOKIE`/`$_SESSION` proxies, the streaming `H
 
 **What this motivates.**
 
-- The path from a small PHP-FPM application today to a high-concurrency long-lived-process application tomorrow does not require rewriting handlers. Code that returns a `ResponseInterface` and uses the fiber-safe globals moves to Swerve without changes. Code that `echo`s and `header()`s does not move — this is why the documentation distinguishes the two paradigms.
+- The path from a small PHP-FPM application today to a high-concurrency long-lived-process application tomorrow does not require rewriting handlers. Code that returns a `ResponseInterface` and uses the fiber-safe globals moves to Swerve without changes. Code that `echo`s and `header()`s does not move — this is why the routing contract forbids direct output and requires every route to return a handler or a `Response`.
 - The scaling story is owned end-to-end. Mini does not depend on the PHP ecosystem to deliver a coroutine runtime; the runtime is being built alongside.
 
 **The tradeoff.** Swerve is not yet released. The fiber-safe-globals story is currently a promise more than a demonstrated production behavior. Mini today, on FPM, behaves like any well-built PHP framework. Mini under Swerve is the design target, not the current state.

@@ -4,7 +4,7 @@ This namespace provides HTTP-related utilities including PSR-7 message support a
 
 ## Purpose
 
-Mini primarily uses native PHP (`$_GET`, `$_POST`, `header()`, `echo`), but provides PSR-7 support for integrating with PSR-7/PSR-15 middleware or libraries.
+Mini reads request data via native PHP patterns (`$_GET`, `$_POST` — fiber-safe, request-scoped proxies) and produces output via PSR-7 responses. This namespace provides Mini's PSR-7 implementation, used both by routes and when integrating with PSR-7/PSR-15 middleware or libraries.
 
 ## PSR-7 Usage
 

@@ -195,10 +195,6 @@ try {
     $handler = Mini::$mini->get(RequestHandlerInterface::class);
     $response = $handler->handle($serverRequest);
 
-} catch (ResponseAlreadySentException $e) {
-    // Classical PHP (echo/header) already sent response
-    return;
-
 } catch (\Throwable $e) {
     // Try to convert exception to response
     $response = $this->exceptionConverters->convert($e, ResponseInterface::class);
