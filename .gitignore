@@ -25,9 +25,26 @@ Desktop.ini
 
 # SQLite dev/test artifacts (covers _database.sqlite3 created by bootstrap)
 *.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
 
-# Example/debug files
+# Auto-generated application translations.
+# Translator::autoCreateDefaults writes discovered t() strings to
+# Mini::$mini->root . '/_translations'. In a framework checkout the repo root IS
+# that root, so running tests or bin/mini spills identity-mapping JSON here.
+# The framework's own shipped translations live in /translations/ — not here.
+/_translations/
+
+# Scratch and debug artifacts
 /examples/cache/
+/scratch/
+/tmp/
+*.btree
+*.btree.lock
+*.oplog.jsonl
+debug-*.php
+*.log
 
 # Environment files
 .env

@@ -1,9 +1,28 @@
 <?php
 /**
- * btree_concurrency_fuzzer.php
+ * BTreeIndex concurrency fuzzer — MANUAL test, excluded from directory runs.
  *
- * Usage:
- *   php btree_concurrency_fuzzer.php /tmp/test.btree
+ * Why the leading underscore: the test runner skips files starting with `_`
+ * (see tests/README.md). This file is not a self-contained test — it requires
+ * an index path as argv[1], needs ext-pcntl, forks processes that SIGKILL
+ * themselves mid-commit, and runs for SECONDS (default 20) wall-clock. None of
+ * that belongs in `php bin/mini test`, which must be fast, deterministic and
+ * portable. It is kept as a test rather than a tool because it asserts
+ * correctness and exits non-zero on failure.
+ *
+ * Run it manually from the repo root:
+ *   php tests/Table/Index/_BTreeIndex.Concurrency.php /tmp/btree-fuzz.btree
+ *   SECONDS=60 WORKERS=16 CRASH_PCT=5 php tests/Table/Index/_BTreeIndex.Concurrency.php /tmp/btree-fuzz.btree
+ *
+ * What it verifies: that a BTreeIndex stays internally consistent under
+ * concurrent multi-process writers, concurrent readers, and writers killed
+ * mid-commit. After the fuzz run it reopens the index and checks that
+ * eq()/has()/count() agree with each other, that range() equals the
+ * concatenation of eq() results in key order, that reverse range() equals the
+ * forward range reversed, that repeated eq()/range() calls are idempotent, and
+ * that a close/reopen cycle yields identical results (crash-safe persistence).
+ * Commit ordering is deliberately NOT checked against the oplog: with
+ * concurrent writers, oplog order is not commit order.
  *
  * Environment knobs:
  *   WORKERS=8

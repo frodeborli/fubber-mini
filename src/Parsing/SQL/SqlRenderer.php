@@ -277,9 +277,9 @@ class SqlRenderer
             $columns = $cte['columns'] ?? null;
             $query = $this->render($cte['query']);
 
-            $cteDef = $name;
+            $cteDef = $this->quoteName($name);
             if ($columns) {
-                $cteDef .= ' (' . implode(', ', $columns) . ')';
+                $cteDef .= ' (' . implode(', ', array_map($this->quoteName(...), $columns)) . ')';
             }
             $cteDef .= ' AS (' . $query . ')';
             $cteParts[] = $cteDef;
@@ -315,7 +315,7 @@ class SqlRenderer
                 $sql .= $this->render($node->from);
             }
             if ($node->fromAlias !== null) {
-                $sql .= ' AS ' . $node->fromAlias;
+                $sql .= ' AS ' . $this->quoteName($node->fromAlias);
             }
         }
 
@@ -477,7 +477,7 @@ class SqlRenderer
     {
         $sql = $this->render($node->expression);
         if ($node->alias !== null) {
-            $sql .= ' AS ' . $node->alias;
+            $sql .= ' AS ' . $this->quoteName($node->alias);
         }
         return $sql;
     }
@@ -493,7 +493,7 @@ class SqlRenderer
         }
 
         if ($node->alias !== null) {
-            $sql .= ' AS ' . $node->alias;
+            $sql .= ' AS ' . $this->quoteName($node->alias);
         }
 
         if ($node->condition !== null) {
@@ -508,17 +508,24 @@ class SqlRenderer
         $parts = [];
         foreach ($node->parts as $part) {
             // Asterisk is the wildcard, not an identifier - don't quote
-            if ($part === '*') {
-                $parts[] = $part;
-            } elseif (preg_match('/[^a-zA-Z0-9_]/', $part)) {
-                // Quote if contains special characters (spaces, etc.)
-                // Use dialect-specific quoting (backticks for MySQL, brackets for SQL Server, etc.)
-                $parts[] = $this->dialect->quoteIdentifier($part);
-            } else {
-                $parts[] = $part;
-            }
+            $parts[] = $part === '*' ? $part : $this->quoteName($part);
         }
         return implode('.', $parts);
+    }
+
+    /**
+     * Quote a bare name (alias, CTE name, column name) when it is not a plain
+     * word, so that spaces and embedded quote characters survive a
+     * render → parse round trip. Uses dialect-specific quoting (backticks for
+     * MySQL, brackets for SQL Server, double quotes elsewhere), which also
+     * escapes the quote character inside the name.
+     */
+    private function quoteName(string $name): string
+    {
+        if (preg_match('/^[a-zA-Z0-9_]+$/', $name)) {
+            return $name;
+        }
+        return $this->dialect->quoteIdentifier($name);
     }
 
     private function renderLiteral(LiteralNode $node): string

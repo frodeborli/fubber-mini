@@ -1183,16 +1183,19 @@ class VirtualDatabase implements DatabaseInterface
                 $cteName = strtolower($cte['name']);
 
                 if ($ast->recursive && $this->isCteRecursive($cte, $cteName)) {
-                    // Recursive CTE - requires iterative execution
+                    // Recursive CTE - requires iterative execution. It applies
+                    // the declared column list itself, before iterating: the
+                    // names must be in scope for the recursive term's
+                    // self-reference, not just on the finished table.
                     $table = $this->executeRecursiveCte($cte, $cteName);
                 } else {
                     // Non-recursive CTE - simple execution
                     $table = $this->executeCteQuery($cte['query']);
-                }
 
-                // Apply column aliasing if specified
-                if ($cte['columns'] !== null) {
-                    $table = $this->renameCteColumns($table, $cte['columns']);
+                    // Apply column aliasing if specified
+                    if ($cte['columns'] !== null) {
+                        $table = $this->renameCteColumns($table, $cte['columns']);
+                    }
                 }
 
                 // Register as a temporary table
@@ -1288,10 +1291,22 @@ class VirtualDatabase implements DatabaseInterface
         $anchorRows = array_values(iterator_to_array($anchorTable));
 
         if (empty($anchorRows)) {
-            return $anchorTable;
+            return $cte['columns'] !== null
+                ? $this->renameCteColumns($anchorTable, $cte['columns'])
+                : $anchorTable;
         }
 
-        // Get column names from anchor - these define the CTE's schema
+        // SQL:2003: a declared column list names the CTE for ALL references,
+        // including the recursive term's self-reference. Apply it to the anchor
+        // before iterating - otherwise `WITH RECURSIVE c(n) AS (SELECT 1 UNION
+        // ALL SELECT n+1 FROM c ...)` registers the working table under the
+        // anchor's own column name ('1'), `n` never binds, the recursive term
+        // matches nothing, and the fixpoint loop stops after the anchor row.
+        if ($cte['columns'] !== null) {
+            $anchorRows = $this->renameRowColumns($anchorRows, $cte['columns']);
+        }
+
+        // Column names defining the CTE's schema for this iteration
         $anchorColumnNames = array_keys(get_object_vars($anchorRows[0]));
 
         // Build result table
@@ -1426,8 +1441,9 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function renameCteColumns(TableInterface $table, array $columnNames): TableInterface
     {
-        // Get rows from table
-        $rows = iterator_to_array($table);
+        // Get rows from table. Discard iterator keys - table iterators are not
+        // guaranteed to yield 0-based integer keys, and this code indexes $rows[0].
+        $rows = iterator_to_array($table, false);
 
         if (empty($rows)) {
             // Create table with renamed columns

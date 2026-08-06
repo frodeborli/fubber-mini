@@ -19,9 +19,16 @@ use Psr\SimpleCache\CacheInterface;
  * $_SESSION['user_id'] = 123;        // Fetches fresh, updates, saves
  * $userId = $_SESSION['user_id'];    // Returns from memory if fresh
  * ```
+ *
+ * Writes are never silently dropped: if the cache backend refuses a write,
+ * a RuntimeException is thrown rather than leaving the caller believing the
+ * session was updated.
  */
 class Session implements SessionInterface
 {
+    /** Cache backend, resolved from the container on first use when not injected */
+    private ?CacheInterface $cache;
+
     /** In-memory session data cache */
     private ?array $sessionData = null;
 
@@ -37,8 +44,22 @@ class Session implements SessionInterface
     /** How long to trust in-memory data for reads (seconds) */
     private const READ_CACHE_TTL = 0.1; // 100ms
 
-    /** Cache key prefix */
-    private const CACHE_PREFIX = 'session:';
+    /**
+     * Cache key prefix
+     *
+     * PSR-16 reserves `{}()/\@:` in cache keys, so the separator is a dot.
+     */
+    private const CACHE_PREFIX = 'session.';
+
+    /**
+     * @param CacheInterface|null $cache Session store. Defaults to the
+     *        container-provided cache; inject explicitly to isolate a session
+     *        from the application cache (tests, dedicated session backend).
+     */
+    public function __construct(?CacheInterface $cache = null)
+    {
+        $this->cache = $cache;
+    }
 
     /**
      * Get session cache TTL in seconds
@@ -89,8 +110,12 @@ class Session implements SessionInterface
      *
      * When enabled, session IDs not found in cache are rejected and
      * a new session is created. This prevents session fixation attacks.
+     *
+     * Protected so a subclass can source the policy from somewhere other than
+     * the process-global ini (`ini_set()` on session directives is refused once
+     * output has started, and ini is process-wide in worker/fiber runtimes).
      */
-    private function isStrictMode(): bool
+    protected function isStrictMode(): bool
     {
         return (bool) ini_get('session.use_strict_mode');
     }
@@ -100,7 +125,7 @@ class Session implements SessionInterface
      */
     private function getCache(): CacheInterface
     {
-        return Mini::$mini->get(CacheInterface::class);
+        return $this->cache ??= Mini::$mini->get(CacheInterface::class);
     }
 
     /**
@@ -185,8 +210,11 @@ class Session implements SessionInterface
 
     /**
      * Get cookies from current request
+     *
+     * Protected so a subclass can supply cookies from another source
+     * (tests, non-PSR-7 runtimes).
      */
-    private function getCookies(): array
+    protected function getCookies(): array
     {
         try {
             $request = Mini::$mini->get(ServerRequestInterface::class);
@@ -208,20 +236,69 @@ class Session implements SessionInterface
 
     /**
      * Save session data to cache
+     *
+     * A refused write is fatal: the data the caller just wrote does not exist
+     * anywhere, so continuing would leave a "logged in" user that is not logged
+     * in. Fail loudly instead.
+     *
+     * The in-memory copy is dropped before throwing. It describes a state that
+     * was never stored, and `ensureLoadedForRead()` trusts it for
+     * READ_CACHE_TTL — without this, a caller that catches the exception (or
+     * any later code in the same request) would read back the phantom write and
+     * could authorize on it. Discarding it forces the next read to reload from
+     * cache, which is the only state that actually exists.
+     *
+     * @throws \RuntimeException If the cache backend refuses the write
      */
     private function saveToCache(): void
     {
-        $this->getCache()->set($this->getCacheKey(), $this->sessionData, $this->getCacheTtl());
+        if ($this->getCache()->set($this->getCacheKey(), $this->sessionData, $this->getCacheTtl()) !== true) {
+            $this->sessionData = null;
+            $this->sessionDataUpdated = null;
+            throw new \RuntimeException(
+                'Session write failed: ' . get_class($this->getCache()) . '::set() refused key "'
+                . $this->getCacheKey() . '". Session data would have been lost silently.'
+            );
+        }
         $this->sessionDataUpdated = microtime(true);
     }
 
     /**
+     * Delete a session from cache
+     *
+     * PSR-16 does not distinguish "nothing to delete" from "delete refused":
+     * `apcu_delete()` — and therefore `mini\Cache\ApcuCache::delete()`, the
+     * driver Mini prefers by default — returns `false` for a key that is simply
+     * absent. Destroying a session that was never persisted, destroying twice
+     * (double logout), or regenerating an unwritten session are all normal, so
+     * a falsy return alone must not fail the request.
+     *
+     * The condition that actually matters is whether the data survived. Only
+     * then is the session still readable and the failure real.
+     *
+     * @throws \RuntimeException If the session data is still present after the delete
+     */
+    private function deleteFromCache(string $cacheKey): void
+    {
+        if ($this->getCache()->delete($cacheKey) !== true && $this->getCache()->has($cacheKey)) {
+            throw new \RuntimeException(
+                'Session delete failed: ' . get_class($this->getCache()) . '::delete() refused key "'
+                . $cacheKey . '". The session data is still readable.'
+            );
+        }
+    }
+
+    /**
      * Ensure data is loaded for read operations
-     * Uses in-memory cache if fresh (within READ_CACHE_TTL)
+     *
+     * Uses the in-memory copy only while it is both present and stamped fresh
+     * (within READ_CACHE_TTL). A missing stamp means the copy is not known to
+     * match the store — `destroy()` clears it deliberately — so it is reloaded
+     * rather than trusted.
      */
     private function ensureLoadedForRead(): void
     {
-        if ($this->sessionData !== null) {
+        if ($this->sessionData !== null && $this->sessionDataUpdated !== null) {
             $age = microtime(true) - $this->sessionDataUpdated;
             if ($age < self::READ_CACHE_TTL) {
                 return; // Use cached version
@@ -306,7 +383,7 @@ class Session implements SessionInterface
 
         // Delete old session if requested
         if ($deleteOldSession) {
-            $this->getCache()->delete($oldKey);
+            $this->deleteFromCache($oldKey);
         }
 
         return true;
@@ -333,7 +410,7 @@ class Session implements SessionInterface
         $this->sessionDataUpdated = null;
 
         // Delete from cache
-        $this->getCache()->delete($this->getCacheKey());
+        $this->deleteFromCache($this->getCacheKey());
 
         // Mark cookie for expiration (use same path as session cookie)
         $sessionName = session_name() ?: 'PHPSESSID';

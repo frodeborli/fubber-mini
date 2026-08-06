@@ -53,9 +53,22 @@ abstract class Test
         $env = getenv();
         $env['MINI_TEST_RUNNER'] = (string) $depth;
 
+        // Everything we have written so far must reach the OS before the child
+        // starts writing to the same descriptor, otherwise our output lands
+        // after the child's when stdout is a pipe or a file.
+        self::flushOutput();
+
+        // Descriptors 0/1/2 are deliberately NOT listed: the child inherits
+        // them untouched, which keeps stream_isatty() honest and keeps the
+        // shared file offset intact. Passing PHP's STDIN/STDOUT/STDERR stream
+        // resources here would make proc_open() restore each stream's tracked
+        // position with lseek(fd, pos, SEEK_SET) before forking — and under
+        // `2>&1` fd 2 shares its open file description with fd 1, so rewinding
+        // the never-written STDERR stream to 0 rewinds stdout as well and the
+        // child overwrites the output already on disk.
         $process = proc_open(
             ['php', '-d', 'zend.assertions=1', '-d', 'assert.exception=1', $path],
-            [STDIN, STDOUT, STDERR, 3 => ['pipe', 'w']],
+            [3 => ['pipe', 'w']],
             $pipes,
             null,
             $env
@@ -74,6 +87,21 @@ abstract class Test
         }
 
         return ['exitCode' => $exitCode, 'info' => $info];
+    }
+
+    /**
+     * Push pending output all the way to the OS.
+     *
+     * ob_flush() raises "no buffer to flush" when no userland output buffer is
+     * active, which is the normal case on CLI, so the level is checked first.
+     * Only pre-existing buffers are flushed — never one opened by test code.
+     */
+    private static function flushOutput(): void
+    {
+        if (ob_get_level() > 0) {
+            ob_flush();
+        }
+        flush();
     }
 
     private function getIndentString(): string
@@ -191,7 +219,7 @@ abstract class Test
                 echo "{$this->indent}" . str_pad($displayName, 50);
             }
         }
-        ob_flush();
+        self::flushOutput();
     }
 
     private function endTest(bool $success, ?\Throwable $error = null): void

@@ -257,6 +257,7 @@ The traditional argument against Active Record is persistence coupling. Mini sol
 ```php
 use mini\Database\Model;
 use mini\Database\Attributes\{Table, PrimaryKey};
+use mini\Validator\Attributes\{Required, Format};
 
 #[Table('users')]
 class User extends Model {

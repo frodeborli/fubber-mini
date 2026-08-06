@@ -1625,6 +1625,71 @@ CSV;
         $this->assertSame($expected, $result);
     }
 
+    public function testCteColumnList(): void
+    {
+        // Declared column list renames the CTE's output columns
+        $result = $this->query('WITH c(x) AS (SELECT 1 AS a) SELECT x FROM c;');
+        $expected = <<<'CSV'
+x
+1
+CSV;
+        $this->assertSame($expected, $result);
+    }
+
+    public function testCteColumnListMultipleColumns(): void
+    {
+        $result = $this->query('WITH c(x, y) AS (SELECT 1 AS a, 2 AS b) SELECT x, y FROM c;');
+        $expected = <<<'CSV'
+x,y
+1,2
+CSV;
+        $this->assertSame($expected, $result);
+    }
+
+    public function testCteColumnListCountMismatchThrows(): void
+    {
+        // Two names declared for a one-column query - fail fast, don't guess
+        $result = $this->query('WITH c(x, y) AS (SELECT 1 AS a) SELECT x FROM c;');
+        $this->assertStringContainsString('column count mismatch', strtolower($result));
+    }
+
+    public function testCteRecursiveWithColumnList(): void
+    {
+        // The canonical form from the SQLite/PostgreSQL manuals: the declared
+        // name `n` must be in scope for the recursive term's self-reference,
+        // even though the anchor (SELECT 1) produces no column named `n`.
+        $result = $this->query('WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 5) SELECT n FROM c;');
+        $expected = <<<'CSV'
+n
+1
+2
+3
+4
+5
+CSV;
+        $this->assertSame($expected, $result);
+    }
+
+    public function testCteRecursiveWithColumnListMultipleColumns(): void
+    {
+        // Fibonacci via a two-column recursive CTE with a declared column list
+        $result = $this->query('WITH RECURSIVE f(a, b) AS (SELECT 0, 1 UNION ALL SELECT b, a + b FROM f WHERE b < 50) SELECT a FROM f;');
+        $expected = <<<'CSV'
+a
+0
+1
+1
+2
+3
+5
+8
+13
+21
+34
+CSV;
+        $this->assertSame($expected, $result);
+    }
+
     // =========================================================================
     // Niladic Functions (SQL standard functions without parentheses)
     // =========================================================================

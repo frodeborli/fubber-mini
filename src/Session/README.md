@@ -69,9 +69,26 @@ $session->destroy();
 
 ## Session Storage
 
-Sessions are stored in Mini's cache backend (APCu, SQLite, or filesystem). Session data persists across requests and server restarts (when using SQLite or filesystem cache).
+Sessions are stored in Mini's cache backend (APCu, SQLite, or filesystem) under the key `session.<session-id>` — a dot, not a colon, because PSR-16 reserves `{}()/\@:` in cache keys. Session data persists across requests and server restarts (when using SQLite or filesystem cache).
 
 The default TTL is 180 minutes (3 hours), matching PHP's `session.cache_expire` setting. The TTL is refreshed on every write operation.
+
+### Writes fail loudly
+
+Every write reloads the session from cache, applies the change and stores it again. If the backend refuses the write (`CacheInterface::set()` returns `false`), `Session` throws a `RuntimeException` instead of continuing: the change exists nowhere, so a "logged in" user would not actually be logged in.
+
+The refused change is also dropped from memory before the exception is thrown. `Session` trusts its in-memory copy for 100 ms to avoid a cache lookup per read, so a rejected write left in place would be served back to the rest of the request — code that catches the `RuntimeException`, or that simply runs after a failed `$_SESSION['user_id'] = …`, would read a session that was never stored and could authorize on it. After a refused write, reads fall back to whatever the store actually holds.
+
+Deletes (`destroy()`, `regenerate(deleteOldSession: true)`) are judged by outcome, not by return value. PSR-16 does not separate "nothing to delete" from "delete refused" — `apcu_delete()`, and therefore `mini\Cache\ApcuCache`, returns `false` for a key that is merely absent — so a falsy return is only fatal when `has()` confirms the data survived. Destroying a session that was never persisted, logging out twice, or logging out after the store evicted the session are all no-ops, not errors. A delete that genuinely leaves session data readable still throws a `RuntimeException`.
+
+### Using a dedicated session store
+
+`Session` resolves `CacheInterface` from the container by default. Pass one explicitly to keep sessions off the shared application cache (or to isolate them in tests):
+
+```php
+// _config/mini/Session/SessionInterface.php
+return new mini\Session\Session(new mini\Cache\FilesystemCache('/var/lib/myapp/sessions'));
+```
 
 ---
 
@@ -146,6 +163,8 @@ session.use_strict_mode = 1
 ```
 
 This prevents session fixation attacks where an attacker tricks a user into using a predetermined session ID.
+
+`Session::isStrictMode()` and `Session::getCookies()` are `protected`: a subclass can source the policy or the request cookies from somewhere other than process-global ini and PSR-7 (worker runtimes, tests) without reimplementing the interface.
 
 ### Cache Limiter (Prevent CDN/Proxy Caching)
 

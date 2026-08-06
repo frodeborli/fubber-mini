@@ -169,8 +169,8 @@ class SqlLexer
             '(?<POS>\?)|' .                                       // positional placeholder
             '(?<NAM>:[a-zA-Z_]\w*)|' .                            // named placeholder
             '(?<ID>[a-zA-Z_]\w*)|' .                              // identifiers
-            '`(?<BT>[^`]*)`|' .                                   // backtick quoted
-            '"(?<DQ>[^"]*)"' .                                    // double quoted
+            '`(?<BT>[^`]*+(?:``[^`]*+)*+)`|' .                    // backtick quoted (`` escapes a backtick)
+            '"(?<DQ>[^"]*+(?:""[^"]*+)*+)"' .                     // double quoted (SQL:2003 "" escapes a quote)
             '|(?<OP>' . $opPattern . ')|' .                       // operators (sorted)
             '(?<ERR>[\s\S])' .                                    // catch-all for errors
         '~';
@@ -278,16 +278,16 @@ class SqlLexer
                 continue;
             }
 
-            // Backtick quoted
+            // Backtick quoted — a doubled backtick denotes a literal backtick
             if ($mBT[$i] !== null) {
-                $tokens[] = ['type' => self::T_IDENTIFIER, 'value' => $mBT[$i], 'pos' => $pos];
+                $tokens[] = ['type' => self::T_IDENTIFIER, 'value' => str_replace('``', '`', $mBT[$i]), 'pos' => $pos];
                 $pos += $len;
                 continue;
             }
 
-            // Double quoted
+            // Double quoted — SQL:2003 delimited identifier; "" denotes a literal quote
             if ($mDQ[$i] !== null) {
-                $tokens[] = ['type' => self::T_IDENTIFIER, 'value' => $mDQ[$i], 'pos' => $pos];
+                $tokens[] = ['type' => self::T_IDENTIFIER, 'value' => str_replace('""', '"', $mDQ[$i]), 'pos' => $pos];
                 $pos += $len;
                 continue;
             }

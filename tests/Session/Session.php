@@ -6,13 +6,14 @@
 require __DIR__ . '/../../ensure-autoloader.php';
 require __DIR__ . '/../assert.php';
 
-use mini\Mini;
+use mini\Cache\TmpSqliteCache;
 use mini\Session\Session;
-use mini\Session\SessionInterface;
-use Psr\SimpleCache\CacheInterface;
 
-// Clear any existing session data in cache
-Mini::$mini->get(CacheInterface::class)->clear();
+// Sessions are tested against a private in-memory store. Resolving the
+// application cache would make these tests depend on which driver the host
+// machine happens to pick (and, for the /tmp SQLite driver, on a file that may
+// be owned by another user) — session semantics must be verified deterministically.
+$cache = new TmpSqliteCache(':memory:');
 
 echo "Testing Session...\n";
 
@@ -21,7 +22,7 @@ echo "Testing Session...\n";
 // =============================================================================
 
 // Test: New session generates ID and sets cookie
-$session = new Session();
+$session = new Session($cache);
 $id = $session->getId();
 assert_true(strlen($id) === 64, 'Session ID should be 64 chars (hex of 32 bytes)');
 assert_true(ctype_xdigit($id), 'Session ID should be hexadecimal');
@@ -110,7 +111,7 @@ assert_eq(1, $cookie['options']['expires'], 'Expiration cookie should expire in 
 echo "  ✓ Session destroy sets expiration cookie\n";
 
 // Test: isStarted
-$freshSession = new Session();
+$freshSession = new Session($cache);
 assert_false($freshSession->isStarted(), 'Fresh session should not be started');
 $freshSession->get('anything');
 assert_true($freshSession->isStarted(), 'Session should be started after access');
@@ -118,7 +119,7 @@ echo "  ✓ isStarted works\n";
 
 // Test: Session TTL uses session_cache_expire()
 $expectedTtl = session_cache_expire() * 60;
-$session2 = new Session();
+$session2 = new Session($cache);
 $session2->getId(); // Trigger cookie creation
 $cookie = $session2->getCookieToSet();
 $actualExpires = $cookie['options']['expires'];
@@ -131,7 +132,7 @@ echo "  ✓ Session TTL uses session_cache_expire()\n";
 // Test: Session ID validation (valid formats)
 $ref = new ReflectionMethod(Session::class, 'isValidSessionId');
 $ref->setAccessible(true);
-$testSession = new Session();
+$testSession = new Session($cache);
 
 assert_true($ref->invoke($testSession, 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd1234'), 'Valid 64-char hex should pass');
 assert_true($ref->invoke($testSession, 'ABCDEF1234567890abcdef'), 'Mixed case alphanumeric should pass');

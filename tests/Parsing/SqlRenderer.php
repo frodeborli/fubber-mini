@@ -149,6 +149,66 @@ $test = new class extends Test {
             "Renderer wrapped the IN-subquery's UNION chain in an extra paren:\n  $rendered",
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Delimited identifiers (SQL:2003): "" inside "…" is one quote char
+    // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * parse → render → parse must be stable, and the rendered SQL must
+     * re-escape embedded quote characters or the identifier silently
+     * changes meaning (or the SQL stops parsing at all).
+     */
+    public function testDelimitedIdentifiersRoundTrip(): void
+    {
+        // Real tables so SQLite resolves the identifiers rather than
+        // merely tolerating them.
+        $this->sqlite->exec('CREATE TABLE "we""ird" ("col""name" TEXT, """" TEXT, "a""b" TEXT, "c""d" INTEGER)');
+        $this->sqlite->exec('CREATE TABLE "artist list" ("first name" TEXT)');
+
+        $cases = [
+            'SELECT "col""name" FROM "we""ird"',
+            'SELECT """" FROM "we""ird"',                                // identifier is a single "
+            'SELECT "a""b" AS "x""y" FROM "we""ird" WHERE "c""d" = 1',
+            'SELECT "first name" FROM "artist list"',
+        ];
+
+        foreach ($cases as $sql) {
+            $once  = $this->render($sql);
+            $twice = $this->render($once);
+            $this->assertEquals($once, $twice, "Round trip not stable for: $sql");
+            $this->assertSqliteAccepts($once);
+        }
+    }
+
+    /** Aliases containing a quote must be re-quoted, not emitted bare. */
+    public function testQuotedAliasSurvivesRendering(): void
+    {
+        $rendered = $this->render('SELECT name AS "odd""alias" FROM artists');
+        $this->assertTrue(
+            str_contains($rendered, 'AS "odd""alias"'),
+            "Alias lost its quoting:\n  $rendered",
+        );
+        $this->assertSqliteAccepts($rendered);
+    }
+
+    /** MySQL doubles backticks; the lexer must read them back as one. */
+    public function testBacktickEscapeRoundTrips(): void
+    {
+        $ast = $this->parser->parse('SELECT `col``name` FROM artists');
+        $this->assertEquals(['col`name'], $ast->columns[0]->expression->parts);
+
+        $mysql = SqlRenderer::forDialect(SqlDialect::MySQL);
+        $out = $mysql->render($ast);
+        $this->assertTrue(
+            str_contains($out, '`col``name`'),
+            "MySQL renderer did not re-escape the backtick:\n  $out",
+        );
+        $this->assertEquals(
+            ['col`name'],
+            $this->parser->parse($out)->columns[0]->expression->parts,
+        );
+    }
 };
 
 exit($test->run());

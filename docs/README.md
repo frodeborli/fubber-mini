@@ -10,7 +10,6 @@ The primary documentation lives at the project root:
 - **[REFERENCE.md](../REFERENCE.md)** — Complete API reference and function catalogue
 - **[PATTERNS.md](../PATTERNS.md)** — Common patterns (service overrides, hooks, output buffering)
 - **[DESIGN-PRINCIPLES.md](../DESIGN-PRINCIPLES.md)** — The principles that shape Mini's design decisions
-- **[WRITING-DOCUMENTATION.md](../WRITING-DOCUMENTATION.md)** — Documentation standards and conventions
 - **[CHANGE-LOG.md](../CHANGE-LOG.md)** — Notable changes per version
 
 ## Deeper Discussions
@@ -85,6 +84,13 @@ Each module has its own `README.md` in its source directory. These are the autho
 - **[src/Contracts/README.md](../src/Contracts/README.md)** — Cross-module interfaces
 - **[src/Exceptions/README.md](../src/Exceptions/README.md)** — Exception hierarchy
 
+### Integration seams
+
+Interface-only modules. Mini defines the contract; the implementation is configured per application.
+
+- **[src/Async/README.md](../src/Async/README.md)** — Event loop seam (`AsyncInterface`, `async()`) for Fiber-based runtimes
+- **[src/Inference/README.md](../src/Inference/README.md)** — LLM seam (`InferenceServiceInterface`, `inference()`) for schema-constrained evaluation
+
 ## Internal Notes
 
 The `notes/` directory contains internal design documents, performance analysis, and brainstorming sessions. These are preserved for historical reference but are **not** official framework documentation — they may contain outdated terminology or rejected approaches.
@@ -101,4 +107,12 @@ Mini's documentation focuses on:
 
 ## Contributing Documentation
 
-See [WRITING-DOCUMENTATION.md](../WRITING-DOCUMENTATION.md) for documentation standards, structure, and best practices.
+The conventions are the five points above, plus:
+
+- **Documentation lives next to the code it describes.** A new module gets `src/<Module>/README.md`; link it from the module list here and from the catalogue in the [main README](../README.md).
+- **Open with the module's role in a forkable core** — what it is, and what it deliberately leaves to the layer above.
+- **Every example must be copy-pasteable**: real imports, real symbol names, verified against source. Prefer a short working example over prose.
+- **Docblocks are the API reference.** `vendor/bin/mini docs` renders them, so document classes and functions at the source, not only in Markdown.
+- **`notes/` is not documentation.** Design explorations go there and are exempt from these rules.
+
+See [MINI-STYLE.md](../MINI-STYLE.md) for code style and framework idioms.

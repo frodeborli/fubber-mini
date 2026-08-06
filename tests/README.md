@@ -151,6 +151,42 @@ For full isolation between test scenarios, use separate test files.
 - Each test file runs in a separate PHP process
 - Output to stdout is captured; output to stderr appears on failure
 
+## No Network in the Default Suite
+
+`mini test` must be deterministic and must pass **offline**. No test may contact
+the public internet — not for fixtures, not for "just a quick ping".
+
+When a test needs a real socket (the PSR-18 `HttpClient`, for example), start a
+local fixture server on a free loopback port instead:
+
+- Put the server script next to the test with a leading `_` (e.g.
+  `tests/Http/Client/_fixture-server.php`) so the runner skips it.
+- Spawn it with `proc_open([PHP_BINARY, '-S', "127.0.0.1:$port", …])`, where
+  `$port` comes from binding `tcp://127.0.0.1:0` and reading back the assigned
+  port.
+- Poll a real readiness endpoint — `GET /ping` must answer `200` with the body
+  `pong` — not a bare `fsockopen()` connect. Accepting a connection only proves
+  that `php -S` is listening; it says nothing about the fixture script, so a
+  broken fixture would pass a connect probe and then surface as a pile of
+  unrelated assertion failures instead of one clear startup error.
+- Give the child `['file', …]` descriptors, never pipes you don't read: point
+  stderr at a temp file and append it to the startup failure message, so the
+  fixture's own PHP errors reach the developer. An unread pipe both discards
+  that diagnostic and can fill its 64 KiB buffer and stall the server.
+- Tear it down from a `register_shutdown_function()` handler, so the server dies
+  even when a test fails or the process aborts with a fatal error.
+
+`tests/Http/Client/HttpClient.php` is the reference implementation of this
+pattern. Unreachable-host behaviour (connection refused, timeouts) is tested
+against a closed loopback port and a slow fixture route — never against a
+domain name, which would require DNS.
+
+If an external service genuinely cannot be replaced by a fixture, the test must
+skip cleanly rather than fail: override `canRun()` / `skipReason()` from
+`mini\Test`, so the run reports it as skipped and self-documents *why*. Any env
+flag that gates such a test must be documented here. **There are currently no
+such flags — the entire suite runs offline with no configuration.**
+
 ## Example Test Structure
 
 ```
