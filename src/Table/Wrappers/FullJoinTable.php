@@ -7,6 +7,7 @@ use mini\Table\ColumnDef;
 use mini\Table\Contracts\SetInterface;
 use mini\Table\Contracts\TableInterface;
 use mini\Table\OrderDef;
+use mini\Table\Types\IndexType;
 use mini\Table\Predicate;
 use Traversable;
 
@@ -82,10 +83,10 @@ class FullJoinTable extends AbstractTable
         // Merge column definitions
         $merged = [];
         foreach ($leftCols as $name => $def) {
-            $merged[] = new ColumnDef($name, $def->type, $def->index);
+            $merged[] = new ColumnDef($name, $def->type, $def->index->isUnique() ? IndexType::Index : $def->index);
         }
         foreach ($rightCols as $name => $def) {
-            $merged[] = new ColumnDef($name, $def->type, $def->index);
+            $merged[] = new ColumnDef($name, $def->type, $def->index->isUnique() ? IndexType::Index : $def->index);
         }
 
         parent::__construct(...$merged);

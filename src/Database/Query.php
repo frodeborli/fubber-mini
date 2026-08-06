@@ -3,8 +3,6 @@
 namespace mini\Database;
 
 use Closure;
-use IteratorAggregate;
-use Countable;
 use Traversable;
 use mini\Table\Predicate;
 
@@ -32,7 +30,7 @@ use mini\Table\Predicate;
  * db()->delete($query->eq('spam', true));
  * ```
  */
-final class Query implements IteratorAggregate, Countable
+final class Query implements ResultSetInterface
 {
     /**
      * @param PartialQuery $pq The underlying query
@@ -129,6 +127,22 @@ final class Query implements IteratorAggregate, Countable
         return ($this->wrap)($this->pq->distinct());
     }
 
+    /**
+     * Replace the SELECT column list
+     */
+    public function select(string $selectPart): static
+    {
+        return ($this->wrap)($this->pq->select($selectPart));
+    }
+
+    /**
+     * Add a Common Table Expression (WITH clause)
+     */
+    public function withCTE(string $name, Query $query): static
+    {
+        return ($this->wrap)($this->pq->withCTE($name, $query->pq));
+    }
+
     // =========================================================================
     // Fetching
     // =========================================================================
@@ -172,6 +186,14 @@ final class Query implements IteratorAggregate, Countable
     }
 
     /**
+     * Get first column of first row
+     */
+    public function field(): mixed
+    {
+        return $this->pq->field();
+    }
+
+    /**
      * Check if any rows exist
      */
     public function exists(): bool
@@ -201,6 +223,11 @@ final class Query implements IteratorAggregate, Countable
         return $this->pq->count();
     }
 
+    public function jsonSerialize(): array
+    {
+        return $this->pq->jsonSerialize();
+    }
+
     // =========================================================================
     // Hydration
     // =========================================================================
@@ -208,9 +235,9 @@ final class Query implements IteratorAggregate, Countable
     /**
      * Hydrate results into entity instances
      */
-    public function withEntityClass(string $class, array $constructorArgs = []): static
+    public function withEntityClass(string $class, array|false $constructorArgs = false): static
     {
-        return ($this->wrap)($this->pq->withEntityClass($class, $constructorArgs ?: false));
+        return ($this->wrap)($this->pq->withEntityClass($class, $constructorArgs));
     }
 
     /**

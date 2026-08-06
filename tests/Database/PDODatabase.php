@@ -10,7 +10,7 @@ require __DIR__ . '/../../ensure-autoloader.php';
 use mini\Test;
 use mini\Database\PDODatabase;
 use mini\Database\ResultSetInterface;
-use mini\Database\PartialQuery;
+use mini\Database\Query;
 
 $test = new class extends Test {
 
@@ -38,10 +38,10 @@ $test = new class extends Test {
         $this->assertInstanceOf(ResultSetInterface::class, $result);
     }
 
-    public function testQueryReturnsPartialQuery(): void
+    public function testQueryReturnsQuery(): void
     {
         $result = \mini\db()->query('SELECT * FROM test_db');
-        $this->assertInstanceOf(PartialQuery::class, $result);
+        $this->assertInstanceOf(Query::class, $result);
     }
 
     public function testQueryIteratesRows(): void

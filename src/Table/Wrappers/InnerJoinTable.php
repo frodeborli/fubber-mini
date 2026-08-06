@@ -78,10 +78,10 @@ class InnerJoinTable extends AbstractTable
         // Merge column definitions
         $merged = [];
         foreach ($leftCols as $name => $def) {
-            $merged[] = new ColumnDef($name, $def->type, $def->index);
+            $merged[] = new ColumnDef($name, $def->type, $def->index->isUnique() ? IndexType::Index : $def->index);
         }
         foreach ($rightCols as $name => $def) {
-            $merged[] = new ColumnDef($name, $def->type, $def->index);
+            $merged[] = new ColumnDef($name, $def->type, $def->index->isUnique() ? IndexType::Index : $def->index);
         }
 
         parent::__construct(...$merged);

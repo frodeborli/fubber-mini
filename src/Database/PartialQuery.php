@@ -134,23 +134,21 @@ final class PartialQuery implements ResultSetInterface, MutableTableInterface
             return;
         }
 
-        // Use cached parsing - returns shared AST if cached
-        $wasCached = false;
-        $this->ast = SqlParser::parseCached($this->baseSql, $wasCached);
+        // Use cached parsing. parseCached() retains a reference to the AST in
+        // its static cache even on a fresh parse, so the AST returned here is
+        // ALWAYS shared - treating a fresh parse as private would let the
+        // first mutation poison the cache for every later query with the
+        // same SQL string in this process.
+        $this->ast = SqlParser::parseCached($this->baseSql);
 
-        // If we have params to bind, we'll mutate - must clone if shared
         if (!empty($this->originalParams)) {
-            if ($wasCached) {
-                $this->ast = $this->ast->deepClone();
-                $this->astIsPrivate = true;
-            } else {
-                $this->astIsPrivate = true;
-            }
+            // Binding params mutates the AST - clone first
+            $this->ast = $this->ast->deepClone();
+            $this->astIsPrivate = true;
             $paramsCopy = $this->originalParams;
             $this->bindParamsToAST($this->ast, $paramsCopy);
         } else {
-            // No params - AST is shared if from cache, private if fresh
-            $this->astIsPrivate = !$wasCached;
+            $this->astIsPrivate = false;
         }
 
         // Defensive: null out original data now that AST is source of truth

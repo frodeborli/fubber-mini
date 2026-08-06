@@ -108,16 +108,15 @@ $test = new class extends Test {
 
     private function createArrayUsers(): ArrayTable
     {
-        return new ArrayTable(
-            [
-                ['id' => 11, 'name' => 'Kate', 'age' => 24, 'source' => 'array'],
-                ['id' => 12, 'name' => 'Leo', 'age' => 36, 'source' => 'array'],
-            ],
+        $table = new ArrayTable(
             new ColumnDef('id', ColumnType::Int, IndexType::Primary),
             new ColumnDef('name', ColumnType::Text),
             new ColumnDef('age', ColumnType::Int),
             new ColumnDef('source', ColumnType::Text),
         );
+        $table->insert(['id' => 11, 'name' => 'Kate', 'age' => 24, 'source' => 'array']);
+        $table->insert(['id' => 12, 'name' => 'Leo', 'age' => 36, 'source' => 'array']);
+        return $table;
     }
 
     // =========================================================================
@@ -620,11 +619,11 @@ $test = new class extends Test {
     public function testWithTablesPreservesCustomAggregates(): void
     {
         $vdb1 = new VirtualDatabase();
-        $vdb1->registerTable('numbers', new ArrayTable([
-            (object)['value' => 1],
-            (object)['value' => 2],
-            (object)['value' => 3],
-        ]));
+        $numbers = new ArrayTable(new ColumnDef('value', ColumnType::Int));
+        $numbers->insert(['value' => 1]);
+        $numbers->insert(['value' => 2]);
+        $numbers->insert(['value' => 3]);
+        $vdb1->registerTable('numbers', $numbers);
 
         // Register a custom aggregate
         $vdb1->createAggregate(
@@ -639,7 +638,9 @@ $test = new class extends Test {
         );
 
         // Create new VDB with extra table
-        $vdb2 = $vdb1->withTables(['extra' => new ArrayTable([(object)['x' => 1]])]);
+        $extra = new ArrayTable(new ColumnDef('x', ColumnType::Int));
+        $extra->insert(['x' => 1]);
+        $vdb2 = $vdb1->withTables(['extra' => $extra]);
 
         // Custom aggregate should work in new VDB
         $result = iterator_to_array($vdb2->query('SELECT custom_sum(value) as total FROM numbers'));

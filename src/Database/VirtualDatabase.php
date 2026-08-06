@@ -2773,8 +2773,10 @@ class VirtualDatabase implements DatabaseInterface
             $this->collectTableReferences($node->expression, $knownTables, $tables);
         } elseif ($node instanceof InOperation) {
             $this->collectTableReferences($node->left, $knownTables, $tables);
-            foreach ($node->values as $val) {
-                $this->collectTableReferences($val, $knownTables, $tables);
+            if (!$node->isSubquery()) {
+                foreach ($node->values as $val) {
+                    $this->collectTableReferences($val, $knownTables, $tables);
+                }
             }
         } elseif ($node instanceof BetweenOperation) {
             $this->collectTableReferences($node->expression, $knownTables, $tables);

@@ -85,6 +85,11 @@ class AttributeMetadataFactory
      */
     private function getPropertyRefClass(ReflectionProperty $property): ?string
     {
+        // Ref attribute overrides the type hint
+        foreach ($property->getAttributes(Attributes\Ref::class) as $attribute) {
+            return $attribute->newInstance()->class;
+        }
+
         // Check type hint for class reference
         $type = $property->getType();
         if (!$type instanceof \ReflectionNamedType || $type->isBuiltin()) {
@@ -254,6 +259,12 @@ class AttributeMetadataFactory
             $attrName = $attribute->getName();
 
             if (str_starts_with($attrName, 'mini\\Metadata\\Attributes\\')) {
+                // Ref is a class reference, not property metadata — it is consumed
+                // by getPropertyRefClass() and must not shadow its own ref target.
+                if ($attrName === Attributes\Ref::class) {
+                    continue;
+                }
+
                 $hasMetadata = true;
                 $instance = $attribute->newInstance();
                 $metadata = $this->applyAttribute($metadata, $instance, $sourceFile);

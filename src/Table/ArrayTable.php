@@ -74,6 +74,11 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
     {
         $rowId = $this->nextRowId++;
 
+        // Apply column type affinity (matches InMemoryTable's SQLite backend)
+        foreach ($row as $col => $value) {
+            $row[$col] = $this->coerceValue($col, $value);
+        }
+
         // Update indexes (TreapIndex uses string keys - pack numeric types for proper ordering)
         foreach ($this->indexes as $col => $index) {
             if (isset($row[$col])) {
@@ -89,6 +94,11 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
     public function update(TableInterface $query, array $changes): int
     {
         $this->validateQuery($query);
+
+        // Apply column type affinity (matches InMemoryTable's SQLite backend)
+        foreach ($changes as $col => $value) {
+            $changes[$col] = $this->coerceValue($col, $value);
+        }
 
         $affected = 0;
         foreach ($query as $rowId => $_) {
@@ -151,6 +161,28 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
                 'Query must be derived from the same table instance'
             );
         }
+    }
+
+    /**
+     * Coerce a value based on column type affinity.
+     *
+     * Mirrors the SQLite type affinity behavior that InMemoryTable gets for
+     * free from its SQLite backend: numbers stored in TEXT columns become
+     * strings. Columns declared without a data type default to TEXT.
+     */
+    private function coerceValue(string $column, mixed $value): mixed
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $type = ($this->getColumns()[$column] ?? null)?->type;
+
+        if ($type === ColumnType::Text && (is_int($value) || is_float($value))) {
+            return (string) $value;
+        }
+
+        return $value;
     }
 
     /**

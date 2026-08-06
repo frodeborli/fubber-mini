@@ -251,7 +251,8 @@ class ExpressionEvaluator
             '+' => $left + $right,
             '-' => $left - $right,
             '*' => $left * $right,
-            '/' => $right != 0 ? (is_int($left) && is_int($right) ? intdiv($left, $right) : $left / $right) : null,
+            // PHP semantics: int/int yields int when exact, float otherwise
+            '/' => $right != 0 ? $left / $right : null,
             '%' => $right != 0 ? $left % $right : null,
 
             // String concatenation (|| in standard SQL)

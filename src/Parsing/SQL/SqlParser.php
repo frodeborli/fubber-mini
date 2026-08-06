@@ -958,6 +958,13 @@ class SqlParser
             return new AST\NiladicFunctionNode('CURRENT_TIMESTAMP');
         }
 
+        // REPLACE is a statement keyword (REPLACE INTO ...) but also a built-in
+        // function; in expression position REPLACE( is always the function call.
+        if ($token['type'] === SqlLexer::T_REPLACE && $this->peek()['type'] === SqlLexer::T_LPAREN) {
+            $this->tokens[$this->pos]['type'] = SqlLexer::T_IDENTIFIER;
+            return $this->parseFunctionCall();
+        }
+
         // Handle Identifiers, Qualified Names (table.column), and Function Calls
         if ($token['type'] === SqlLexer::T_IDENTIFIER) {
             $next = $this->peek();

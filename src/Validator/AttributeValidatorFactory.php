@@ -182,65 +182,69 @@ class AttributeValidatorFactory
      */
     private function buildPropertyValidator(ReflectionProperty $property, Purpose|string|null $purpose): ?Validator
     {
-        $validator = new Validator();
-        $hasValidation = false;
+        // Collect validation attributes matching the requested purpose.
+        // Ref has no purpose parameter and counts as a core (purpose-less) attribute.
+        $ref = null;
+        $matching = [];
 
-        // Infer type from PHP type hint (explicit #[Type] attribute overrides)
-        $phpType = $property->getType();
-        if ($phpType instanceof \ReflectionNamedType && $phpType->isBuiltin() && !$phpType->allowsNull()) {
-            $jsonSchemaType = match ($phpType->getName()) {
-                'bool' => 'boolean',
-                'int' => 'integer',
-                'float' => 'number',
-                'string' => 'string',
-                'array' => 'array',
-                default => null,
-            };
-            if ($jsonSchemaType !== null) {
-                $validator = $validator->type($jsonSchemaType);
-                $hasValidation = true;
-            }
-        }
-
-        $attributes = $property->getAttributes();
-
-        // Check for Ref attribute first
-        foreach ($attributes as $attribute) {
-            if ($attribute->getName() === Attributes\Ref::class) {
-                $ref = $attribute->newInstance();
-                $refValidator = \mini\validator($ref->class)->{$ref->property};
-                if ($refValidator !== null) {
-                    $validator = $refValidator;
-                    $hasValidation = true;
-                }
-                break;
-            }
-        }
-
-        // Apply additional validation attributes on top
-        foreach ($attributes as $attribute) {
+        foreach ($property->getAttributes() as $attribute) {
             if (!str_starts_with($attribute->getName(), 'mini\\Validator\\Attributes\\')) {
                 continue;
             }
 
-            // Skip Ref itself
             if ($attribute->getName() === Attributes\Ref::class) {
+                if ($ref === null && $this->purposeMatches(null, $purpose)) {
+                    $ref = $attribute->newInstance();
+                }
                 continue;
             }
 
             $instance = $attribute->newInstance();
 
             // Filter by purpose
-            $attrPurpose = $instance->purpose ?? null;
-            if (!$this->purposeMatches($attrPurpose, $purpose)) {
+            if (!$this->purposeMatches($instance->purpose ?? null, $purpose)) {
                 continue;
             }
 
-            $hasValidation = true;
+            $matching[] = $instance;
+        }
+
+        $refValidator = $ref !== null ? \mini\validator($ref->class)->{$ref->property} : null;
+
+        // A property is only part of this validator when at least one attribute
+        // matches the requested purpose; the PHP type hint alone never opts it in.
+        if ($refValidator === null && $matching === []) {
+            return null;
+        }
+
+        if ($refValidator !== null) {
+            $validator = $refValidator;
+        } else {
+            $validator = new Validator();
+
+            // Infer type from PHP type hint (explicit #[Type] attribute overrides)
+            $phpType = $property->getType();
+            if ($phpType instanceof \ReflectionNamedType && $phpType->isBuiltin() && !$phpType->allowsNull()) {
+                $jsonSchemaType = match ($phpType->getName()) {
+                    'bool' => 'boolean',
+                    'int' => 'integer',
+                    'float' => 'number',
+                    'string' => 'string',
+                    'array' => 'array',
+                    default => null,
+                };
+                if ($jsonSchemaType !== null) {
+                    $validator = $validator->type($jsonSchemaType);
+                }
+            }
+        }
+
+        // Apply matching validation attributes on top
+        foreach ($matching as $instance) {
             $validator = $this->applyAttribute($validator, $instance);
         }
 
-        return $hasValidation ? $validator : null;
+        return $validator;
     }
 
     /**
