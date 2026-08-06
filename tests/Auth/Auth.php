@@ -10,6 +10,7 @@ use mini\Mini;
 use mini\Auth\Auth;
 use mini\Auth\AuthInterface;
 use mini\Exceptions\AccessDeniedException;
+use mini\Exceptions\AuthenticationRequiredException;
 
 // Mock implementation for testing
 class MockAuth implements AuthInterface
@@ -77,7 +78,7 @@ $test = new class extends Test {
         $this->mock->authenticated = false;
         $this->assertThrows(
             fn() => $this->auth->requireLogin(),
-            AccessDeniedException::class
+            AuthenticationRequiredException::class
         );
     }
 

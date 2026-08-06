@@ -1,5 +1,7 @@
 # Validator - JSON Schema Validation
 
+Validation expressed in the JSON Schema vocabulary — a Lindy standard a forkable core can export to any client — instead of a framework-specific rule language.
+
 ## Philosophy
 
 Mini provides **composable, type-safe validation** with JSON Schema-compatible rules. Build validation rules with a fluent API, export them as JSON Schema for client-side validation, and customize error messages for perfect UX.
@@ -259,6 +261,19 @@ $validator = validator(User::class);
 
 // Subsequent calls: returns cached validator
 $validator = validator(User::class);
+```
+
+### Purpose-Scoped Validators
+
+A class can have purpose-specific validators in addition to its core validator — e.g. stricter rules on create, relaxed on update:
+
+```php
+use mini\Validator\Purpose;
+
+$v = validator(User::class);                    // Core validator
+$v = validator(User::class, Purpose::Create);   // Create-specific
+$v = validator(User::class, Purpose::Update);   // Update-specific
+$v = validator(User::class, 'password-reset');  // Custom purpose (string)
 ```
 
 Manual registration for custom validators:

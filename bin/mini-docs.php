@@ -30,27 +30,38 @@
 require __DIR__ . '/../ensure-autoloader.php';
 $composerDir = $MINI_COMPOSER_DIR;
 
-// Parse command-line arguments using ArgManager
-$root = \mini\args();
-$docsCmd = $root->nextCommand(); // Skip 'mini' to get 'docs'
-$command = $docsCmd->getCommand() ?? '';
+use mini\CLI\ArgManager;
 
-if (empty($command) || $command === '--help' || $command === '-h') {
+// Parse command-line arguments using ArgManager
+$relationshipCommands = ['implements', 'extends', 'uses', 'accepts', 'returns', 'compatible', 'attributes'];
+
+$root = ArgManager::parse($argv)
+    ->withFlag('h', 'help')
+    ->withSubcommand('search', ...$relationshipCommands);
+
+if ($root->getFlag('help')) {
     showHelp();
     exit(0);
 }
 
-// Check for relationship/type-based commands
-$relationshipCommands = ['implements', 'extends', 'uses', 'accepts', 'returns', 'compatible', 'attributes'];
-if (in_array($command, $relationshipCommands, true)) {
-    $nextCmd = $docsCmd->nextCommand();
-    if (!$nextCmd) {
+$sub = $root->nextCommand();
+$command = $sub?->getCommand();
+
+if ($command === null) {
+    $unparsed = $root->getUnparsedArgs();
+    if (!$unparsed) {
+        showHelp();
+        exit(0);
+    }
+    // Regular target lookup (class, namespace, function, member) — handled below.
+} elseif (in_array($command, $relationshipCommands, true)) {
+    // Relationship/type-based commands
+    $targetType = $sub->getUnparsedArgs()[0] ?? null;
+    if ($targetType === null) {
         fwrite(STDERR, "Error: Type/class name required\n");
         fwrite(STDERR, "Usage: mini docs {$command} <type>\n");
         exit(1);
     }
-
-    $targetType = $nextCmd->getCommand();
 
     switch ($command) {
         case 'implements':
@@ -76,12 +87,11 @@ if (in_array($command, $relationshipCommands, true)) {
             break;
     }
     exit(0);
-}
-
-// Check if this is a search command
-if ($command === 'search') {
-    $searchCmd = $docsCmd->nextCommand();
-    if (!$searchCmd) {
+} else {
+    // Search command
+    $searchCmd = $sub->withFlag('i', 'ignore-case');
+    $pattern = $searchCmd->getUnparsedArgs()[0] ?? null;
+    if ($pattern === null) {
         fwrite(STDERR, "Error: Search pattern required\n");
         fwrite(STDERR, "Usage: mini docs search [-i] <pattern>\n");
         fwrite(STDERR, "Options:\n");
@@ -93,16 +103,12 @@ if ($command === 'search') {
         exit(1);
     }
 
-    $searchCmd = $searchCmd->withSupportedArgs('i', ['ignore-case'], 1);
-    $caseInsensitive = isset($searchCmd->opts['i']) || isset($searchCmd->opts['ignore-case']);
-    $pattern = $searchCmd->args[0];
-
-    searchEntities($pattern, $caseInsensitive);
+    searchEntities($pattern, $searchCmd->getFlag('ignore-case') > 0);
     exit(0);
 }
 
 // Regular target lookup
-$target = $command;
+$target = $unparsed[0];
 
 // Normalize the target (handle different input formats)
 $target = ltrim($target, '\\');
@@ -544,8 +550,12 @@ function checkCompatibility(string $interface): void {
 
     $interface = ltrim($interface, '\\');
 
-    if (!interface_exists($interface) && !class_exists($interface)) {
-        fwrite(STDERR, "Error: Interface or class '{$interface}' not found\n");
+    if (!interface_exists($interface)) {
+        if (class_exists($interface)) {
+            fwrite(STDERR, "Error: '{$interface}' is a class, not an interface — 'compatible' checks interfaces\n");
+        } else {
+            fwrite(STDERR, "Error: Interface '{$interface}' not found\n");
+        }
         exit(1);
     }
 
@@ -1090,13 +1100,13 @@ Search Examples (case-sensitive by default):
   mini docs search '/^class mini/'                      # Regex: classes in mini namespace
 
 Relationship Queries:
-  mini docs implements CacheInterface                   # All classes implementing interface
-  mini docs extends Repository                          # All subclasses of Repository
-  mini docs uses ObjectHydrationTrait                   # All classes using trait
+  mini docs implements "Psr\\SimpleCache\\CacheInterface" # All classes implementing interface
+  mini docs extends "mini\\Http\\Message\\Response"     # All subclasses of Response
+  mini docs uses "mini\\Http\\Message\\UriTrait"        # All classes using trait
   mini docs accepts DatabaseInterface                   # Methods accepting DatabaseInterface
   mini docs returns Collection                          # Methods returning Collection
-  mini docs compatible Psr\\Log\\LoggerInterface        # Show required methods + implementations
-  mini docs attributes Column                           # Find all #[Column] attribute uses
+  mini docs compatible "Psr\\Log\\LoggerInterface"      # Show required methods + implementations
+  mini docs attributes "mini\\Database\\Attributes\\Table" # Find all #[Table] attribute uses
 
 Note: Use quotes or double backslashes to escape namespace separators:
   mini docs "mini\\SomeClass"  or  mini docs mini\\\\SomeClass

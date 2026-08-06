@@ -1,6 +1,6 @@
 <?php
 /**
- * PartialQuery Hydrator Examples
+ * Query Hydrator Examples
  *
  * Demonstrates returning typed objects instead of associative arrays.
  */
@@ -29,116 +29,9 @@ $pdo->exec("INSERT INTO users (name, email, age, created_at) VALUES
 ");
 
 // Create database instance
-$db = new class($pdo) implements mini\Database\DatabaseInterface {
-    use mini\Database\PartialQueryableTrait;
+$db = new mini\Database\PDODatabase($pdo);
 
-    private PDO $pdo;
-
-    public function __construct(PDO $pdo) { $this->pdo = $pdo; }
-
-    public function query(string $sql, array $params = []): iterable {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        while ($row = $stmt->fetch()) { yield $row; }
-    }
-
-    public function queryOne(string $sql, array $params = []): ?array {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetch() ?: null;
-    }
-
-    public function queryField(string $sql, array $params = []): mixed {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetchColumn();
-    }
-
-
-    public function queryColumn(string $sql, array $params = []): array {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetchAll(PDO::FETCH_COLUMN);
-    }
-
-    public function exec(string $sql, array $params = []): int {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->rowCount();
-    }
-
-    public function lastInsertId(): ?string {
-        return $this->pdo->lastInsertId();
-    }
-
-    public function tableExists(string $tableName): bool {
-        return true;
-    }
-
-    public function transaction(\Closure $task): mixed {
-        return $task($this);
-    }
-
-    public function quote(mixed $value): string {
-        if ($value === null) return 'NULL';
-        if (is_int($value)) return $this->pdo->quote($value, PDO::PARAM_INT);
-        if (is_bool($value)) return $this->pdo->quote($value, PDO::PARAM_BOOL);
-        return $this->pdo->quote($value, PDO::PARAM_STR);
-    }
-    public function getDialect(): mini\Database\SqlDialect { return mini\Database\SqlDialect::Sqlite; }
-
-    public function delete(mini\Database\PartialQuery $query): int {
-        $where = $query->getWhere();
-        if (empty($where['sql'])) {
-            throw new \InvalidArgumentException("DELETE requires WHERE clause");
-        }
-        $sql = "DELETE FROM {$query->getTable()} WHERE {$where['sql']} LIMIT {$query->getLimit()}";
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($where['params']);
-        return $stmt->rowCount();
-    }
-
-    public function update(mini\Database\PartialQuery $query, string|array $set): int {
-        $where = $query->getWhere();
-
-        if (is_string($set)) {
-            $sql = "UPDATE {$query->getTable()} SET {$set}";
-            $params = $where['params'];
-        } else {
-            $setParts = [];
-            $setParams = [];
-            foreach ($set as $column => $value) {
-                $setParts[] = "$column = ?";
-                $setParams[] = $value;
-            }
-            $sql = "UPDATE {$query->getTable()} SET " . implode(', ', $setParts);
-            $params = array_merge($setParams, $where['params']);
-        }
-
-        if ($where['sql']) $sql .= " WHERE {$where['sql']}";
-        $sql .= " LIMIT {$query->getLimit()}";
-
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->rowCount();
-    }
-
-    public function insert(string $table, array $data): string {
-        $columns = array_keys($data);
-        $values = array_values($data);
-        $placeholders = implode(', ', array_fill(0, count($data), '?'));
-        $sql = "INSERT INTO $table (" . implode(', ', $columns) . ") VALUES ($placeholders)";
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($values);
-        return $this->lastInsertId() ?? '';
-    }
-
-    public function upsert(string $table, array $data, string ...$conflictColumns): int {
-        return 0; // Not used in this example
-    }
-};
-
-echo "=== PartialQuery Hydrator Examples ===\n\n";
+echo "=== Query Hydrator Examples ===\n\n";
 
 // Example 1: Simple class hydration with public properties
 echo "1. Class hydration (public properties):\n";
@@ -155,7 +48,7 @@ class User {
     }
 }
 
-$users = $db->table('users')->withEntityClass(User::class);
+$users = $db->query('SELECT * FROM users')->withEntityClass(User::class);
 foreach ($users as $user) {
     echo "   - {$user->greet()} (age {$user->age})\n";
 }
@@ -178,7 +71,7 @@ class UserWithConstructor {
     }
 }
 
-$users = $db->table('users')->withHydrator(
+$users = $db->query('SELECT * FROM users')->withHydrator(
     fn($id, $name, $email, $age, $created_at) => new UserWithConstructor($id, $name, $email, $age, $created_at)
 );
 
@@ -193,23 +86,23 @@ echo "3. Composable queries with hydration:\n";
 
 class UserScope {
     /**
-     * @return mini\Database\PartialQuery<User>
+     * @return mini\Database\Query<User>
      */
-    public static function all($db): mini\Database\PartialQuery {
-        return $db->table('users')->withEntityClass(User::class);
+    public static function all($db): mini\Database\Query {
+        return $db->query('SELECT * FROM users')->withEntityClass(User::class);
     }
 
     /**
-     * @return mini\Database\PartialQuery<User>
+     * @return mini\Database\Query<User>
      */
-    public static function adults($db): mini\Database\PartialQuery {
+    public static function adults($db): mini\Database\Query {
         return self::all($db)->gte('age', 18);
     }
 
     /**
-     * @return mini\Database\PartialQuery<User>
+     * @return mini\Database\Query<User>
      */
-    public static function youngAdults($db): mini\Database\PartialQuery {
+    public static function youngAdults($db): mini\Database\Query {
         return self::adults($db)->lt('age', 30);
     }
 }
@@ -223,7 +116,7 @@ echo "\n";
 
 // Example 4: one() method with hydration
 echo "4. Fetch single object with one():\n";
-$user = $db->table('users')
+$user = $db->query('SELECT * FROM users')
     ->withEntityClass(User::class)
     ->eq('name', 'John Doe')
     ->one();
@@ -233,11 +126,11 @@ if ($user) {
 }
 echo "\n";
 
-// Example 5: Hydration cleared by select()
-echo "5. Hydration cleared when using select():\n";
-$names = $db->table('users')
+// Example 5: Column projection returns plain values
+echo "5. Column projection with columns():\n";
+$names = $db->query('SELECT * FROM users')
     ->withEntityClass(User::class)  // Entity class set
-    ->select('name')                 // Entity class cleared
+    ->columns('name')                // project to a single column
     ->column();
 
 echo "   Names (as plain array): " . implode(', ', $names) . "\n\n";
@@ -259,7 +152,7 @@ class UserWithDB {
     }
 }
 
-$users = $db->table('users')->withEntityClass(UserWithDB::class, ['Mr. ']);
+$users = $db->query('SELECT * FROM users')->withEntityClass(UserWithDB::class, ['Mr. ']);
 foreach ($users as $user) {
     echo "   - {$user->getDisplayName()}\n";
 }

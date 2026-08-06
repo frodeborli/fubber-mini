@@ -23,7 +23,9 @@ use mini\Http\Message\HtmlResponse;
 return new class implements RequestHandlerInterface {
     public function handle(ServerRequestInterface $request): ResponseInterface
     {
-        $path = $request->getAttribute('mini.router.path', '');
+        // The router strips the matched mount prefix from the request target,
+        // so this handler sees paths relative to /admin/
+        $path = parse_url($request->getRequestTarget(), PHP_URL_PATH) ?? '/';
         $path = trim($path, '/');
 
         return match ($path) {
@@ -64,12 +66,14 @@ When Mini's router encounters a path like `/admin/users/edit`, it looks for rout
 2. `_routes/admin/users/__DEFAULT__.php` (catch-all in users/)
 3. `_routes/admin/__DEFAULT__.php` (catch-all in admin/)
 
-The `__DEFAULT__.php` file receives all unmatched requests beneath its directory. The remaining path is available via:
+The `__DEFAULT__.php` file receives all unmatched requests beneath its directory. When it returns a PSR-15 handler, the router strips the matched URL prefix from the request target, so the handler reads the remaining path directly from the request:
 
 ```php
-$path = $request->getAttribute('mini.router.path');
-// For /admin/users/edit → "users/edit"
+$path = parse_url($request->getRequestTarget(), PHP_URL_PATH) ?? '/';
+// For /admin/users/edit → "/users/edit"
 ```
+
+The consumed prefix (base URL path + mount point) is available as the `mini.router.routePrefix` request attribute if you need to build absolute URLs.
 
 ## Project Structure
 
@@ -121,8 +125,8 @@ class AdminPanel implements RequestHandlerInterface
 {
     public function handle(ServerRequestInterface $request): ResponseInterface
     {
-        // Get the path relative to mount point
-        $path = $request->getAttribute('mini.router.path', '');
+        // Get the path relative to the mount point (router strips the prefix)
+        $path = parse_url($request->getRequestTarget(), PHP_URL_PATH) ?? '/';
         $path = trim($path, '/');
 
         // Route to appropriate handler
@@ -198,7 +202,7 @@ class DocsViewer implements RequestHandlerInterface
 
     public function handle(ServerRequestInterface $request): ResponseInterface
     {
-        $path = $request->getAttribute('mini.router.path', '');
+        $path = parse_url($request->getRequestTarget(), PHP_URL_PATH) ?? '/';
         // ... use $this->docsPath and $this->title
     }
 }
@@ -225,15 +229,14 @@ class AdminPanel implements RequestHandlerInterface
 {
     public function __construct()
     {
-        // Guard: require admin role
-        if (!\mini\session()->get('user_id')) {
-            throw new \mini\Router\Redirect('/login?return=/admin/');
-        }
+        // Guard: throws AuthenticationRequiredException (401) if not logged in,
+        // AccessDeniedException (403) if logged in without the role.
+        \mini\auth()->requireLogin()->requireRole('admin');
 
-        $user = $this->getCurrentUser();
-        if (!$user->isAdmin()) {
-            throw new \mini\Exceptions\AccessDeniedException('Admin access required');
-        }
+        // Or redirect to a login page instead of rendering a 401:
+        // if (!\mini\auth()->isAuthenticated()) {
+        //     throw new \mini\Router\Redirect('/login?return=/admin/');
+        // }
     }
 
     public function handle(ServerRequestInterface $request): ResponseInterface
@@ -257,11 +260,7 @@ use mini\Controller\Attributes\POST;
 
 class AdminPanel extends AbstractController
 {
-    public function __construct()
-    {
-        parent::__construct();
-        // Routes are registered from attributes automatically
-    }
+    // Routes are registered from the method attributes automatically
 
     #[GET('/')]
     public function dashboard(): array
@@ -341,7 +340,7 @@ class DocsBrowser implements RequestHandlerInterface
 
     public function handle(ServerRequestInterface $request): ResponseInterface
     {
-        $path = $request->getAttribute('mini.router.path', '');
+        $path = parse_url($request->getRequestTarget(), PHP_URL_PATH) ?? '/';
         $path = trim($path, '/');
 
         // Index page - show table of contents
@@ -450,7 +449,7 @@ Check the request method when you need different behavior:
 ```php
 public function handle(ServerRequestInterface $request): ResponseInterface
 {
-    $path = trim($request->getAttribute('mini.router.path', ''), '/');
+    $path = trim(parse_url($request->getRequestTarget(), PHP_URL_PATH) ?? '/', '/');
     $method = $request->getMethod();
 
     // Handle form submissions
@@ -458,7 +457,7 @@ public function handle(ServerRequestInterface $request): ResponseInterface
         return match ($method) {
             'GET' => $this->showCreateForm(),
             'POST' => $this->processCreateForm(),
-            default => throw new \mini\Exceptions\MethodNotAllowedException(),
+            default => new \mini\Http\Message\Response('Method Not Allowed', ['Allow' => 'GET, POST'], 405),
         };
     }
 
@@ -531,7 +530,7 @@ Pages extend the admin layout:
 
 6. **Implement RequestHandlerInterface** - Don't try to use `echo` or direct output. Return `ResponseInterface`.
 
-7. **Use the mini.router.path attribute** - This gives you the path relative to your mount point, not the full URL.
+7. **Read the scoped request target** - The router strips your mount prefix from the request target, so `parse_url($request->getRequestTarget(), PHP_URL_PATH)` gives the path relative to your mount point, not the full URL. The consumed prefix is in the `mini.router.routePrefix` attribute.
 
 ## See Also
 

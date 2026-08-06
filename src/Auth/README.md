@@ -1,5 +1,7 @@
 # Auth - Authentication System
 
+Auth is a thin facade over an application-provided `AuthInterface` — the kind of neutral seam a forkable core framework should own, leaving user models and credential storage to the layer above.
+
 ## Philosophy
 
 Mini's auth system is **framework-agnostic by design**. We don't prescribe how you authenticate users—whether it's sessions, JWTs, API keys, or something custom. Instead, we provide a clean facade with convenience methods that delegate to your implementation.
@@ -84,11 +86,11 @@ $name = auth()->getClaim('name');
 <?php
 // _routes/admin/dashboard.php
 
-// Require login - throws AccessDeniedException if not authenticated
-// Framework catches exception and shows _errors/401.php
+// Require login - throws AuthenticationRequiredException (→ 401) if not
+// authenticated. The dispatcher converts it and renders _views/errors/401.php
 auth()->requireLogin();
 
-// Or require specific role
+// Or require specific role - throws AccessDeniedException (→ 403) if missing
 auth()->requireRole('admin');
 
 // Or require permission
@@ -99,9 +101,10 @@ auth()->requireLogin()
       ->requireRole('editor')
       ->requirePermission('publish_posts');
 
-// Continue with protected logic
-$dashboard = loadDashboardData();
-echo render('admin/dashboard', ['data' => $dashboard]);
+// Route files must return a handler or response - never echo
+return fn() => new mini\Http\Message\HtmlResponse(
+    mini\render('admin/dashboard', ['data' => loadDashboardData()])
+);
 ```
 
 ### Role-Based Access
@@ -136,34 +139,44 @@ if (auth()->hasPermission('edit_posts')) {
 <?php
 // _routes/login.php
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $user = db()->queryOne(
-        "SELECT * FROM users WHERE email = ? AND password = ?",
-        [$_POST['email'], password_hash($_POST['password'], PASSWORD_DEFAULT)]
-    );
+use mini\Mini;
+use mini\Http\Message\Response;
+use mini\Session\SessionInterface;
 
-    if ($user) {
-        session();
-        $_SESSION['user_id'] = $user['id'];
-        $_SESSION['user'] = [
-            'email' => $user['email'],
-            'name' => $user['name'],
-            'roles' => explode(',', $user['roles']),
-            'permissions' => explode(',', $user['permissions'])
-        ];
+return function (): Response {
+    $user = db()->queryOne("SELECT * FROM users WHERE email = ?", [$_POST['email'] ?? '']);
 
-        redirect('/dashboard');
+    if (!$user || !password_verify($_POST['password'] ?? '', $user->password_hash)) {
+        return new Response('Invalid credentials', [], 401);
     }
-}
+
+    $_SESSION['user_id'] = $user->id;
+    $_SESSION['user'] = [
+        'email' => $user->email,
+        'name' => $user->name,
+        'roles' => explode(',', $user->roles),
+        'permissions' => explode(',', $user->permissions),
+    ];
+
+    // Prevent session fixation
+    Mini::$mini->get(SessionInterface::class)->regenerate(deleteOldSession: true);
+
+    return new Response('', ['Location' => '/dashboard'], 303);
+};
 ```
 
 ```php
 <?php
 // _routes/logout.php
 
-session();
-session_destroy();
-redirect('/');
+use mini\Mini;
+use mini\Http\Message\Response;
+use mini\Session\SessionInterface;
+
+return function (): Response {
+    Mini::$mini->get(SessionInterface::class)->destroy();
+    return new Response('', ['Location' => '/'], 303);
+};
 ```
 
 ### API Route Protection
@@ -172,39 +185,33 @@ redirect('/');
 <?php
 // _routes/api/protected.php
 
-// Framework will catch exception and show the 401 error page
+// Framework converts the exception to a 401 response
 auth()->requireLogin();
 
 // Protected API logic
-return fn() => ['data' => $secretData];  // → JSON response
+return fn() => ['data' => 'secret'];  // → JSON response
 ```
 
 ### Custom Error Pages
 
-Create `_errors/401.php` for unauthorized access:
+Error pages are templates. Create `_views/errors/401.php` for unauthenticated access and `_views/errors/403.php` for forbidden access — they receive `$message` and `$exception` and are rendered through the template system (see `mini\Http\ErrorHandler`):
 
 ```php
-<?php
-// _errors/401.php
-
-header('Content-Type: application/json');
-echo json_encode([
-    'error' => 'Unauthorized',
-    'message' => 'Please log in to access this resource'
-]);
+<?php // _views/errors/401.php ?>
+<h1><?= mini\h(mini\t("Please log in")) ?></h1>
+<p><?= mini\h($message) ?></p>
 ```
 
-Create `_errors/403.php` for forbidden access:
+To respond differently — e.g. redirect to a login page, or emit JSON for an API — register an exception converter on the dispatcher instead:
 
 ```php
-<?php
-// _errors/403.php
+use mini\Exceptions\AuthenticationRequiredException;
+use mini\Http\Message\Response;
 
-header('Content-Type: application/json');
-echo json_encode([
-    'error' => 'Forbidden',
-    'message' => 'You do not have permission to access this resource'
-]);
+$dispatcher->registerExceptionConverter(function(AuthenticationRequiredException $e): Response {
+    $returnTo = urlencode(request()->getRequestTarget());
+    return new Response('', ['Location' => "/login/?returnTo=$returnTo"], 303);
+});
 ```
 
 ## Direct Implementation Access
@@ -315,9 +322,9 @@ return new App\Auth\CustomAuthFacade();
 
 ## Error Handling
 
-When auth requirements aren't met, Mini throws `\mini\Http\AccessDeniedException`:
+When auth requirements aren't met, Mini throws:
 
-- **401 Unauthorized** - User not authenticated
-- **403 Forbidden** - User authenticated but lacks permission/role
+- **`mini\Exceptions\AuthenticationRequiredException`** → **401 Unauthorized** - user not authenticated (`requireLogin()`)
+- **`mini\Exceptions\AccessDeniedException`** → **403 Forbidden** - authenticated but lacks the role/permission (`requireRole()`, `requirePermission()`)
 
-The framework automatically handles these exceptions and shows appropriate error pages.
+The dispatcher's built-in exception converters map these to 401/403 responses, rendered via `_views/errors/{statusCode}.php` (application) with a framework default as fallback. Register your own converter to override (see above).

@@ -38,6 +38,12 @@ if ($hostRoot === null) {
 
 $commands = discoverCommands($hostRoot);
 
+// `mini help <command>` is sugar for `mini <command> --help`.
+if ($cmdName === 'help' && isset($argv[0]) && isset($commands[$argv[0]])) {
+    $cmdName = array_shift($argv);
+    $argv[] = '--help';
+}
+
 if ($cmdName === null || $cmdName === 'help' || $cmdName === '--help' || $cmdName === '-h') {
     showHelp($commands);
     exit(0);
@@ -195,9 +201,13 @@ function normalizeCommand(string $name, mixed $defn, string $packageDir, string 
 
 function showHelp(array $commands): void
 {
-    echo "Mini CLI\n";
-    echo "========\n\n";
-    echo "Usage: mini <command> [arguments]\n\n";
+    echo "Mini — a forkable core PHP framework (fubber/mini)\n";
+    echo "==================================================\n\n";
+    echo "Zero-dependency building blocks meant to be built upon — or forked\n";
+    echo "outright and owned for a decade. This CLI is the framework's toolbox.\n\n";
+    echo "Usage:\n";
+    echo "  mini <command> [arguments]\n";
+    echo "  mini help <command>          Same as: mini <command> --help\n\n";
 
     if (!$commands) {
         echo "No commands registered.\n\n";
@@ -206,16 +216,20 @@ function showHelp(array $commands): void
         return;
     }
 
-    echo "Available commands:\n";
+    echo "Commands:\n";
     $maxName = max(array_map('strlen', array_keys($commands)));
+    $maxDesc = max(array_map(fn($c) => strlen($c['description']), $commands));
     foreach ($commands as $name => $cmd) {
-        printf("  %-{$maxName}s  %s  [%s]\n",
+        printf("  %-{$maxName}s  %-{$maxDesc}s  [%s]\n",
             $name,
             $cmd['description'] !== '' ? $cmd['description'] : '(no description)',
             $cmd['package']
         );
     }
-    echo "\nFor command-specific help: mini <command> --help\n";
+    echo "\nCommands are discovered from composer.json (extra.mini.commands) of the\n";
+    echo "host project and every installed package. The host wins on name collision;\n";
+    echo "the providing package is shown in brackets above.\n\n";
+    echo "Run 'mini <command> --help' for usage, options and examples.\n";
 }
 
 function suggestSimilar(string $missing, array $available): void

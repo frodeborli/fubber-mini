@@ -4,12 +4,9 @@
  * Database Attributes Example
  *
  * Shows how to declare database schema using attributes.
- * These are declaration-only for now - not yet used by the framework.
- *
- * Future uses:
- * - Migration generators
- * - Automatic dehydration
- * - Schema validation tools
+ * #[Table] and #[PrimaryKey] drive Model persistence via mini\model()
+ * (see src/Database/README.md). The remaining attributes are declarative
+ * schema metadata (e.g. for migration generators and schema tools).
  */
 
 use mini\Database\Attributes\{

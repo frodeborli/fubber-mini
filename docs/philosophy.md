@@ -5,7 +5,7 @@
 Modern PHP frameworks tend to fall into two categories:
 
 1. **Heavy, scaffolding-driven ecosystems** (Laravel, Symfony)
-2. **Minimalist microframeworks** (Slim, Lumen) — usually incomplete without dozens of addons
+2. **Minimalist microframeworks** (Slim) — usually incomplete without dozens of addons
 
 Mini deliberately rejects both extremes.
 
@@ -14,7 +14,7 @@ It is a **full-stack micro-framework** with:
 * **Bootstrap time under 2ms** (measured on typical PHP-FPM, faster with aggressive OPcache)
 * **Zero runtime dependencies** (only PSR interfaces + ICU polyfills)
 * **Pure PHP architecture** — everything is plain, readable, inspectable PHP
-* **PSR-7/15/17 compatible** while embracing `$_GET`, `$_POST`, `$_SERVER` as first-class citizens
+* **PSR-7/15 compatible** while embracing `$_GET`, `$_POST`, `$_SERVER` as first-class citizens
 * **Fiber-aware async abstractions**, suitable for Swoole/ReactPHP/Phasync long-running servers
 * **Decades-long design horizon** (SQL, PSR, immutability, explicitness)
 
@@ -102,7 +102,7 @@ Mini avoids cleverness in favor of **boring, reliable, portable PHP**.
 
 Mini depends only on:
 
-* `psr/http-message`, `psr/http-factory`, `psr/http-server-*`
+* `psr/http-message`, `psr/http-server-*`, `psr/http-client`
 * `psr/log`, `psr/container`, `psr/simple-cache`
 * Symfony ICU polyfills
 
@@ -185,7 +185,7 @@ Mini's async model:
 * Uses **Fibers**, not generators
 * Works if no event loop exists (falls back to `usleep()` / `stream_select()`)
 * Avoids locking you into any particular runtime
-* Replaces `$_GET`, `$_POST`, `$_SERVER` with proxy classes implementing ArrayAccess for fiber context switching
+* Replaces `$_GET`, `$_POST`, `$_COOKIE`, `$_SESSION` with proxy classes implementing ArrayAccess for fiber context switching
 
 Mini behaves like libraries in Go or Rust:
 **async is an implementation detail**, not a framework religion.
@@ -202,16 +202,15 @@ Mini intentionally chooses technologies with proven longevity:
 
 Mini's DB layer uses:
 
-* Explicit SQL with composable query building
-* Repository pattern (`Users::save($user)`, `Users::delete($user)`)
-* Optional Active Record pattern (`$user->save()`, `$user->delete()`)
+* Explicit SQL with composable, immutable query building (`db()->query('SELECT * FROM users')->eq('active', 1)`)
+* Optional Active Record pattern via `mini\Database\Model` (`$user->save()`, `$user->delete()`) with auth-checked safe methods and explicit `saveUnsafe()`/`deleteUnsafe()` escape hatches
 * Strong typing with automatic hydration
 * Converter-based type mapping
 * Zero magic
 
 #### PSR standards
 
-PSR-7, PSR-15, PSR-17 — standards that will be around long after every current framework is rewritten.
+PSR-7 and PSR-15 — standards that will be around long after every current framework is rewritten.
 
 Mini models **e-mail** as actual MIME tree structures implementing PSR MessageInterface because RFC 5322 + MIME is permanent internet infrastructure.
 
@@ -233,7 +232,7 @@ If ambiguity exists, Mini throws.
 
 Examples:
 
-* Route handlers must *return something meaningful* or produce output — silent no-ops are errors.
+* Route files must return a PSR-15 `RequestHandlerInterface` or PSR-7 `ResponseInterface` (a `Closure` is an inline handler, a `ResponseAggregate` a lazy response). Direct output (`echo`/`header()`) during route inclusion throws — silent no-ops and SAPI-bound output are errors.
 * Services cannot be added once the framework is in the Ready phase.
 * Path registries must resolve real filesystem locations immediately.
 * The router refuses ambiguous patterns.
@@ -243,9 +242,9 @@ Implicit behavior is only allowed if it is **100% safe in every environment**.
 
 ---
 
-### 7. Active Record via ModelTrait
+### 7. Active Record via the Model base class
 
-Mini uses the Active Record pattern with `ModelTrait`:
+Mini's Active Record base is `mini\Database\Model`:
 
 ```php
 $user = User::find($id);
@@ -253,21 +252,23 @@ $user->email = 'new@example.com';
 $user->save();
 ```
 
-The traditional argument against Active Record is persistence coupling. Mini solves this with `VirtualDatabase` — the same entity can persist to SQL, CSV, JSON, or remote APIs. Validation is externalized via attributes, not baked into the trait.
+The traditional argument against Active Record is persistence coupling. Mini solves this with `VirtualDatabase` — the same entity can persist to SQL, CSV, JSON, or remote APIs. Validation is externalized via attributes, not baked into the base class.
 
 ```php
-class User {
-    use ModelTrait;
+use mini\Database\Model;
+use mini\Database\Attributes\{Table, PrimaryKey};
 
-    #[Required, Email]
+#[Table('users')]
+class User extends Model {
+    #[PrimaryKey]
+    public ?int $id = null;
+
+    #[Required, Format('email')]
     public string $email;
-
-    protected static function tableName(): string { return 'users'; }
-    protected static function primaryKey(): string { return 'id'; }
 }
 ```
 
-`ModelTrait` tracks identity correctly — changing `$user->id` after load still triggers an UPDATE, not an INSERT.
+`Model` splits its API into two layers: `save()`/`delete()` are auth-checked and row-scoped, while the `final` `saveUnsafe()`/`deleteUnsafe()` bypass the guards. Identity is tracked strictly — mutating the primary key of a loaded entity throws a `LogicException` instead of silently inserting a new row.
 
 ---
 
@@ -275,7 +276,7 @@ class User {
 
 Mini includes:
 
-* PSR-7/15/17 HTTP implementation
+* PSR-7/15 HTTP implementation
 * File-based router with pattern matching
 * PHP template engine with inheritance
 * ICU-based i18n with MessageFormatter
@@ -321,7 +322,7 @@ Mini is different because:
 | Can host sub-frameworks? | **Yes, with separate composer.json** | Rarely feasible             |
 
 Mini is not a competitor to Laravel or Symfony.
-It is a **different category**:
+It is a **different category**: a forkable *core* framework — generic building blocks meant to sit underneath a more complete, opinionated layer (a "Maxi"-style framework, or your company's own), or to be forked outright by a team that wants a foundation it can own and maintain for a decade without third-party abandonment risk. Opinionated conveniences belong in the layer above; the core stays small, general, and readable.
 
 > **A complete framework that remains tiny, explicit, composable, async-ready,
 > and designed to still make sense in 2040.**
@@ -330,6 +331,6 @@ It is a **different category**:
 
 ## See Also
 
-* **[WHY-MINI.md](WHY-MINI.md)** — Detailed comparison with Laravel, addressing common concerns
+* **[WHY-MINI.md](WHY-MINI.md)** — Design rationale: what motivates each major design choice and what each one trades off
 * **[README.md](../README.md)** — Getting started guide
 * **[REFERENCE.md](../REFERENCE.md)** — Complete API reference

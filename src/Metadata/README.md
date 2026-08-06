@@ -1,6 +1,6 @@
 # Metadata System
 
-The Metadata system provides JSON Schema annotation support for documenting classes, properties, and data structures. It complements the Validator system by adding human-readable documentation, UI hints, and semantic information.
+Describe entity contracts once in the JSON Schema annotation vocabulary — a Lindy standard a forkable core can build form/UI/OpenAPI tooling on. The Metadata system provides JSON Schema annotation support for documenting classes, properties, and data structures. It complements the Validator system by adding human-readable documentation, UI hints, and semantic information.
 
 ## Overview
 
@@ -341,4 +341,4 @@ Both approaches preserve translation context until JSON serialization, when stri
 
 ## Examples
 
-See `test-metadata.php` in the project root for comprehensive examples.
+See `tests/Metadata/` for comprehensive, runnable examples.

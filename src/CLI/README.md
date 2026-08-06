@@ -1,5 +1,7 @@
 # CLI - Command Line Interface
 
+Minimal argument parsing for a forkable core: one immutable `ArgManager` plus an `args()` accessor, no command-framework opinions.
+
 For simple scripts, use `$_SERVER['argv']` directly. Use `args()` when you need structured option parsing or subcommands.
 
 ## Quick Start

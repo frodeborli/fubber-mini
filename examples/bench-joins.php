@@ -6,7 +6,7 @@
  * Use this to iterate on join optimization without running full test suite.
  */
 
-require __DIR__ . '/vendor/autoload.php';
+require __DIR__ . '/../vendor/autoload.php';
 
 use mini\Database\VirtualDatabase;
 

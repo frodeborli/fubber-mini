@@ -1,6 +1,6 @@
 # Mini - Core Framework Components
 
-This namespace contains core infrastructure classes used internally by the Mini framework.
+This namespace contains core infrastructure classes used internally by the Mini framework — the kernel plumbing (path registries, APCu polyfill) a forkable core keeps small and dependency-free.
 
 ## PathRegistries
 
@@ -23,6 +23,7 @@ The framework uses these registries by default:
 - **`routes`** - Route file discovery (`_routes/` directory)
 - **`views`** - Template file discovery (`_views/` directory)
 - **`translations`** - Translation file discovery (`_translations/` directory)
+- **`static`** - Static asset discovery (`_static/` directory)
 
 ### Usage via Mini Core
 

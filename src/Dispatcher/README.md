@@ -1,5 +1,7 @@
 # HttpDispatcher - Request Lifecycle Manager
 
+The single, runtime-portable HTTP entry point of a forkable core: PSR-7 in, PSR-7 out, fiber-safe globals, exception-to-response conversion — nothing SAPI-bound.
+
 ## Philosophy
 
 HttpDispatcher manages the complete HTTP request lifecycle in Mini. It bootstraps PSR-7 requests, makes request globals fiber-safe, delegates to the router, handles exceptions, and emits responses. You typically don't interact with HttpDispatcher directly—it runs once at application startup.
@@ -86,12 +88,17 @@ $dispatcher->registerExceptionConverter(
     }
 );
 
-// AccessDeniedException → 401/403 (smart detection)
+// AuthenticationRequiredException → 401 Unauthorized
+$dispatcher->registerExceptionConverter(
+    function(\mini\Exceptions\AuthenticationRequiredException $e): ResponseInterface {
+        return new Response($html, ['Content-Type' => 'text/html'], 401);
+    }
+);
+
+// AccessDeniedException → 403 Forbidden
 $dispatcher->registerExceptionConverter(
     function(\mini\Exceptions\AccessDeniedException $e): ResponseInterface {
-        // 401 if not authenticated, 403 if authenticated but no permission
-        $statusCode = \mini\auth()->isAuthenticated() ? 403 : 401;
-        return new Response($html, ['Content-Type' => 'text/html'], $statusCode);
+        return new Response($html, ['Content-Type' => 'text/html'], 403);
     }
 );
 
@@ -136,8 +143,8 @@ $dispatcher->registerExceptionConverter(
 
 // Handle validation errors
 $dispatcher->registerExceptionConverter(
-    function(\mini\Validator\ValidationException $e): ResponseInterface {
-        $json = json_encode(['errors' => $e->errors]);
+    function(\mini\ValidationException $e): ResponseInterface {
+        $json = json_encode(['errors' => $e->getPropertyErrors()]);
         return new \mini\Http\Message\Response(
             $json,
             ['Content-Type' => 'application/json'],
@@ -240,11 +247,11 @@ $dispatcher->dispatch($argv);
 
 ## Configuration
 
-**Service Registration:** `config/mini/Dispatcher/HttpDispatcher.php` (optional)
+**Service Registration:** `_config/mini/Dispatcher/HttpDispatcher.php` (optional)
 
 ```php
 <?php
-// config/mini/Dispatcher/HttpDispatcher.php
+// _config/mini/Dispatcher/HttpDispatcher.php
 
 use mini\Dispatcher\HttpDispatcher;
 

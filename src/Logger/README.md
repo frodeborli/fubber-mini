@@ -1,6 +1,6 @@
 # Mini Logger
 
-PSR-3 compatible logging system for the Mini framework. Provides a simple, standardized way to log messages with different severity levels.
+PSR-3 compatible logging for the Mini framework — the standard logging seam of a forkable core: one interface, one config file, any backend. Provides a simple, standardized way to log messages with different severity levels.
 
 ## Features
 
@@ -284,7 +284,7 @@ The mini logger is PSR-3 compatible, so it works with popular logging libraries:
 - **Monolog** - Full-featured logging library
 - **KLogger** - Simple file-based logger
 - **Analog** - Lightweight logger
-- **Any PSR-3 logger** - Just return it from config/logger.php
+- **Any PSR-3 logger** - Just return it from `_config/Psr/Log/LoggerInterface.php`
 
 ## Architecture
 

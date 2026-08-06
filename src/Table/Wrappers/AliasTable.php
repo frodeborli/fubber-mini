@@ -104,12 +104,14 @@ class AliasTable implements TableInterface
             return $this->reverseMap[$name];
         }
 
-        // Try unqualified match - find aliased name ending with ".{name}"
-        // This allows using "col" to match "t1.col"
+        // Fail fast: unqualified names are not accepted on an aliased table.
+        // Name the aliased column the caller most likely meant.
         $suffix = '.' . $name;
         foreach ($this->reverseMap as $aliased => $original) {
             if (str_ends_with($aliased, $suffix)) {
-                return $original;
+                throw new \InvalidArgumentException(
+                    "Column '$name' is not valid on this aliased table; use '$aliased' instead."
+                );
             }
         }
 

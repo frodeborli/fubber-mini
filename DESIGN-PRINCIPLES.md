@@ -4,6 +4,8 @@
 
 **Goal:** Build a framework that remains at version 1.x forever by making only decisions that will still make sense in 20+ years.
 
+**Positioning:** Mini is a forkable *core* framework. It is designed to sit underneath a more complete, opinionated "Maxi"-style framework — or to be forked outright by a business that wants a head start it can own and maintain for a decade without third-party abandonment risk. Generic building blocks belong in Mini; opinionated conveniences (CRUD generators, admin panels, prescribed user models) belong in a layer on top.
+
 ## The Lindy Effect Strategy
 - If something has survived 10+ years, it will likely survive another 10+ years
 - If we invent something new, it might only last months
@@ -30,10 +32,10 @@
   1. PHP community created an "island" with Eloquent/Doctrine
   2. PHP lacks tagged template literals (unlike JavaScript's `sql\`SELECT...\``)
 - Developers already expect SQL dialect differences (MySQL vs PostgreSQL vs SQLite)
-- When we built SQL parser for virtual tables:
+- When we built the SQL engine for virtual tables (`src/Database/Virtual/`):
   - Did the hard work rather than create leaky abstractions
-  - Limited dialect is honest about capabilities (like SQLite's limitations)
-  - Aggregations in PHP are faster than trying to implement SQL functions in userland
+  - Grew into a federated engine with SQL:2003 coverage (joins, CTEs, window functions, set algebra) across heterogeneous table sources
+  - Honest about remaining dialect gaps (see `src/Database/KNOWN-LIMITATIONS.md`)
 - DatabaseInterface does "chunk up" SQL (where clauses, `PartialQuery::order('col DESC, other ASC')`)
 - **Pragmatic compromise:** Reduce boilerplate while requiring SQL knowledge
 - Developers who don't know SQL must learn SQL - this prepares them for other languages where Eloquent/Doctrine doesn't exist
@@ -123,8 +125,8 @@
   - `withPart(int, MessageInterface)`, `withAddedPart()`, `withoutPart(int)`
   - `findPart(callable)`, `findParts(callable)`, `withParts(callable)`
   - ArrayAccess + Countable + IteratorAggregate for convenient part access
-- **Interface-based mailer backend** (future)
-  - Framework provides MIME structure, not transport
+- **Interface-based mailer backend** (implemented: `MailTransportInterface`, send via `mailer()`)
+  - Framework provides MIME structure plus pluggable transports
   - No required dependencies - compose messages then use any transport
 - **Lindy credentials:**
   - MIME multipart (RFC 2046, 1996): 28+ years old

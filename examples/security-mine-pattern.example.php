@@ -92,113 +92,7 @@ function auth(): MockAuth {
 }
 
 // Create database instance
-$db = new class($pdo) implements mini\Database\DatabaseInterface {
-    use mini\Database\PartialQueryableTrait;
-
-    private PDO $pdo;
-    public function __construct(PDO $pdo) { $this->pdo = $pdo; }
-
-    public function query(string $sql, array $params = []): iterable {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        while ($row = $stmt->fetch()) yield $row;
-    }
-
-    public function queryOne(string $sql, array $params = []): ?array {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetch() ?: null;
-    }
-
-    public function queryField(string $sql, array $params = []): mixed {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetchColumn();
-    }
-
-    public function queryColumn(string $sql, array $params = []): array {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetchAll(PDO::FETCH_COLUMN);
-    }
-
-    public function exec(string $sql, array $params = []): int {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->rowCount();
-    }
-
-    public function lastInsertId(): ?string {
-        return $this->pdo->lastInsertId();
-    }
-
-    public function tableExists(string $tableName): bool {
-        return true;
-    }
-
-    public function transaction(\Closure $task): mixed {
-        return $task($this);
-    }
-
-    public function quote(mixed $value): string {
-        if ($value === null) return 'NULL';
-        return $this->pdo->quote($value, PDO::PARAM_STR);
-    }
-
-    public function getDialect(): mini\Database\SqlDialect {
-        return mini\Database\SqlDialect::Sqlite;
-    }
-
-    public function delete(mini\Database\PartialQuery $query): int {
-        $where = $query->getWhere();
-        if (empty($where['sql'])) {
-            throw new \InvalidArgumentException("DELETE requires WHERE clause");
-        }
-        $sql = "DELETE FROM {$query->getTable()} WHERE {$where['sql']} LIMIT {$query->getLimit()}";
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($where['params']);
-        return $stmt->rowCount();
-    }
-
-    public function update(mini\Database\PartialQuery $query, string|array $set): int {
-        $where = $query->getWhere();
-
-        if (is_string($set)) {
-            $sql = "UPDATE {$query->getTable()} SET {$set}";
-            $params = $where['params'];
-        } else {
-            $setParts = [];
-            $setParams = [];
-            foreach ($set as $column => $value) {
-                $setParts[] = "$column = ?";
-                $setParams[] = $value;
-            }
-            $sql = "UPDATE {$query->getTable()} SET " . implode(', ', $setParts);
-            $params = array_merge($setParams, $where['params']);
-        }
-
-        if ($where['sql']) $sql .= " WHERE {$where['sql']}";
-        $sql .= " LIMIT {$query->getLimit()}";
-
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->rowCount();
-    }
-
-    public function insert(string $table, array $data): string {
-        $columns = array_keys($data);
-        $values = array_values($data);
-        $placeholders = implode(', ', array_fill(0, count($data), '?'));
-        $sql = "INSERT INTO $table (" . implode(', ', $columns) . ") VALUES ($placeholders)";
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($values);
-        return $this->lastInsertId() ?? '';
-    }
-
-    public function upsert(string $table, array $data, string ...$conflictColumns): int {
-        return 0;
-    }
-};
+$db = new mini\Database\PDODatabase($pdo);
 
 // Override mini\db() for this example
 function db() {
@@ -213,8 +107,8 @@ class User {
     public string $email;
     public string $bio;
 
-    public static function query(): mini\Database\PartialQuery {
-        return db()->table('users')->withEntityClass(User::class, false);
+    public static function query(): mini\Database\Query {
+        return db()->query('SELECT * FROM users')->withEntityClass(User::class, false);
     }
 
     /**
@@ -222,7 +116,7 @@ class User {
      *
      * Pattern: self + friends
      */
-    public static function mine(): mini\Database\PartialQuery {
+    public static function mine(): mini\Database\Query {
         $currentUserId = auth()->getUserId();
 
         // Users can see themselves and their friends
@@ -248,14 +142,14 @@ class Post {
     public string $content;
     public string $visibility;
 
-    public static function query(): mini\Database\PartialQuery {
-        return db()->table('posts')->withEntityClass(Post::class, false);
+    public static function query(): mini\Database\Query {
+        return db()->query('SELECT * FROM posts')->withEntityClass(Post::class, false);
     }
 
     /**
      * Public posts only
      */
-    public static function public(): mini\Database\PartialQuery {
+    public static function public(): mini\Database\Query {
         return self::query()->eq('visibility', 'public');
     }
 
@@ -264,7 +158,7 @@ class Post {
      *
      * Pattern: public posts + own private posts + friends' private posts
      */
-    public static function mine(): mini\Database\PartialQuery {
+    public static function mine(): mini\Database\Query {
         if (!auth()->check()) {
             return self::public();
         }
@@ -272,14 +166,14 @@ class Post {
         $userId = auth()->getUserId();
 
         return self::query()->where('
-            visibility = "public"
+            visibility = ?
             OR user_id = ?
-            OR (visibility = "private" AND EXISTS (
+            OR (visibility = ? AND EXISTS (
                 SELECT 1 FROM friendships
                 WHERE (user_id = ? AND friend_id = posts.user_id)
                    OR (friend_id = ? AND user_id = posts.user_id)
             ))
-        ', [$userId, $userId, $userId]);
+        ', ['public', $userId, 'private', $userId, $userId]);
     }
 }
 
@@ -354,7 +248,7 @@ echo "\n";
 echo "=== Pattern Benefits ===\n\n";
 echo "✓ Secure by default - ::mine() is shorter than ::query()\n";
 echo "✓ Hard to bypass - authorization at query level\n";
-echo "✓ Composable - works with all PartialQuery methods\n";
+echo "✓ Composable - works with all Query methods\n";
 echo "✓ Consistent - same pattern across all entities\n";
 echo "✓ Auditable - search for ::query() to find potential issues\n";
 echo "✓ Testable - authorization logic in one place\n\n";

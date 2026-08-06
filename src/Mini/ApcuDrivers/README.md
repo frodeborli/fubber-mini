@@ -1,6 +1,6 @@
 # APCu Polyfill Drivers
 
-This directory contains the polyfill implementation for APCu functions when the native APCu extension is not available.
+This directory contains the polyfill implementation for APCu functions when the native APCu extension is not available — L1 caching a forkable core provides itself so no environment is a special case.
 
 ## Overview
 
@@ -281,19 +281,11 @@ class CustomApcuDriver implements ApcuDriverInterface
 
 ## Testing
 
-All drivers are tested for APCu compatibility:
+The drivers are exercised indirectly through the cache test suite (Mini's test runner, not PHPUnit):
 
 ```bash
-vendor/bin/phpunit tests/ApcuDrivers/
+php bin/mini test tests/Cache
 ```
-
-Tests cover:
-- Basic store/fetch operations
-- TTL expiry
-- Atomic operations (cas, inc, dec)
-- Batch operations
-- Garbage collection
-- Edge cases (large values, special characters)
 
 ## Production Recommendations
 

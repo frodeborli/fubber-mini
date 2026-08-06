@@ -5,8 +5,9 @@ This document contains common patterns for extending and customizing Mini framew
 ## Table of Contents
 
 - [Overriding Framework Services](#overriding-framework-services)
-- [Request Processing (Middleware Pattern)](#request-processing-middleware-pattern)
-- [Response Processing (Output Buffering)](#response-processing-output-buffering)
+- [Request Processing (PSR-15 Middleware)](#request-processing-psr-15-middleware)
+- [Request Lifecycle Hooks](#request-lifecycle-hooks)
+- [Exception Handling](#exception-handling)
 
 ---
 
@@ -90,479 +91,154 @@ When you call `log()`, Mini looks for config in this order:
 1. `_config/Psr/Log/LoggerInterface.php` (your override)
 2. `vendor/fubber/mini/config/Psr/Log/LoggerInterface.php` (framework default)
 
-**Note:** You cannot override framework services by registering them in `app/bootstrap.php` before the framework loads. The framework unconditionally registers its services, and `loadServiceConfig()` handles the override logic via config files.
+**Note:** You cannot override framework services by registering them in `bootstrap.php` before the framework loads. The framework unconditionally registers its services, and `loadServiceConfig()` handles the override logic via config files.
 
 ---
 
-## Request Processing (Middleware Pattern)
+## Request Processing (PSR-15 Middleware)
 
-Mini doesn't have PSR-15 middleware, but phase lifecycle hooks provide the same capabilities using standard PHP patterns.
-
-### Pattern: Use Phase Transition Hooks
-
-Phase hooks fire when the application transitions to Ready phase (when `mini\bootstrap()` is called). Use `onEnteringState()` for "before request" logic and `onEnteredState()` for "after bootstrap" logic.
-
-**When hooks fire:**
-- `onEnteringState(Phase::Ready)` - Before Ready phase transition (before error handlers, output buffering)
-- `onEnteredState(Phase::Ready)` - After Ready phase entered (after bootstrap completes)
-
-**Example: Authentication Middleware**
+`HttpDispatcher` supports standard PSR-15 middleware. Middleware wraps the router,
+receives the PSR-7 request, and returns a PSR-7 response — there is no `header()`,
+`echo`, or `exit` involved, so the same code works under classic SAPIs and
+Fiber-based coroutine runtimes.
 
 ```php
 <?php
-// app/bootstrap.php
+// bootstrap.php
 
 use mini\Mini;
-use mini\Phase;
+use mini\Dispatcher\HttpDispatcher;
+use mini\Http\Message\JsonResponse;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\ServerRequestInterface;
+use Psr\Http\Server\MiddlewareInterface;
+use Psr\Http\Server\RequestHandlerInterface;
 
-// Register authentication check for protected routes
-// Fires when entering Ready phase (before error handlers set up)
-Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
-    $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
+$dispatcher = Mini::$mini->get(HttpDispatcher::class);
 
-    // Define protected paths
-    $protectedPaths = ['/admin', '/api', '/profile'];
-
-    // Check if current path is protected
-    foreach ($protectedPaths as $protected) {
-        if (str_starts_with($path, $protected)) {
-            // Check authentication
-            session_start();
-            if (!isset($_SESSION['user_id'])) {
-                // Not authenticated - return 401
-                http_response_code(401);
-                header('Content-Type: application/json');
-                echo json_encode(['error' => 'Authentication required']);
-                exit;
-            }
-            break;
+// Authentication middleware
+$dispatcher->addMiddleware(new class implements MiddlewareInterface {
+    public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
+    {
+        $path = $request->getUri()->getPath();
+        if (str_starts_with($path, '/admin') && !\mini\auth()->isAuthenticated()) {
+            return new JsonResponse(['error' => 'Authentication required'], statusCode: 401);
         }
+        return $handler->handle($request);
+    }
+});
+
+// Response header middleware
+$dispatcher->addMiddleware(new class implements MiddlewareInterface {
+    public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
+    {
+        return $handler->handle($request)
+            ->withHeader('X-Content-Type-Options', 'nosniff')
+            ->withHeader('X-Frame-Options', 'DENY');
     }
 });
 ```
 
-**Example: Request Logging**
+Middleware runs in FIFO order (first added runs first). Because middleware operates
+on immutable PSR-7 messages, "response processing" is simply transforming the
+response object on the way out — no output buffering tricks required.
 
-```php
-<?php
-// app/bootstrap.php
-
-use mini\Mini;
-use mini\Phase;
-
-Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
-    $start = microtime(true);
-
-    // Log request start
-    error_log(sprintf(
-        '[%s] %s %s',
-        date('Y-m-d H:i:s'),
-        $_SERVER['REQUEST_METHOD'] ?? 'GET',
-        $_SERVER['REQUEST_URI'] ?? '/'
-    ));
-
-    // Register shutdown function to log duration
-    register_shutdown_function(function() use ($start) {
-        $duration = microtime(true) - $start;
-        error_log(sprintf('Request completed in %.3f seconds', $duration));
-    });
-});
-```
-
-**Example: CORS Headers**
-
-```php
-<?php
-// app/bootstrap.php
-
-use mini\Mini;
-use mini\Phase;
-
-Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
-    // Add CORS headers for API routes
-    $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
-
-    if (str_starts_with($path, '/api/')) {
-        header('Access-Control-Allow-Origin: *');
-        header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-        header('Access-Control-Allow-Headers: Content-Type, Authorization');
-
-        // Handle preflight requests
-        if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-            http_response_code(204);
-            exit;
-        }
-    }
-});
-```
-
-**Example: Request Body Parsing (Extended)**
-
-```php
-<?php
-// app/bootstrap.php
-
-use mini\Mini;
-use mini\Phase;
-
-Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
-    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
-
-    // Parse XML request bodies
-    if (str_contains($contentType, 'application/xml')) {
-        $xml = file_get_contents('php://input');
-        try {
-            $data = simplexml_load_string($xml);
-            $_POST = json_decode(json_encode($data), true);
-        } catch (\Exception $e) {
-            http_response_code(400);
-            echo json_encode(['error' => 'Invalid XML']);
-            exit;
-        }
-    }
-
-    // Parse form-data with file uploads
-    if (str_contains($contentType, 'multipart/form-data')) {
-        // PHP handles this automatically, but you could add validation here
-        $maxFileSize = 10 * 1024 * 1024; // 10MB
-        foreach ($_FILES as $file) {
-            if ($file['size'] > $maxFileSize) {
-                http_response_code(413);
-                echo json_encode(['error' => 'File too large']);
-                exit;
-            }
-        }
-    }
-});
-```
-
-### Multiple Hooks = Multiple Middleware
-
-You can register multiple listeners to chain middleware-like logic:
-
-```php
-<?php
-// app/bootstrap.php
-
-use mini\Mini;
-use mini\Phase;
-
-// Middleware 1: Rate limiting
-Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
-    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    $cache = \mini\cache('rate-limit');
-
-    $key = "rate_limit:{$ip}";
-    $requests = $cache->get($key, 0);
-
-    if ($requests > 100) {
-        http_response_code(429);
-        echo json_encode(['error' => 'Too many requests']);
-        exit;
-    }
-
-    $cache->set($key, $requests + 1, 60); // 100 requests per minute
-});
-
-// Middleware 2: Request ID
-Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
-    $requestId = bin2hex(random_bytes(8));
-    $_SERVER['HTTP_X_REQUEST_ID'] = $requestId;
-    header("X-Request-ID: {$requestId}");
-});
-
-// Middleware 3: Security headers
-Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
-    header('X-Content-Type-Options: nosniff');
-    header('X-Frame-Options: DENY');
-    header('X-XSS-Protection: 1; mode=block');
-});
-```
+**Short-circuiting:** return a response without calling `$handler->handle($request)`.
+**Modifying the request:** pass a new request instance to `$handler->handle()` —
+`mini\request()` and the `$_GET`/`$_POST` proxies always reflect the latest request.
 
 ---
 
-## Response Processing (Output Buffering)
+## Request Lifecycle Hooks
 
-The `onEnteredState(Phase::Ready)` hook fires after the Ready phase is entered, which means:
-- Error handlers are configured
-- Output buffering has started
-- Application is ready to handle requests
-- All framework features are available
-
-This is the perfect place for "after bootstrap" processing using PHP's output buffering.
-
-### Pattern: Custom Output Handler
-
-Register a custom output buffer handler after entering Ready phase:
-
-**Example: HTML Minification**
+For cross-cutting concerns that don't need to touch the response, `HttpDispatcher`
+exposes typed events (see `src/Hooks/`):
 
 ```php
 <?php
-// app/bootstrap.php
+// bootstrap.php
 
 use mini\Mini;
-use mini\Phase;
+use mini\Dispatcher\HttpDispatcher;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\ServerRequestInterface;
 
-Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
-    // Start a new output buffer with custom handler
-    ob_start(function($buffer) {
-        // Only minify HTML responses
-        $contentType = '';
-        foreach (headers_list() as $header) {
-            if (stripos($header, 'Content-Type:') === 0) {
-                $contentType = $header;
-                break;
-            }
-        }
+$dispatcher = Mini::$mini->get(HttpDispatcher::class);
 
-        if (str_contains($contentType, 'text/html')) {
-            // Simple HTML minification
-            $buffer = preg_replace('/\s+/', ' ', $buffer); // Collapse whitespace
-            $buffer = preg_replace('/>\s+</', '><', $buffer); // Remove space between tags
-        }
-
-        return $buffer;
-    });
+// Before the router runs: request-scoped initialization
+$dispatcher->onBeforeRequest->listen(function (ServerRequestInterface $request) {
+    \mini\log()->info('{method} {path}', [
+        'method' => $request->getMethod(),
+        'path' => (string)$request->getUri(),
+    ]);
 });
-```
 
-**Example: Response Compression**
-
-```php
-<?php
-// app/bootstrap.php
-
-use mini\Mini;
-use mini\Phase;
-
-Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
-    // Use PHP's built-in compression handler
-    if (extension_loaded('zlib')) {
-        ob_start('ob_gzhandler');
+// Always fires (finally block) - cleanup, metrics, audit logging
+$dispatcher->onAfterRequest->listen(
+    function (ServerRequestInterface $request, ?ResponseInterface $response, ?\Throwable $e) {
+        if ($e !== null) {
+            \mini\log()->error('Request failed: {message}', ['message' => $e->getMessage()]);
+        }
     }
-});
+);
 ```
 
-**Example: Response Time Header**
-
-```php
-<?php
-// app/bootstrap.php
-
-use mini\Mini;
-use mini\Phase;
-
-Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
-    $start = microtime(true);
-
-    ob_start(function($buffer) use ($start) {
-        $duration = microtime(true) - $start;
-        header("X-Response-Time: " . round($duration * 1000, 2) . "ms");
-        return $buffer;
-    });
-});
-```
-
-**Example: Inject Analytics Script**
-
-```php
-<?php
-// app/bootstrap.php
-
-use mini\Mini;
-use mini\Phase;
-
-Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
-    ob_start(function($buffer) {
-        // Only inject into HTML responses
-        $contentType = '';
-        foreach (headers_list() as $header) {
-            if (stripos($header, 'Content-Type:') === 0) {
-                $contentType = $header;
-                break;
-            }
-        }
-
-        if (str_contains($contentType, 'text/html') && str_contains($buffer, '</body>')) {
-            $analytics = '<script>/* Google Analytics code here */</script>';
-            $buffer = str_replace('</body>', $analytics . '</body>', $buffer);
-        }
-
-        return $buffer;
-    });
-});
-```
-
-**Example: Security Headers Injection**
-
-```php
-<?php
-// app/bootstrap.php
-
-use mini\Mini;
-use mini\Phase;
-
-Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
-    ob_start(function($buffer) {
-        // Inject Content-Security-Policy for HTML pages
-        $contentType = '';
-        foreach (headers_list() as $header) {
-            if (stripos($header, 'Content-Type:') === 0) {
-                $contentType = $header;
-                break;
-            }
-        }
-
-        if (str_contains($contentType, 'text/html')) {
-            header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'");
-        }
-
-        return $buffer;
-    });
-});
-```
-
-### Manipulating Response Headers
-
-Output buffer handlers can manipulate headers before they're sent:
-
-```php
-<?php
-// app/bootstrap.php
-
-use mini\Mini;
-use mini\Phase;
-
-Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
-    ob_start(function($buffer) {
-        // Add cache headers based on content
-        if (strlen($buffer) > 1024 && !str_contains($buffer, 'user-specific')) {
-            header('Cache-Control: public, max-age=3600');
-            header('ETag: "' . md5($buffer) . '"');
-        } else {
-            header('Cache-Control: no-cache, no-store, must-revalidate');
-        }
-
-        // Add content length
-        header('Content-Length: ' . strlen($buffer));
-
-        return $buffer;
-    });
-});
-```
-
-### Stacking Output Handlers
-
-Multiple output handlers create a processing chain:
-
-```php
-<?php
-// app/bootstrap.php
-
-use mini\Mini;
-use mini\Phase;
-
-Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
-    // Handler 1: Minify HTML
-    ob_start(function($buffer) {
-        if (str_contains(headers_list()[0] ?? '', 'text/html')) {
-            $buffer = preg_replace('/\s+/', ' ', $buffer);
-        }
-        return $buffer;
-    });
-
-    // Handler 2: Compress
-    ob_start('ob_gzhandler');
-
-    // Handler 3: Add headers
-    ob_start(function($buffer) {
-        header('X-Powered-By: Mini Framework');
-        header('X-Content-Length: ' . strlen($buffer));
-        return $buffer;
-    });
-});
-```
-
-The handlers execute in **reverse** order (Handler 3 → Handler 2 → Handler 1).
+`Phase` transition hooks (`Mini::$mini->phase->onEnteringState(...)` /
+`onEnteredState(...)`) remain available for application *lifecycle* concerns —
+service wiring during Bootstrap, checks when entering Ready. Per-request logic
+belongs in middleware or the dispatcher events above, not in phase hooks: in a
+long-lived coroutine runtime the Ready phase is entered once while many requests
+are handled.
 
 ---
 
-## Complete Example: Full Request/Response Pipeline
+## Exception Handling
 
-Here's a complete example combining all patterns:
+Route handlers signal errors by throwing; the dispatcher converts exceptions to
+responses via the exception converter registry:
 
 ```php
 <?php
-// app/bootstrap.php
+// bootstrap.php
 
 use mini\Mini;
-use mini\Phase;
-use mini\Lifetime;
+use mini\Dispatcher\HttpDispatcher;
+use mini\Http\Message\JsonResponse;
+use Psr\Http\Message\ResponseInterface;
 
-// Override services via config files (see _config/Psr/Log/LoggerInterface.php)
-// NOT done here - use config files instead
+$dispatcher = Mini::$mini->get(HttpDispatcher::class);
 
-// Request processing - fires when entering Ready phase
-Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
-    // Rate limiting
-    // CORS headers
-    // Authentication
-    // Request logging
-});
-
-// Response processing - fires after Ready phase entered
-Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
-    $start = microtime(true);
-
-    ob_start(function($buffer) use ($start) {
-        // Minify HTML
-        if (str_contains(headers_list()[0] ?? '', 'text/html')) {
-            $buffer = preg_replace('/\s+/', ' ', $buffer);
-        }
-
-        // Add performance headers
-        $duration = microtime(true) - $start;
-        header("X-Response-Time: " . round($duration * 1000, 2) . "ms");
-        header("Content-Length: " . strlen($buffer));
-
-        return $buffer;
-    });
-
-    // Compression
-    if (extension_loaded('zlib')) {
-        ob_start('ob_gzhandler');
-    }
-});
+$dispatcher->registerExceptionConverter(
+    fn(\App\DomainException $e): ResponseInterface =>
+        new JsonResponse(['error' => $e->getMessage()], statusCode: 422)
+);
 ```
+
+Built-in HTTP exceptions (`mini\Exceptions\NotFoundException`, `AccessDeniedException`,
+`BadRequestException`, ...) already convert to their corresponding status codes.
 
 ---
 
 ## Best Practices
 
 ### Service Overrides
-- ✅ Create config files in `_config/[namespace]/[ClassName].php`
-- ✅ Return properly configured service instances from config files
-- ✅ Implement required PSR interfaces when replacing framework services (PSR-3, PSR-16, etc.)
-- ❌ Don't try to override by registering services in `app/bootstrap.php` (won't work)
+- Create config files in `_config/[namespace]/[ClassName].php`
+- Return properly configured service instances from config files
+- Implement required PSR interfaces when replacing framework services (PSR-3, PSR-16, etc.)
+- Don't try to override by registering services in `bootstrap.php` (won't work)
 
-### Phase Hooks for Request Processing
-- ✅ Use `onEnteringState(Phase::Ready)` for authentication, logging, headers
-- ✅ Call `exit` to short-circuit request processing
-- ✅ Set headers and status codes directly with `header()` and `http_response_code()`
-- ❌ Don't try to access Scoped services (db(), auth()) - not available until Ready phase entered
-
-### Phase Hooks for Response Processing
-- ✅ Use `onEnteredState(Phase::Ready)` with `ob_start()` for response processing
-- ✅ Check `headers_list()` to determine content type
-- ✅ Use `header()` to add/modify response headers
-- ✅ Return the (possibly modified) buffer from handler
-- ❌ Don't call `exit` in output handlers (breaks buffer chain)
+### Request/Response Processing
+- Use PSR-15 middleware for anything that inspects or transforms requests/responses
+- Use `onBeforeRequest`/`onAfterRequest` for logging, metrics, and cleanup
+- Never use `header()`, `echo`, or `exit` for request handling — the strict route
+  contract forbids direct output, and it cannot survive coroutine runtimes
+- Throw exceptions for error responses; register converters for domain exceptions
 
 ---
 
 ## See Also
 
-- **CLAUDE.md** - Full framework documentation
 - **README.md** - Getting started guide
 - **REFERENCE.md** - API reference
+- **src/Dispatcher/README.md** - Full request lifecycle documentation
+- **src/Hooks/README.md** - Typed events, triggers, filters, state machines

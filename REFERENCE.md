@@ -7,15 +7,16 @@ Quick reference for Mini framework functions and classes.
 ### Framework Bootstrap
 
 ```php
-bootstrap(): void       # Initialize framework (error handlers, output buffering)
-router(): void          # Handle routing (calls bootstrap() internally)
+bootstrap(): void       # Initialize framework (error handlers, phases)
+dispatch(): void        # Handle the current HTTP request (entry point in html/index.php)
 ```
 
 ### Translation
 
 ```php
-t(string $text, array $vars = []): Translatable  # Create translatable text
-translator(): Translator                          # Get translator instance
+t(string $text, array $vars = []): Translatable    # Create translatable text
+tjs(string $text, array $vars = []): \Stringable   # Translatable escaped for inline JS
+# Translator service: Mini::$mini->get(mini\I18n\TranslatorInterface::class)
 ```
 
 ### HTML & Output
@@ -68,17 +69,19 @@ $this->block('content'); ?>
 ### URL Generation
 
 ```php
-url(string $path = '', array $query = []): string  # Generate URL
+url(string|UriInterface $path = '', array $query = [], bool $cdn = false): UriInterface
 redirect(string $url, int $statusCode = 302): void # Redirect
 current_url(): string                              # Get current URL
 ```
 
 ### Session & Flash Messages
 
+`$_SESSION` is a fiber-safe request-scoped proxy (see `src/Session/`); no manual
+`session_start()` is needed.
+
 ```php
-session(): bool                               # Safe session initialization
 flash_set(string $type, string $message): void  # Set flash message
-flash_get(): array                             # Get and clear flash messages
+flash_get(): array                              # Get and clear flash messages
 ```
 
 ### Database
@@ -89,38 +92,46 @@ db(): DatabaseInterface  # Get request-scoped database instance
 
 **DatabaseInterface Methods:**
 ```php
-query(string $sql, array $params = []): array          # All rows
-queryOne(string $sql, array $params = []): ?array      # First row or null
+query(string $sql, array $params = []): Query          # Composable, lazy query facade
+queryOne(string $sql, array $params = []): ?object     # First row or null
 queryField(string $sql, array $params = []): mixed     # First field of first row
 queryColumn(string $sql, array $params = []): array    # First column as array
-exec(string $sql, array $params = []): bool|int        # Execute (returns last insert ID or true)
-lastInsertId(): ?string                                 # Get last insert ID
+exec(string $sql, array $params = []): int             # Execute, returns affected rows
+lastInsertId(): ?string                                # Get last insert ID
 tableExists(string $tableName): bool                   # Check if table exists
-transaction(\Closure $task): mixed                      # Run closure in transaction
+transaction(\Closure $task): mixed                     # Run closure in transaction
+insert(string $table, array $data): string             # INSERT, returns insert ID
+upsert(string $table, array $data, string ...$conflictColumns): int
+update(Query|PartialQuery $query, string|array $set, array $params = []): int
+delete(Query|PartialQuery $query): int
+quote(mixed $value): string                            # Quote a value for SQL
+quoteIdentifier(string $identifier): string            # Quote a table/column name
+getDialect(): SqlDialect                               # Active SQL dialect
 ```
 
-### Tables (Query Builder)
+### Query (Composable Query Facade)
+
+`db()->query('SELECT ...')` returns an **immutable** `mini\Database\Query`.
+Each method returns a new instance; WHERE/ORDER/LIMIT compose onto the base SQL.
+Rows are `stdClass` objects unless `withEntityClass()`/`withHydrator()` is used.
 
 ```php
-table(string $name): Repository  # Get table repository
-```
-
-**Repository Methods:**
-```php
-eq(string $field, mixed $value): Repository       # WHERE field = value
-gte(string $field, mixed $value): Repository      # WHERE field >= value
-lte(string $field, mixed $value): Repository      # WHERE field <= value
-gt(string $field, mixed $value): Repository       # WHERE field > value
-lt(string $field, mixed $value): Repository       # WHERE field < value
-in(string $field, array $values): Repository      # WHERE field IN (...)
-like(string $field, string $pattern): Repository  # WHERE field LIKE pattern
-order(string $field, string $direction = 'asc'): Repository  # ORDER BY
-limit(int $limit): Repository                     # LIMIT
-offset(int $offset): Repository                   # OFFSET
-all(): array                                      # Fetch all results
-first(): ?object                                  # Fetch first result
-count(): int                                      # Count results
-page(int $page, int $perPage = 20): array        # Paginated results
+eq/gt/gte/lt/lte(string $column, $value): static  # Comparison predicates
+like(string $column, string $pattern): static     # WHERE column LIKE pattern
+in(string $column, array|Query $values): static   # WHERE column IN (...)
+where(string $sql, array $params = []): static    # Raw WHERE fragment with params
+columns(string ...$columns): static               # Project columns
+order(?string $spec): static                      # ORDER BY 'col DESC, other ASC'
+limit(int $n): static / offset(int $n): static
+distinct(): static
+one(): mixed                                      # First result or null
+all(): array                                      # Materialize all rows
+column(): array                                   # First column as array
+field(): mixed                                    # First field of first row
+count(): int / exists(): bool
+withEntityClass(string $class, array|false $ctorArgs = false): static
+withHydrator(\Closure $hydrator): static
+# Also iterable (lazy) and JsonSerializable
 ```
 
 ### Cache
@@ -168,11 +179,11 @@ fmt(): Fmt              # Get formatter instance
 **Fmt Static Methods:**
 ```php
 Fmt::currency(float $amount, string $currencyCode): string
-Fmt::dateShort(\DateTimeInterface $date): string
-Fmt::dateLong(\DateTimeInterface $date): string
-Fmt::timeShort(\DateTimeInterface $time): string
-Fmt::dateTimeShort(\DateTimeInterface $dt): string
-Fmt::dateTimeLong(\DateTimeInterface $dt): string
+Fmt::dateShort(\DateTimeInterface|string $date): string
+Fmt::dateLong(\DateTimeInterface|string $date): string
+Fmt::timeShort(\DateTimeInterface|string $time): string
+Fmt::dateTimeShort(\DateTimeInterface|string $dt): string
+Fmt::dateTimeLong(\DateTimeInterface|string $dt): string
 Fmt::number(float|int $number, int $decimals = 0): string
 Fmt::percent(float $ratio, int $decimals = 0): string
 Fmt::fileSize(int $bytes): string
@@ -180,12 +191,19 @@ Fmt::fileSize(int $bytes): string
 
 ### Authentication
 
+`auth()` returns the `mini\Auth\Auth` facade. The application provides the
+implementation via a `_config/mini/Auth/AuthInterface.php` config file.
+
 ```php
-setupAuth(\Closure $factory): void  # Register auth implementation
-auth(): ?AuthInterface              # Get auth instance
-is_logged_in(): bool                # Check if user is authenticated
-require_login(): void               # Require authentication (throws 401)
-require_role(string $role): void    # Require specific role (throws 403)
+auth(): Auth                          # Get auth facade
+auth()->isAuthenticated(): bool
+auth()->getUserId(): mixed
+auth()->getClaim(string $name): mixed
+auth()->hasRole(string $role): bool
+auth()->hasPermission(string $permission): bool
+auth()->requireLogin(): Auth          # Throws AuthenticationRequiredException
+auth()->requireRole(string $role): Auth
+auth()->requirePermission(string $permission): Auth
 ```
 
 **AuthInterface (implement this):**
@@ -193,7 +211,9 @@ require_role(string $role): void    # Require specific role (throws 403)
 interface AuthInterface {
     public function isAuthenticated(): bool;
     public function getUserId(): mixed;
+    public function getClaim(string $name): mixed;
     public function hasRole(string $role): bool;
+    public function hasPermission(string $permission): bool;
 }
 ```
 
@@ -269,12 +289,17 @@ class Translator {
 class Mini implements ContainerInterface {
     public static Mini $mini;                  # Global instance
     public readonly string $root;              # Project root
-    public readonly PathsRegistry $paths;      # Path registries
+    public readonly Mini\PathRegistries $paths;# Path registries (overlay file system)
+    public readonly ?string $docRoot;          # Document root
+    public readonly ?string $baseUrl;          # Base URL
+    public readonly ?string $cdnUrl;           # CDN URL (for url(..., cdn: true))
     public readonly bool $debug;               # Debug mode
     public readonly string $locale;            # Default locale
     public readonly string $timezone;          # Default timezone
+    public readonly string $sqlTimezone;       # Timezone for SQL timestamps
     public readonly string $defaultLanguage;   # Default language
     public readonly string $salt;              # Cryptographic salt (auto-generated or MINI_SALT)
+    public readonly Hooks\StateMachine $phase; # Lifecycle phase state machine
 
     public function addService(string $id, Lifetime $lifetime, Closure $factory): void
     public function has(string $id): bool
@@ -296,45 +321,59 @@ enum Lifetime {
 
 ## HTTP Exceptions
 
+Exceptions convert to responses via the exception converter registry (see PATTERNS.md).
+
 ```php
-throw new Http\NotFoundException($message);        # 404
-throw new Http\AccessDeniedException($message);    # 401/403
-throw new Http\BadRequestException($message);      # 400
-throw new Http\HttpException($code, $message);     # Custom code
+throw new mini\Exceptions\NotFoundException($message);                # 404
+throw new mini\Exceptions\AccessDeniedException($message);            # 403
+throw new mini\Exceptions\AuthenticationRequiredException($message);  # 401
+throw new mini\Exceptions\BadRequestException($message);              # 400
 ```
 
 ## Routing
 
 ### File-Based Routes
 
-Files in `_routes/` directory map to URLs:
+Files in `_routes/` directory map to URLs. Wildcards: `_.php` matches a single
+segment, `_/` matches a directory segment; captured values land in `$_GET[0]`,
+`$_GET[1]`, ... (nearest wildcard at index 0).
 
 ```
 _routes/index.php              → /
 _routes/users.php              → /users
 _routes/api/posts.php          → /api/posts
+_routes/users/_.php            → /users/{anything}   ($_GET[0])
 ```
 
-### Pattern Routes
+### Strict Route Contract
 
-In `_config/routes.php`:
+A route file **must** return one of:
+
+- a `Psr\Http\Message\ResponseInterface` (e.g. `JsonResponse`, `HtmlResponse`)
+- a `mini\Http\ResponseAggregate` (any class with `getResponse(): ResponseInterface`)
+- a `Closure` — an inline handler with typed parameter injection; its return
+  value converts to a response via the converter registry
+- a `Psr\Http\Server\RequestHandlerInterface` — typically from `__DEFAULT__.php`
+
+Anything else throws — including `echo`/`header()` during route file inclusion.
 
 ```php
-return [
-    "/users/{id:\d+}" => fn($id) => "_routes/users/detail.php?id={$id}",
-    "/posts/{slug}" => fn($slug) => "_routes/posts/detail.php?slug={$slug}"
-];
+// _routes/api/ping.php
+<?php return new mini\Http\Message\JsonResponse('pong');
+
+// _routes/api/users/_.php — $_0 receives the wildcard, type-coerced
+<?php return fn(int $_0) => User::find($_0);
 ```
 
-### Directory Routes
+### Directory Routes (Sub-Routers)
 
-In `_routes/api/__DEFAULT__.php`:
+`_routes/api/users/__DEFAULT__.php` mounts a PSR-15 handler for the whole
+`/api/users/*` subtree — a controller extending `mini\Controller\AbstractController`
+(pattern-based routing via `#[GET]`/`#[POST]` attributes) or any
+`RequestHandlerInterface` (even a mounted Slim/Mezzio app):
 
 ```php
-return [
-    "/api/users" => fn() => "_routes/api/users.php",
-    "/api/posts/{id}" => fn($id) => "_routes/api/posts/detail.php?id={$id}"
-];
+<?php return new UserController();
 ```
 
 ## Configuration
@@ -357,23 +396,24 @@ DEBUG=1                          # Debug mode
 
 All config files in `_config/` directory:
 
-- `bootstrap.php` - Application initialization
-- `routes.php` - Pattern-based routes
 - `PDO.php` - PDO factory override
 - `Psr/Log/LoggerInterface.php` - Logger override
 - `Psr/SimpleCache/CacheInterface.php` - Cache override
 
 ## CLI Commands
 
+Subcommands are discovered via `extra.mini.commands` in composer.json — packages
+(and the host application) can contribute their own.
+
 ```bash
-composer exec mini serve                         # Start development server
-composer exec mini serve --host 0.0.0.0 --port 3000  # Custom host/port
-composer exec mini migrations                    # Run pending migrations
-composer exec mini translations                  # Validate translations
-composer exec mini translations add-missing      # Add missing translation strings
-composer exec mini translations add-language nb  # Create new language
-composer exec mini translations remove-orphans   # Remove unused translations
-composer exec mini benchmark                     # Run performance benchmarks
+vendor/bin/mini serve            # Start development server
+vendor/bin/mini test [path]      # Run tests
+vendor/bin/mini migrations       # Run database migrations (tracking + rollback)
+vendor/bin/mini translations     # Manage translation files
+vendor/bin/mini docs             # Browse PHP documentation
+vendor/bin/mini db               # Interactive database shell (-v for VirtualDatabase)
+vendor/bin/mini aspects          # Sync aspect bundles with Composer
+vendor/bin/mini benchmark        # Benchmark framework performance
 ```
 
 ## ICU MessageFormat Syntax
@@ -403,24 +443,17 @@ t("Today is {date, date, full}", ['date' => new DateTime()])
 t("Price: {amount, number, currency}", ['amount' => 19.99])
 ```
 
-## Testing Helpers
+## Testing
+
+Run tests with `vendor/bin/mini test [path]` (in this repo: `php bin/mini test tests/...`).
+Test files are plain PHP scripts; assertions live in `tests/assert.php`:
 
 ```php
-function test(string $description, callable $test): void {
-    try {
-        $test();
-        echo "✓ {$description}\n";
-    } catch (\Exception $e) {
-        echo "✗ {$description}\n";
-        echo "  Error: {$e->getMessage()}\n";
-    }
-}
+require __DIR__ . '/assert.php';
 
-function assertEqual($expected, $actual, string $message = ''): void {
-    if ($expected !== $actual) {
-        throw new \Exception($message ?: "Expected != Actual");
-    }
-}
+assert_eq($expected, $actual);
+assert_true($condition);
+assert_throws(fn() => dangerousCode(), SomeException::class);
 ```
 
 ## Native PHP Integrations
@@ -563,44 +596,47 @@ See `README.md` (APCu Polyfill section) for complete documentation.
 
 ## Common Patterns
 
+Route files return handlers or responses — never `echo` or `header()` directly.
+
 ### Form Handling
 
 ```php
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $username = $_POST['username'] ?? '';
-    $email = $_POST['email'] ?? '';
-
-    // Validate, save, redirect
-    db()->exec('INSERT INTO users (username, email) VALUES (?, ?)', [$username, $email]);
-    redirect(url('users'));
-}
-
-echo render('form.php', ['title' => t('Create User')]);
+// _routes/users/create.php
+<?php return function (): mixed {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        db()->insert('users', [
+            'username' => $_POST['username'] ?? '',
+            'email' => $_POST['email'] ?? '',
+        ]);
+        throw new mini\Router\Redirect((string)url('users'));
+    }
+    return new mini\Http\Message\HtmlResponse(
+        render('form.php', ['title' => t('Create User')])
+    );
+};
 ```
 
 ### API Endpoints
 
 ```php
-header('Content-Type: application/json');
-
-try {
-    $users = db()->query('SELECT * FROM users')->fetchAll();
-    echo json_encode($users);
-} catch (\Exception $e) {
-    log()->error('Failed to fetch users', ['exception' => $e]);
-    http_response_code(500);
-    echo json_encode(['error' => 'Internal server error']);
-}
+// _routes/api/users.php — arrays returned from a Closure convert to JSON;
+// exceptions convert to error responses via the exception converter registry
+<?php return fn() => db()->query('SELECT * FROM users')->all();
 ```
 
 ### Protected Routes
 
 ```php
-require_login();
-require_role('admin');
-
-$users = db()->query('SELECT * FROM users')->fetchAll();
-echo render('templates/admin/users.php', ['users' => $users]);
+// _routes/admin/users.php
+<?php
+return function () {
+    auth()->requireLogin()->requireRole('admin');
+    return new mini\Http\Message\HtmlResponse(
+        render('templates/admin/users.php', [
+            'users' => db()->query('SELECT * FROM users'),  // lazy; template iterates
+        ])
+    );
+};
 ```
 
 ## See Also

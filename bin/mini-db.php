@@ -22,8 +22,45 @@ use mini\Database\VirtualDatabase;
 
 // Parse arguments
 $args = ArgManager::parse($argv)
+    ->withFlag('h', 'help')
     ->withFlag('v', 'virtual')
     ->withOptionalValue('f', 'format', 'markdown');
+
+// Help must be handled before anything touches a database — it has to work
+// even outside a bootstrapped Mini project, in both one-shot and REPL mode.
+if ($args->getFlag('help')) {
+    echo <<<'TXT'
+Mini Database Shell
+
+Interactive SQL REPL and one-shot query runner for the application database
+or a VirtualDatabase.
+
+Usage:
+  mini db [options]              Start interactive REPL
+  mini db [options] <sql>        Execute one query and exit
+  mini db [options] <.command>   Run a dot-command and exit
+
+Options:
+  -v, --virtual         Use VirtualDatabase (_config/mini/Database/VirtualDatabase.php)
+  -f, --format <fmt>    Output format: markdown (default), json, csv
+  -h, --help            Show this help
+
+Dot-commands (also available inside the REPL — see .help):
+  .tables               List all tables
+  .schema [table]       Show table schema
+  .format <fmt>         Set output format (REPL only)
+  .quit / .exit         Exit the REPL
+
+Examples:
+  mini db                                  Connect to the app database
+  mini db 'SELECT * FROM users LIMIT 5'    One-shot query
+  mini db --format=json '.tables'          Table list as JSON
+  mini db -v '.schema users'               Inspect a VirtualDatabase table
+
+TXT;
+    exit(0);
+}
+
 $useVirtual = $args->getFlag('v') > 0;
 $format = $args->getOption('format') ?? 'markdown';
 $unparsed = $args->getUnparsedArgs();
@@ -65,11 +102,11 @@ if ($useVirtual) {
 // If query/command provided as argument, execute and exit
 if ($query !== null) {
     if (str_starts_with($query, '.')) {
-        handleDotCommand($db, $query, $useVirtual, $format);
+        $ok = handleDotCommand($db, $query, $useVirtual, $format);
     } else {
-        executeQuery($db, $query, $format);
+        $ok = executeQuery($db, $query, $format);
     }
-    exit(0);
+    exit($ok ? 0 : 1);
 }
 
 // Interactive REPL
@@ -231,19 +268,21 @@ while (($line = $rl->prompt($multilineBuffer ? $multilinePrompt : null)) !== nul
 
 echo "\nBye!\n";
 
-function executeQuery(DatabaseInterface $db, string $sql, string $format): void
+function executeQuery(DatabaseInterface $db, string $sql, string $format): bool
 {
     $sql = rtrim($sql, "; \t\n\r");
 
     try {
         $result = $db->query($sql);
         displayResults($result, $format);
+        return true;
     } catch (Throwable $e) {
         if ($format === 'json') {
             echo json_encode(['error' => $e->getMessage()], JSON_PRETTY_PRINT) . "\n";
         } else {
             fwrite(STDERR, "Error: " . $e->getMessage() . "\n");
         }
+        return false;
     }
 }
 
@@ -346,7 +385,7 @@ function displayMarkdown(array $rows, array $columns): void
     echo "\n(" . count($rows) . " row" . (count($rows) !== 1 ? "s" : "") . ")\n";
 }
 
-function handleDotCommand(DatabaseInterface $db, string $cmd, bool $isVirtual, string &$format): void
+function handleDotCommand(DatabaseInterface $db, string $cmd, bool $isVirtual, string &$format): bool
 {
     $parts = preg_split('/\s+/', trim($cmd), 2);
     $command = $parts[0];
@@ -365,7 +404,7 @@ function handleDotCommand(DatabaseInterface $db, string $cmd, bool $isVirtual, s
         case '.format':
             if (!in_array($arg, ['markdown', 'json', 'csv'])) {
                 echo "Usage: .format <markdown|json|csv>\n";
-                break;
+                return false;
             }
             $format = $arg;
             echo "Output format set to: $format\n";
@@ -450,5 +489,8 @@ function handleDotCommand(DatabaseInterface $db, string $cmd, bool $isVirtual, s
         default:
             echo "Unknown command: $command\n";
             echo "Type .help for available commands\n";
+            return false;
     }
+
+    return true;
 }

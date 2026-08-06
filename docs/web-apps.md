@@ -10,6 +10,7 @@ This guide covers the main parts of building web applications with Mini: routing
 - [Response Converters](#response-converters)
 - [Custom Error Pages](#custom-error-pages)
 - [Mounting Sub-Applications](#mounting-sub-applications)
+- [Pattern-Based Rerouting](#pattern-based-rerouting)
 
 ## File-Based Routing
 
@@ -41,8 +42,8 @@ return new JsonResponse($user);
 // _routes/users/_/posts/_.php - Matches /users/{userId}/posts/{postId}
 use mini\Http\Message\JsonResponse;
 
-$userId = $_GET[0];   // First wildcard
-$postId = $_GET[1];   // Second wildcard
+$postId = $_GET[0];   // Nearest wildcard (the last one matched)
+$userId = $_GET[1];   // Next wildcard, moving outward
 $post = db()->queryOne("SELECT * FROM posts WHERE id = ? AND user_id = ?", [$postId, $userId]);
 return new JsonResponse($post);
 ```
@@ -51,7 +52,7 @@ return new JsonResponse($post);
 - `_.php` matches any single segment (e.g., `/users/123`)
 - `_/index.php` matches any single segment with trailing slash (e.g., `/users/123/`)
 - Exact matches take precedence over wildcards
-- Captured values stored in `$_GET[0]`, `$_GET[1]`, etc. (left to right)
+- Captured values stored in `$_GET[0]`, `$_GET[1]`, etc. — **nearest wildcard first** (`$_GET[0]` is the wildcard closest to the matched file)
 - Wildcards match single segments only (won't match across `/`)
 
 ### Trailing Slash Redirects
@@ -68,7 +69,7 @@ A route file must return a PSR-15 `RequestHandlerInterface`, a PSR-7 `ResponseIn
 ```php
 // 1. PSR-7 Response
 use mini\Http\Message\JsonResponse;
-return new JsonResponse(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
+return new JsonResponse(['users' => db()->query("SELECT * FROM users")->all()]);
 ```
 
 ```php
@@ -83,7 +84,7 @@ use mini\Http\Message\HtmlResponse;
 
 class UsersPage extends HtmlResponse {
     public function __construct() {
-        $users = db()->query("SELECT * FROM users")->fetchAll();
+        $users = db()->query("SELECT * FROM users")->all();
         parent::__construct(render('users.php', ['users' => $users]));
     }
 }
@@ -103,7 +104,7 @@ return new class implements RequestHandlerInterface {
 ```php
 // 5. Closure (inline handler) — typed parameter injection; the return value
 //    is converted via the converter registry (array → JSON, etc.)
-return fn() => ['users' => db()->query("SELECT * FROM users")->fetchAll()];
+return fn() => ['users' => db()->query("SELECT * FROM users")->all()];
 ```
 
 ```php
@@ -111,7 +112,7 @@ return fn() => ['users' => db()->query("SELECT * FROM users")->fetchAll()];
 return (new SupportTicket)->handleUserSupportTicket(...);
 ```
 
-**Important:** When a Closure returns a plain string, it converts to a `text/plain` response, not HTML. For HTML responses, always use `HtmlResponse` or a class that extends it.
+**Important:** When a Closure returns a plain string (or int/float/bool), the default converter JSON-encodes it into an `application/json` response — it does not become HTML. For HTML responses, always use `HtmlResponse` or a class that extends it.
 
 ### Mounting a module's handler method
 
@@ -136,7 +137,7 @@ use Psr\Http\Message\ServerRequestInterface;
 class SupportTicket {
     public function handleUserSupportTicket(int $_0, ServerRequestInterface $request): ResponseInterface {
         // $_0 is the wildcard match — the person id from /people/{id}/support-tickets
-        $tickets = db()->query("SELECT * FROM tickets WHERE user_id = ?", [$_0])->fetchAll();
+        $tickets = db()->query("SELECT * FROM tickets WHERE user_id = ?", [$_0])->all();
         return new JsonResponse(['tickets' => $tickets]);
     }
 }
@@ -166,13 +167,13 @@ return new class extends AbstractController {
     #[GET('/')]
     public function index(): array
     {
-        return db()->query("SELECT * FROM users")->fetchAll();
+        return db()->query("SELECT * FROM users")->all();
     }
 
     #[GET('/{id}/')]
-    public function show(int $id): array
+    public function show(int $id): object
     {
-        $user = db()->query("SELECT * FROM users WHERE id = ?", [$id])->fetch();
+        $user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$id]);
         if (!$user) throw new \mini\Exceptions\NotFoundException();
         return $user;
     }
@@ -180,21 +181,24 @@ return new class extends AbstractController {
     #[POST('/')]
     public function create(): array
     {
-        $id = db()->insert('users', $_POST);
+        $id = db()->insert('users', ['name' => $_POST['name'], 'email' => $_POST['email']]);
         return ['id' => $id, 'message' => 'Created'];
     }
 
     #[PUT('/{id}/')]
     public function update(int $id): array
     {
-        db()->update('users', $_POST, 'id = ?', [$id]);
+        db()->update(
+            db()->query("SELECT * FROM users")->eq('id', $id),
+            ['name' => $_POST['name'], 'email' => $_POST['email']]
+        );
         return ['message' => 'Updated'];
     }
 
     #[DELETE('/{id}/')]
     public function delete(int $id): ResponseInterface
     {
-        db()->delete('users', 'id = ?', [$id]);
+        db()->delete(db()->query("SELECT * FROM users")->eq('id', $id));
         return $this->empty(204);
     }
 };
@@ -213,7 +217,7 @@ public function show(int $id): array  // $id is already an integer!
 **Converter integration:** Return any type - controllers auto-convert to responses:
 ```php
 return ['users' => $users];           // → JSON response
-return "Hello";                       // → Text/plain response
+return "Hello";                       // → JSON scalar response ("Hello")
 return $this->json($data);            // → Explicit JSON response
 return $this->html($html);            // → HTML response
 return $this->redirect('/login');     // → Redirect response
@@ -239,7 +243,7 @@ Use controllers when you have:
 
 Use file-based routing when you have:
 - Simple, independent endpoints
-- Direct output control needs
+- Handlers that are complete responses in themselves (`FileResponse`, `JsonResponse`, a `ResponseAggregate`)
 - Maximum performance requirements
 
 ## Exception Handling
@@ -250,45 +254,37 @@ Use file-based routing when you have:
 
 ```php
 // Throw domain exceptions - dispatcher handles HTTP mapping
-throw new \mini\Exceptions\NotFoundException('User not found');     // → 404
-throw new \mini\Exceptions\AccessDeniedException('Login required');         // → 401/403
-throw new \mini\Exceptions\BadRequestException('Invalid email format');     // → 400
+throw new \mini\Exceptions\NotFoundException('User not found');               // → 404
+throw new \mini\Exceptions\AuthenticationRequiredException();                 // → 401 (not logged in)
+throw new \mini\Exceptions\AccessDeniedException('Admins only');              // → 403 (logged in, not permitted)
+throw new \mini\Exceptions\BadRequestException('Invalid email format');       // → 400
 
 // Generic exceptions become 500 errors
-throw new \RuntimeException('Database connection failed');                  // → 500
+throw new \RuntimeException('Database connection failed');                    // → 500
 ```
 
 ### Exception Converters
 
-Exception converters live in `src/Dispatcher/defaults.php` and map exceptions to HTTP responses:
+The default converters live in `src/Dispatcher/defaults.php` and map exceptions to HTTP responses rendered via `mini\Http\ErrorHandler`:
 
 ```php
 // NotFoundException → 404
 $dispatcher->registerExceptionConverter(function(\mini\Exceptions\NotFoundException $e): ResponseInterface {
-    return new Response($html, ['Content-Type' => 'text/html; charset=utf-8'], 404);
-});
-
-// AccessDeniedException → 401/403 (smart detection)
-$dispatcher->registerExceptionConverter(function(\mini\Exceptions\AccessDeniedException $e): ResponseInterface {
-    $statusCode = 401;  // Default: Unauthorized
-
-    try {
-        if (\mini\auth()->isAuthenticated()) {
-            $statusCode = 403;  // User authenticated but lacks permission
-        }
-    } catch (\Throwable) {
-        // Auth not configured, stay at 401
-    }
-
-    return new Response($html, ['Content-Type' => 'text/html; charset=utf-8'], $statusCode);
+    $body = \mini\Http\ErrorHandler::renderExceptionPage($e, 404);
+    return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], 404);
 });
 ```
 
-**You can register custom exception converters:**
+Defaults are registered for `NotFoundException` (404), `AuthenticationRequiredException` (401), `AccessDeniedException` (403), `BadRequestException` (400), and `\Throwable` (500 catch-all). The most specific matching converter wins.
+
+**You can register custom exception converters** during bootstrap (e.g. in your application's `bootstrap.php`). Registering during the Bootstrap phase transparently replaces the framework default for the same exception type:
 
 ```php
-// _config/mini/Dispatcher/HttpDispatcher.php
-$dispatcher = new HttpDispatcher($router);
+// bootstrap.php
+use mini\Mini;
+use mini\Dispatcher\HttpDispatcher;
+
+$dispatcher = Mini::$mini->get(HttpDispatcher::class);
 
 $dispatcher->registerExceptionConverter(function(PaymentException $e): ResponseInterface {
     return new Response(
@@ -297,16 +293,14 @@ $dispatcher->registerExceptionConverter(function(PaymentException $e): ResponseI
         402  // Payment Required
     );
 });
-
-return $dispatcher;
 ```
 
 ### Debug Mode vs Production
 
-**Debug mode** shows beautiful exception details with stack traces:
+**Debug mode** shows detailed exception pages with stack traces. `Mini::$mini->debug` is a readonly property set from the environment at startup:
 
-```php
-Mini::$mini->debug = true;  // Or set DEBUG=1 environment variable
+```bash
+DEBUG=1 php -S localhost:8080   # or set DEBUG=1 in your FPM/env configuration
 ```
 
 In debug mode, exceptions show:
@@ -327,13 +321,14 @@ Converters transform controller return values into PSR-7 responses.
 Registered in `src/Dispatcher/defaults.php`:
 
 ```php
-// string → text/plain response
-$converters->register(function(string $content): ResponseInterface {
-    return new Response($content, ['Content-Type' => 'text/plain; charset=utf-8'], 200);
+// string|int|float|bool → JSON scalar response
+$converters->register(function(string|int|float|bool $value): ResponseInterface {
+    $json = json_encode($value, JSON_THROW_ON_ERROR);
+    return new Response($json, ['Content-Type' => 'application/json; charset=utf-8'], 200);
 });
 
-// array → JSON response
-$converters->register(function(array $data): ResponseInterface {
+// array|stdClass → JSON response (a JsonSerializable converter is also registered)
+$converters->register(function(array|\stdClass $data): ResponseInterface {
     $json = json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     return new Response($json, ['Content-Type' => 'application/json; charset=utf-8'], 200);
 });
@@ -385,10 +380,14 @@ public function show(int $id): User
 
 ## Custom Error Pages
 
-Create custom error page templates in the project root:
+Error pages are ordinary templates. `mini\Http\ErrorHandler` resolves them through the views path registry:
+
+1. Application-specific: `_views/errors/{statusCode}.php`
+2. Framework default: `vendor/fubber/mini/_views/errors/{statusCode}.php`
+3. Debug mode fallback: `vendor/fubber/mini/_views/errors/debug.php`
 
 ```php
-// 404.php - Custom 404 page
+// _views/errors/404.php - Custom 404 page
 <!DOCTYPE html>
 <html>
 <head>
@@ -408,7 +407,7 @@ Create custom error page templates in the project root:
 ```
 
 ```php
-// 500.php - Custom 500 page
+// _views/errors/500.php - Custom 500 page
 <!DOCTYPE html>
 <html>
 <head>
@@ -416,27 +415,23 @@ Create custom error page templates in the project root:
 </head>
 <body>
     <h1>Something Went Wrong</h1>
-
-    <?php if (\mini\Mini::$mini->debug && isset($exception)): ?>
-        <pre><?= htmlspecialchars($exception->getMessage()) ?></pre>
-        <pre><?= htmlspecialchars($exception->getTraceAsString()) ?></pre>
-    <?php else: ?>
-        <p>We're working on fixing this. Please try again later.</p>
-    <?php endif; ?>
+    <p>We're working on fixing this. Please try again later.</p>
 </body>
 </html>
 ```
 
 **Error page variables:**
 - `$exception` - The exception that was thrown (Throwable)
-- `\mini\Mini::$mini->debug` - Check if debug mode is enabled
+- `$message` - The exception message
+
+In debug mode (`Mini::$mini->debug`, or the `DEBUG=1` environment variable) the ErrorHandler bypasses these templates entirely and renders a detailed debug page with stack trace and source context.
 
 **Standard HTTP status codes:**
-- `400.php` - Bad Request
-- `401.php` - Unauthorized
-- `403.php` - Forbidden
-- `404.php` - Not Found
-- `500.php` - Internal Server Error
+- `_views/errors/400.php` - Bad Request
+- `_views/errors/401.php` - Unauthorized (authentication required)
+- `_views/errors/403.php` - Forbidden (access denied)
+- `_views/errors/404.php` - Not Found
+- `_views/errors/500.php` - Internal Server Error
 
 ## Mounting Sub-Applications
 
@@ -453,7 +448,7 @@ use Slim\Factory\AppFactory;
 $app = AppFactory::create();
 
 $app->get('/users', function ($request, $response) {
-    $users = db()->query("SELECT * FROM users")->fetchAll();
+    $users = \mini\db()->query("SELECT * FROM users")->all();
     $response->getBody()->write(json_encode($users));
     return $response->withHeader('Content-Type', 'application/json');
 });
@@ -463,14 +458,15 @@ return $app;  // PSR-15 RequestHandlerInterface
 
 Now `/api/users` is handled by Slim!
 
-### Mount a Symfony Application
+### Mount Any PSR-15 Application
+
+The same pattern works for anything that implements (or can be adapted to) `Psr\Http\Server\RequestHandlerInterface`. For frameworks with their own request/response types (e.g. Symfony's HttpKernel), wrap the kernel in a small PSR-15 adapter — for Symfony, `symfony/psr-http-message-bridge` does the message conversion:
 
 ```php
 // _routes/admin/__DEFAULT__.php
 require_once __DIR__ . '/admin-app/vendor/autoload.php';
 
-$kernel = new AppKernel('prod', false);
-return $kernel;  // Symfony HttpKernelInterface wraps to PSR-15
+return new MyPsr15KernelAdapter(new AppKernel('prod', false));
 ```
 
 ### Why This Works
@@ -488,25 +484,18 @@ No conflicts because:
 - Each sub-app loads its own autoloader
 - Composer namespacing prevents collisions
 
-## Dynamic Routes with __DEFAULT__.php
+## Pattern-Based Rerouting
 
-Handle dynamic segments with pattern matching:
+`__DEFAULT__.php` follows the same contract as every other route file — it must return a handler or a response, never a bare array. For pattern-based path remapping, throw a `mini\Router\Reroute` with a pattern table; the router re-dispatches internally (no client-visible redirect):
 
 ```php
 // _routes/blog/__DEFAULT__.php
-return [
-    '/' => 'index.php',                              // /blog/
-    '/{slug}' => fn($slug) => "post.php?slug=$slug", // /blog/my-post
-    '/{year}/{month}' => 'archive.php',              // /blog/2025/11
-];
+throw new mini\Router\Reroute([
+    '/{slug}' => fn($slug) => "_post?slug=$slug",  // /blog/my-post → _routes/blog/_post.php
+]);
 ```
 
-**Pattern features:**
-- `{param}` captures any segment
-- `{param:\d+}` captures with regex constraint
-- Return string → internal redirect to that path
-- Return false → 404
-- Return array → additional routing table
+See `src/Router/README.md` for `Reroute` and `Redirect` details.
 
 ## See Also
 

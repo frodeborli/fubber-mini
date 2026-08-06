@@ -1,5 +1,7 @@
 # Template - PHP Template Rendering
 
+Pure-PHP templates with .NET-style multi-level inheritance — no template language for a forkable core to maintain, just PHP and output buffering.
+
 ## Philosophy
 
 Mini's template system is **pure PHP with optional inheritance**:
@@ -196,21 +198,6 @@ $adminSection = true;           // Variable available to all admin templates
 <?php $this->end(); ?>
 ```
 
-### Event Hooks
-
-Use `_viewstart.php` to fire events for extensibility:
-
-```php
-// _views/_viewstart.php
-<?php
-$layout = '_layout.php';
-
-// Allow plugins to inject variables or modify rendering
-mini\emit('view.start', [
-    'template' => $__template ?? null,
-]);
-```
-
 ## Multi-Level Inheritance
 
 You can extend layouts that themselves extend other layouts:
@@ -288,7 +275,7 @@ $layout = $user['role'] === 'admin' ? '_admin-layout.php' : '_layout.php';
 <html>
 <head>
     <title><?php $this->show('title', 'My App'); ?></title>
-    <?php if (isset($this->blocks['meta'])): ?>
+    <?php if (isset($this->allBlocks()['meta'])): ?>
         <?php $this->show('meta'); ?>
     <?php endif; ?>
 </head>
@@ -447,7 +434,7 @@ try {
 }
 ```
 
-Rendering errors are caught and returned as strings for easier debugging during development.
+Exceptions thrown while rendering are re-thrown after cleaning up output buffers — partial output is never emitted.
 
 ## Best Practices
 

@@ -1,5 +1,7 @@
 # I18n - Internationalization
 
+Translation and locale-aware formatting built on PHP's `intl` extension and ICU MessageFormat — Lindy, standards-based i18n a forkable core can rely on without bundles or gettext toolchains.
+
 ## Overview
 
 Mini's I18n system provides translations and locale-aware formatting using PHP's native `intl` extension and ICU MessageFormat.
@@ -122,7 +124,6 @@ _translations/
 ### From user preference
 
 ```php
-session();
 if (isset($_SESSION['locale'])) {
     \Locale::setDefault($_SESSION['locale']);
 }
@@ -225,7 +226,7 @@ If `autoCreateDefaults` is enabled (default), missing strings are automatically 
 
 ```php
 <?php
-// _config/mini/I18n/Translator.php
+// _config/mini/I18n/TranslatorInterface.php
 
 use mini\I18n\Translator;
 

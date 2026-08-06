@@ -33,17 +33,16 @@ require __DIR__ . '/../ensure-autoloader.php';
 
 use mini\CLI\ArgManager;
 
-// Bootstrap Mini framework
-mini\bootstrap();
-
 // Parse arguments - register globally via mini\args()
 mini\args(ArgManager::parse($argv)
+    ->withFlag('h', 'help')
     ->withSubcommand('migrate', 'up', 'rollback', 'down', 'status', 'fresh', 'make', 'help')
 );
 
 $sub = mini\args()->nextCommand();
 if ($sub) {
-    mini\args($sub);
+    // Re-declare --help on the subcommand context so `mini migrations status --help` works
+    mini\args($sub->withFlag('h', 'help'));
     $command = $sub->getCommand();
 } else {
     $command = 'migrate';
@@ -54,7 +53,33 @@ mini\args(mini\args()
     ->withFlag(null, 'allow-invalid-prefix')
     ->withFlag(null, 'force')
 );
+
+// --help/-h anywhere shows help. This MUST be resolved before dispatch:
+// the default command is 'migrate', so an unrecognized --help would
+// otherwise run pending migrations.
+if (mini\args()->getFlag('help')) {
+    $command = 'help';
+}
+
+// Help needs no framework bootstrap — make it work outside a project too.
+if ($command === 'help') {
+    showMigrationsHelp();
+    exit(0);
+}
+
+// Fail fast on unknown commands. Without this, `mini migrations badcmd`
+// would leave 'badcmd' unparsed and fall through to the default command —
+// which runs pending migrations.
+if (!$sub && ($unknown = mini\args()->getUnparsedArgs())) {
+    fwrite(STDERR, "Unknown command: {$unknown[0]}\n");
+    fwrite(STDERR, "Run 'mini migrations --help' for usage.\n");
+    exit(1);
+}
+
 $argument = mini\args()->getUnparsedArgs()[0] ?? null;
+
+// Bootstrap Mini framework
+mini\bootstrap();
 
 $runnerScript = __DIR__ . '/mini-migration-runner.php';
 
@@ -232,17 +257,6 @@ function runMigration(string $file, string $direction, string $runnerScript,
     }
 
     return $result ?? ['success' => false, 'error' => 'No output from migration', 'exitCode' => $exitCode];
-}
-
-/**
- * Record migration as executed
- */
-function recordMigration(string $name, int $batch, bool $reversible): void {
-    $db = getDb();
-    $db->exec(
-        "INSERT INTO _mini_migrations (migration, batch, reversible) VALUES (?, ?, ?)",
-        [$name, $batch, $reversible ? 1 : 0]
-    );
 }
 
 /**
@@ -429,8 +443,8 @@ switch ($command) {
         echo "Warning: This will reset all migration history!\n";
         echo "All migrations will run again from scratch.\n\n";
 
-        if (!isset($argv[2]) || $argv[2] !== '--force') {
-            echo "Add --force to confirm.\n";
+        if (!mini\args()->getFlag('force')) {
+            fwrite(STDERR, "Add --force to confirm.\n");
             exit(1);
         }
 
@@ -441,12 +455,6 @@ switch ($command) {
         } catch (Throwable $e) {
             // Table might not exist
         }
-
-        // Re-run migrations
-        $_SERVER['argv'] = ['mini-migrations.php', 'migrate'];
-        $argv = $_SERVER['argv'];
-        $argc = count($argv);
-        $command = 'migrate';
 
         ensureMigrationsTable();
 
@@ -463,13 +471,12 @@ switch ($command) {
         foreach ($allMigrations as $name => $file) {
             echo "Migrating: $name\n";
 
-            $result = runMigration($file, 'up', $runnerScript);
+            // The runner subprocess records the migration in the same transaction.
+            $result = runMigration($file, 'up', $runnerScript, $name, $batch);
 
             if (!empty($result['success'])) {
-                $reversible = !empty($result['reversible']);
-                recordMigration($name, $batch, $reversible);
                 $type = $result['type'] ?? 'unknown';
-                $reversibleLabel = $reversible ? ' (reversible)' : '';
+                $reversibleLabel = !empty($result['reversible']) ? ' (reversible)' : '';
                 echo "  ✓ Migrated [$type]$reversibleLabel\n\n";
             } else {
                 $error = $result['error'] ?? 'Unknown error';
@@ -484,8 +491,8 @@ switch ($command) {
 
     case 'make':
         if (!$argument) {
-            echo "Usage: mini migrations make <name>\n";
-            echo "Example: mini migrations make create_users_table\n";
+            fwrite(STDERR, "Usage: mini migrations make <name>\n");
+            fwrite(STDERR, "Example: mini migrations make create_users_table\n");
             exit(1);
         }
 
@@ -537,10 +544,16 @@ PHP;
         echo "Created: _migrations/$filename\n";
         break;
 
-    case 'help':
-    case '--help':
-    case '-h':
-        echo <<<HELP
+    default:
+        fwrite(STDERR, "Unknown command: $command\n");
+        fwrite(STDERR, "Run 'mini migrations --help' for usage.\n");
+        exit(1);
+}
+
+exit(0);
+
+function showMigrationsHelp(): void {
+    echo <<<HELP
 Database Migration Tool
 
 Manages database schema changes with version tracking and rollback support.
@@ -558,6 +571,8 @@ Commands:
 
 Options:
   --allow-invalid-prefix   Allow migrations without datetime prefix (YYYY_MM_DD_HHMMSS_)
+  --force                  Confirm destructive operations (fresh)
+  -h, --help               Show this help
 
 Migration Types:
 
@@ -584,10 +599,4 @@ Notes:
   - Rollback stops at first non-reversible migration
 
 HELP;
-        break;
-
-    default:
-        echo "Unknown command: $command\n";
-        echo "Run 'mini migrations help' for usage.\n";
-        exit(1);
 }

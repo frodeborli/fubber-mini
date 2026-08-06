@@ -1,6 +1,6 @@
 # Http Client - PSR-18 HTTP Client
 
-A lightweight PSR-18 compliant HTTP client built on curl.
+A lightweight PSR-18 compliant HTTP client built on curl — one of the PSR contracts Mini implements itself so a forkable core carries no third-party client dependency.
 
 ## Usage
 

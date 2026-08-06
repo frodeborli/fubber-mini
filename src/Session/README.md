@@ -1,6 +1,6 @@
 # Session - Fiber-Safe Session Management
 
-Mini provides a cache-backed session implementation that works transparently with `$_SESSION` while being fully fiber-safe and PSR-7 compatible.
+Mini provides a cache-backed session implementation that works transparently with `$_SESSION` while being fully fiber-safe and PSR-7 compatible — the familiar PHP session API, reimplemented so a forkable core stays portable to coroutine runtimes.
 
 ## Usage
 

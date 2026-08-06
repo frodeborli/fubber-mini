@@ -1,6 +1,6 @@
 # Util - Utility Classes
 
-This namespace contains utility classes for common programming tasks used throughout Mini and available for application code.
+This namespace contains small, framework-agnostic utility classes used throughout Mini and available for application code — the kind of dependency-free primitives a forkable core keeps in-tree.
 
 ## Overview
 
@@ -10,6 +10,9 @@ This namespace contains utility classes for common programming tasks used throug
 - **Path** - Cross-platform path manipulation (Windows/Unix compatible)
 - **PathsRegistry** - Priority-based file resolution across multiple paths
 - **QueryParser** - Parse and match query string criteria with operators
+- **Str** - String helpers (e.g. `Str::slugify()`)
+- **CacheControlHeader** - Parse/compose `Cache-Control` headers (Stringable)
+- **Math/** - Arbitrary-precision and decimal math primitives (`BigInt`, `Decimal`, ...)
 
 ## IdentityMap
 

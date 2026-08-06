@@ -1,6 +1,6 @@
 # Exceptions - Framework Exception Classes
 
-This namespace contains exception classes thrown by the Mini framework.
+This namespace contains the small, stable set of exception classes thrown by the Mini framework — shared failure vocabulary for a forkable core.
 
 ## Purpose
 
@@ -9,6 +9,7 @@ Mini uses specific exception types to indicate different failure modes:
 - **Container exceptions** - Service container and dependency injection failures (PSR-11 compliant)
 - **Configuration exceptions** - Missing or invalid configuration
 - **Dependency exceptions** - Missing Composer packages
+- **HTTP-mapped exceptions** - `NotFoundException` (404), `BadRequestException` (400), `AuthenticationRequiredException` (401), `AccessDeniedException` (403) — converted to responses by the dispatcher's exception converters
 
 All exceptions extend standard PHP exception classes, so you can catch them using familiar patterns.
 

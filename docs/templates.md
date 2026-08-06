@@ -24,7 +24,7 @@ When you call `render('profile.php')`, Mini searches for the template in this or
 
 1. **Application's `_views/`** - Your project's templates (checked first)
 2. **Composer packages' `_views/`** - Any package that registers with `Mini::$mini->paths->views`
-3. **Mini framework's `views/`** - Built-in fallback templates
+3. **Mini framework's `_views/`** - Built-in fallback templates (e.g. error pages)
 
 The first match wins. This means you can override any template by placing a file with the same path in your application's `_views/` folder.
 
@@ -32,7 +32,7 @@ The first match wins. This means you can override any template by placing a file
 
 ```php
 // In a composer package's bootstrap file
-Mini::$mini->paths->views->add(__DIR__ . '/_views');
+Mini::$mini->paths->views->addPath(__DIR__ . '/_views');
 ```
 
 For example, a `acme/bootstrap-layout` package could provide `_layout.php` and common parts. Your application can use them directly or override specific templates as needed.
@@ -126,8 +126,11 @@ $a = fn($s) => htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8');  // HTML attribu
 $fmt = mini\fmt();
 $t = fn($text, $vars = []) => mini\t($text, $vars);
 
-// Current user (if authenticated)
-$currentUser = mini\auth()->user();
+// Current user (if authenticated) — App\User is your application's model;
+// Mini's auth() facade only exposes identity, roles and claims.
+$currentUser = mini\auth()->isAuthenticated()
+    ? App\User::find(mini\auth()->getUserId())
+    : null;
 ```
 
 Now every template has access to `$h()`, `$a()`, `$fmt`, `$t()`, and `$currentUser` without passing them explicitly.
@@ -142,10 +145,10 @@ Create `_viewstart.php` in subdirectories to customize sections:
 $layout = 'admin/_layout.php';  // Admin section uses different layout
 $adminSection = true;
 
-// Require authentication for all admin templates
-if (!$currentUser || !$currentUser->isAdmin()) {
-    mini\redirect('/login');
-}
+// Require authentication for all admin templates —
+// throws AuthenticationRequiredException (401) / AccessDeniedException (403),
+// which the dispatcher converts to error responses.
+mini\auth()->requireLogin()->requireRole('admin');
 ```
 
 **Execution order** for `_views/admin/users/list.php`:
@@ -263,7 +266,7 @@ The blog layout extends the base layout and adds a sidebar:
 $layout = 'blog/_layout.php';
 
 // Load categories for sidebar (available in all blog templates)
-$categories = db()->query('SELECT * FROM categories ORDER BY name')->fetchAll();
+$categories = db()->query('SELECT * FROM categories ORDER BY name')->all();
 ```
 
 ### Page Template (Blog Post)
@@ -285,7 +288,7 @@ $categories = db()->query('SELECT * FROM categories ORDER BY name')->fetchAll();
         <h1><?= $h($post->title) ?></h1>
         <p class="meta">
             By <?= render('parts/user-badge.php', ['user' => $post->author]) ?>
-            on <?= $fmt->date($post->published_at) ?>
+            on <?= $fmt->dateLong($post->published_at) ?>
         </p>
     </header>
 
@@ -414,9 +417,11 @@ Keep controllers simple by passing query objects rather than paginated results. 
 
 ```php
 // _routes/admin/users.php
-$users = db()->from('users')
+use mini\Http\Message\HtmlResponse;
+
+$users = db()->query('SELECT * FROM users')
     ->where('deleted_at IS NULL')
-    ->orderBy('created_at DESC');
+    ->order('created_at DESC');
 
 // Optionally apply filters from request
 if ($search = $_GET['search'] ?? null) {
@@ -424,14 +429,14 @@ if ($search = $_GET['search'] ?? null) {
 }
 
 if ($role = $_GET['role'] ?? null) {
-    $users = $users->where('role = ?', [$role]);
+    $users = $users->eq('role', $role);
 }
 
-echo render('admin/users/list.php', [
+return new HtmlResponse(render('admin/users/list.php', [
     'users' => $users,  // Pass the query, not results
     'search' => $search,
     'role' => $role,
-]);
+]));
 ```
 
 ### Template with Pagination
@@ -455,7 +460,7 @@ $totalPages = (int)ceil($total / $perPage);
 $pagedUsers = $users
     ->limit($perPage)
     ->offset(($page - 1) * $perPage)
-    ->fetchAll();
+    ->all();
 ?>
 
 <div class="toolbar">
@@ -585,11 +590,11 @@ foreach ($users as $user):
 
 ### Conditional Blocks
 
-Check if optional blocks were defined:
+Check if optional blocks were defined. In a layout, blocks defined by child templates arrive as *inherited* blocks, so check `allBlocks()` (own + inherited):
 
 ```php
 // _views/_layout.php
-<?php if (isset($this->blocks['sidebar'])): ?>
+<?php if (isset($this->allBlocks()['sidebar'])): ?>
 <aside class="sidebar">
     <?php $this->show('sidebar'); ?>
 </aside>
@@ -625,7 +630,9 @@ $layout = '_layout.php';
 $h = fn($s) => htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8');
 $a = fn($s) => htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8');
 $fmt = mini\fmt();
-$currentUser = mini\auth()->user();
+$currentUser = mini\auth()->isAuthenticated()
+    ? App\User::find(mini\auth()->getUserId())
+    : null;
 ```
 
 ### Blog ViewStart
@@ -634,8 +641,8 @@ $currentUser = mini\auth()->user();
 // _views/blog/_viewstart.php
 <?php
 $layout = 'blog/_layout.php';
-$categories = db()->query('SELECT * FROM categories ORDER BY name')->fetchAll();
-$popularTags = db()->query('SELECT * FROM tags ORDER BY post_count DESC LIMIT 10')->fetchAll();
+$categories = db()->query('SELECT * FROM categories ORDER BY name')->all();
+$popularTags = db()->query('SELECT * FROM tags ORDER BY post_count DESC LIMIT 10')->all();
 ```
 
 ### Blog Index (with query passed from controller)
@@ -650,7 +657,7 @@ $popularTags = db()->query('SELECT * FROM tags ORDER BY post_count DESC LIMIT 10
 <?php
 $page = max(1, (int)($_GET['page'] ?? 1));
 $perPage = 10;
-$pagedPosts = $posts->limit($perPage)->offset(($page - 1) * $perPage)->fetchAll();
+$pagedPosts = $posts->limit($perPage)->offset(($page - 1) * $perPage)->all();
 ?>
 
 <h1>Latest Posts</h1>

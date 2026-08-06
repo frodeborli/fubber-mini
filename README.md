@@ -2,16 +2,23 @@
 
 > **Designed for decades, not release cycles.**
 
+Mini is a **forkable core framework** — a complete, zero-dependency foundation you can build on *or own outright*:
+
+- **Built to sit underneath.** Mini provides the generic building blocks — routing, HTTP, database, auth, i18n, validation, events. Opinionated conveniences (scaffolding, admin panels, a `GenericCRUDAPI`) belong in a "Maxi"-style layer *on top* of Mini, or in your application. The core stays small enough to understand end to end.
+- **Built to be forked.** A business that needs a head start it can maintain for a decade can fork Mini and own every line. There is no third-party abandonment risk to inherit: the `require` section is PHP itself, PSR interface packages, and two intl polyfill shims. The audit surface is Mini's own source.
+- **Built on Lindy foundations.** APIs that have survived decades — SQL, MIME, PSR contracts, the filesystem, ICU, LINQ-style immutable composition — over trendy framework idioms that trigger a rewrite every major version. If a pattern has worked for 40 years, it will likely work for 40 more.
+
 **LLMs and senior developers: read [MINI-STYLE.md](MINI-STYLE.md) before working on Mini projects.**
 
 ```bash
 composer require fubber/mini
-mkdir _routes
+mkdir html _routes
+echo '<?php require __DIR__."/../vendor/autoload.php"; mini\dispatch();' > html/index.php
 echo '<?php return fn() => date("c");' > _routes/time.php
-composer exec mini serve
+vendor/bin/mini serve
 ```
 
-Visit `http://localhost/time` - you're running.
+Visit `http://localhost:8080/time` - you're running.
 
 ---
 
@@ -108,14 +115,14 @@ Mini provides composable, well-implemented functionality for many concerns in mo
 
 Mini includes command-line tools via `vendor/bin/mini`:
 
-* **`mini serve`**: Development server with auto-reload
+* **`mini serve`**: Development server (PHP's built-in server with the correct document root)
+* **`mini aspects`**: Scaffold and sync aspect bundles with Composer
 * **`mini migrations`**: Migration runner with tracking, rollback, and `make` scaffolding
 * **`mini translations`**: Manage translation files—validate, add missing strings, add languages, remove orphans
 * **`mini docs`**: Browse PHP documentation for classes, functions, and namespaces
 * **`mini test`**: Run tests with pattern matching
-* **`mini db`**: Interactive SQL REPL for your database
-* **`mini vdb`**: VirtualDatabase shell for CSV/JSON data sources
-* **`mini benchmark`**: HTTP performance benchmarking
+* **`mini db`**: Interactive SQL REPL for your database (`-v` for the VirtualDatabase shell over CSV/JSON sources)
+* **`mini benchmark`**: Benchmark framework performance
 
 ---
 
@@ -135,7 +142,9 @@ Mini is built on a **Lindy perspective**: if a pattern has worked for 40 years, 
 
 **Full-stack, lazy-loaded.** ORM, auth, i18n, templates, validation — all included, nothing loads until touched. Hello World uses ~300KB.
 
-**Zero non-PSR dependencies.** The `require` section is `php >=8.3`, the seven `psr/*` interface packages, and two conditional `symfony/polyfill-intl-*` shims that activate only when the `intl` extension is missing. Mini *provides* implementations for five PSR contracts (`container`, `http-message`, `http-factory`, `http-client`, `simple-cache`). The audit surface is Mini's own source. Aspects and host applications can compose any PSR-compatible package from Packagist without conflict — the ecosystem is the ecosystem.
+**Zero non-PSR dependencies.** The `require` section is `php >=8.3`, seven `psr/*` interface packages, and two `symfony/polyfill-intl-*` shims that activate only when the `intl` extension is missing. Mini *provides* implementations for five PSR contracts (`container`, `http-message`, `http-client`, `simple-cache`, `log`). The audit surface is Mini's own source. Aspects and host applications can compose any PSR-compatible package from Packagist without conflict — the ecosystem is the ecosystem.
+
+**A core, not a kitchen sink.** Generic building blocks belong in Mini; opinionated conveniences belong in a "Maxi"-style framework layered on top, or in your application. When evaluating whether something should be added to Mini, the question is: "does this belong in a forkable core, or in a layer on top?"
 
 **Vertically integrated scaling path.** Mini today runs on PHP-FPM like any PHP framework. The fiber-safe globals, streaming dispatcher, and immutable query builder are designed for the [phasync](https://github.com/frodeborli/phasync) coroutine runtime and the upcoming Swerve application server — same author, same stack. Code written today on FPM is intended to run on Swerve without rewriting.
 
@@ -170,7 +179,7 @@ $router->addRoute('GET', '/users/{id}', [UserController::class, 'show']);
 **Templates:**
 ```php
 // Mini: PHP IS the template language (no parsing overhead)
-<?= h($user->name) ?>  // Direct output buffering, closure-based inheritance
+<?= htmlspecialchars($user->name) ?>  // Direct output buffering, closure-based inheritance
 
 // Framework approach: Parse string templates into PHP (Blade, Twig)
 {{ $user->name }}
@@ -185,19 +194,19 @@ $router->addRoute('GET', '/users/{id}', [UserController::class, 'show']);
 
 **Helpers when they genuinely simplify:**
 ```php
-$users = db()->query("SELECT * FROM users WHERE active = ?", [1])->fetchAll();
+$users = db()->query("SELECT * FROM users WHERE active = ?", [1])->all();
 echo render('user/profile', ['user' => $user]);
 echo t("Hello, {name}!", ['name' => 'World']);
-session();  // Starts session if needed
+$_SESSION['seen'] = true;  // Session auto-starts on access (fiber-safe proxy)
 ```
 
 ### Lazy-Loading Architecture
 
 **All features exist, but nothing loads until touched:**
 ```php
-mailer();      // Mail transport for sending emails
-table(User::class);  // Loads ORM only when used
-auth()->check();     // Loads authentication system on demand
+mailer();                  // Mail transport for sending emails
+db();                      // Opens the database connection on first use
+auth()->isAuthenticated(); // Loads authentication system on demand
 ```
 
 This "soft dependency" pattern means:
@@ -264,8 +273,8 @@ Create the entry point:
 ```php
 // html/index.php
 <?php
-require '../vendor/autoload.php';
-mini\router();
+require __DIR__ . '/../vendor/autoload.php';
+mini\dispatch();
 ```
 
 Create your first route:
@@ -282,7 +291,7 @@ Start the development server:
 vendor/bin/mini serve
 ```
 
-Visit `http://localhost` - you're running!
+Visit `http://localhost:8080` - you're running!
 
 ### Building CLI Tools
 
@@ -381,12 +390,12 @@ The router automatically redirects to ensure consistency:
 ```php
 // _routes/users.php - PSR-7 response
 use mini\Http\Message\JsonResponse;
-return new JsonResponse(['users' => db()->query("SELECT * FROM users")->fetchAll()]);
+return new JsonResponse(['users' => db()->query("SELECT * FROM users")->all()]);
 ```
 
 ```php
 // _routes/users.php - Inline handler; returned array is converted to JSON
-return fn() => ['users' => db()->query("SELECT * FROM users")->fetchAll()];
+return fn() => ['users' => db()->query("SELECT * FROM users")->all()];
 ```
 
 ### Controller-Based Routing
@@ -397,18 +406,19 @@ return fn() => ['users' => db()->query("SELECT * FROM users")->fetchAll()];
 // _routes/users/__DEFAULT__.php - Handles /users/*
 use mini\Controller\AbstractController;
 use mini\Controller\Attributes\{GET, POST, PUT, DELETE};
+use Psr\Http\Message\ResponseInterface;
 
 return new class extends AbstractController {
     #[GET('/')]
     public function index(): array
     {
-        return db()->query("SELECT * FROM users")->fetchAll();
+        return db()->query("SELECT * FROM users")->all();
     }
 
     #[GET('/{id}/')]
-    public function show(int $id): array
+    public function show(int $id): object
     {
-        $user = db()->query("SELECT * FROM users WHERE id = ?", [$id])->fetch();
+        $user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$id]);
         if (!$user) throw new \mini\Exceptions\NotFoundException();
         return $user;
     }
@@ -466,14 +476,15 @@ return new class extends AbstractController {
 
 ```php
 // Throw domain exceptions - dispatcher handles HTTP mapping
-throw new \mini\Exceptions\NotFoundException('User not found');        // → 404
-throw new \mini\Exceptions\AccessDeniedException('Login required');           // → 401/403
-throw new \mini\Exceptions\BadRequestException('Invalid email format');       // → 400
+throw new \mini\Exceptions\NotFoundException('User not found');                 // → 404
+throw new \mini\Exceptions\AuthenticationRequiredException('Login required');   // → 401
+throw new \mini\Exceptions\AccessDeniedException('Admins only');                // → 403
+throw new \mini\Exceptions\BadRequestException('Invalid email format');         // → 400
 ```
 
 **Debug mode shows detailed error pages** with stack traces. In production, clean error pages are shown.
 
-**Custom error pages:** Create `_errors/404.php`, `_errors/500.php`, etc. to override default error pages. The exception is available as `$exception`.
+**Custom error pages:** Create `_views/errors/404.php`, `_views/errors/500.php`, etc. to override the framework defaults (they are ordinary templates, resolved application-first). The exception is available as `$exception`.
 
 **For complete coverage** of routing, error handling, converters, and web app patterns, see **[docs/web-apps.md](docs/web-apps.md)**.
 
@@ -538,13 +549,13 @@ project/
 │       └── admin-app/         # Complete Symfony application
 │           ├── composer.json  # Symfony's dependencies (guzzle 6.x)
 │           └── vendor/        # Symfony's vendor directory
-├── composer.json              # Mini (no dependencies!)
+├── composer.json              # Mini (PSR interfaces only)
 └── vendor/                    # Mini's vendor directory
 ```
 
 ### How It Works
 
-1. **Mini has zero required dependencies** - only PSR interfaces (dev/suggest)
+1. **Mini has no third-party implementation dependencies** - only PSR interface packages and intl polyfills
 2. **Sub-apps are isolated** - each has its own `vendor/autoload.php`
 3. **PSR-7 bridges everything** - Mini provides `ServerRequestInterface`, sub-apps return `ResponseInterface`
 4. **No conflicts** - Slim can use `guzzlehttp/psr7:7.x`, Symfony can use `6.x`, no collision
@@ -587,8 +598,11 @@ db()->transaction(function() {
 
 **VirtualDatabase** - SQL interface to non-SQL data (CSV, JSON, APIs):
 ```php
+use mini\Database\VirtualDatabase;
+use mini\Table\CSVTable;
+
 $vdb = new VirtualDatabase();
-$vdb->registerTable('countries', CsvTable::fromFile('data/countries.csv'));
+$vdb->registerTable('countries', CSVTable::fromFile('data/countries.csv'));
 
 // Query CSV files with SQL
 foreach ($vdb->query("SELECT * FROM countries WHERE continent = ?", ['Europe']) as $row) {
@@ -602,7 +616,7 @@ Prevent accidental data leaks by making authorization the default:
 
 ```php
 class User {
-    public static function mine(): PartialQuery {
+    public static function mine(): Query {
         $userId = auth()->getUserId();
         // Only return users accessible to current user
         return self::query()->where('id = ? OR EXISTS (...)', [$userId]);
@@ -669,28 +683,28 @@ Translation files mirror your source code structure in `_translations/`. For exa
 
 ## Authentication
 
-Simple authentication with pluggable user providers:
+`auth()` is a facade over an `AuthInterface` your application implements (sessions, JWT, API keys — Mini does not prescribe a user model). Register your implementation in `_config/mini/Auth/AuthInterface.php`:
 
 ```php
 // Check authentication
-if (!auth()->check()) {
-    redirect('/login');
+if (auth()->isAuthenticated()) {
+    $userId = auth()->getUserId();
 }
 
-// Require login (throws exception if not authenticated)
-mini\require_login();
+// Require login (throws AuthenticationRequiredException → 401 if not authenticated)
+auth()->requireLogin();
 
-// Role-based access
-mini\require_role('admin');
+// Role- and permission-based access (throw AccessDeniedException → 403 on failure)
+auth()->requireRole('admin');
+auth()->requirePermission('posts.edit');
 
-// Login
-if (auth()->login($username, $password)) {
-    redirect('/dashboard');
-}
-
-// Logout
-auth()->logout();
+// Non-throwing checks
+auth()->hasRole('admin');
+auth()->hasPermission('posts.edit');
+auth()->getClaim('email');
 ```
+
+How users log in and out (form + session, JWT issuance, ...) is your `AuthInterface` implementation's concern — see [src/Auth/README.md](src/Auth/README.md) for complete examples.
 
 ## Templates
 
@@ -730,21 +744,14 @@ Hook into application lifecycle via phase transitions:
 use mini\Mini;
 use mini\Phase;
 
-// Before Ready phase (authentication, CORS, rate limiting)
+// Before Ready phase (locale, timezone, per-request setup)
 Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
-    // Check authentication
-    if (!isset($_SESSION['user_id']) && str_starts_with($_SERVER['REQUEST_URI'], '/admin')) {
-        http_response_code(401);
-        exit;
-    }
+    \Locale::setDefault($_SESSION['locale'] ?? 'en_US');
 });
 
-// After Ready phase (output buffering, response processing)
+// After Ready phase entered (bootstrap complete, services registered)
 Mini::$mini->phase->onEnteredState(Phase::Ready, function() {
-    ob_start(function($buffer) {
-        // Minify HTML
-        return preg_replace('/\s+/', ' ', $buffer);
-    });
+    log()->info('Application ready');
 });
 ```
 
@@ -757,13 +764,11 @@ Create a `.env` file in your project root for environment-specific configuration
 ```bash
 # .env - Not committed to version control
 
-# Database (MySQL/PostgreSQL)
-DATABASE_DSN="mysql:host=localhost;dbname=myapp;charset=utf8mb4"
-DATABASE_USER="myapp_user"
-DATABASE_PASS="secret_password"
+# Database (MySQL/PostgreSQL) — SQLite is the zero-config default
+DATABASE_URL="mysql://myapp_user:secret_password@localhost/myapp"
 
-# Or use SQLite (default if no config)
-# DATABASE_DSN="sqlite:/path/to/database.sqlite3"
+# Or an explicit SQLite path
+# DATABASE_URL="sqlite:///path/to/database.sqlite3"
 
 # Mini framework settings
 MINI_LOCALE="en_US"
@@ -778,19 +783,7 @@ MINI_ROOT="/path/to/project"
 MINI_DOC_ROOT="/path/to/project/html"
 ```
 
-**Load environment variables** with vlucas/phpdotenv or similar:
-
-```bash
-composer require vlucas/phpdotenv
-```
-
-```php
-// bootstrap.php
-require __DIR__ . '/vendor/autoload.php';
-
-$dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
-$dotenv->load();
-```
+**No loader package needed.** Mini parses `.env` in the project root automatically during bootstrap (Symfony-compatible semantics: existing environment variables are never overwritten, so real environment always wins over the file). Values land in `$_ENV`, `$_SERVER`, and `getenv()`.
 
 ### Bootstrap File (bootstrap.php)
 
@@ -806,13 +799,7 @@ Create a bootstrap file for application initialization, autoloaded via composer.
 
 ```php
 // bootstrap.php - Runs before every request
-require __DIR__ . '/vendor/autoload.php';
-
-// Load environment variables
-if (file_exists(__DIR__ . '/.env')) {
-    $dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
-    $dotenv->load();
-}
+// (.env is already loaded by Mini's bootstrap — no loader code needed here)
 
 // Register lifecycle hooks
 use mini\Mini;
@@ -820,9 +807,7 @@ use mini\Phase;
 
 // Set locale/timezone per request from user session
 Mini::$mini->phase->onEnteringState(Phase::Ready, function() {
-    session();  // Start session
-
-    // Get user's preferred locale/timezone
+    // Get user's preferred locale/timezone ($_SESSION auto-starts on access)
     $locale = $_SESSION['locale'] ?? $_ENV['MINI_LOCALE'] ?? 'en_US';
     $timezone = $_SESSION['timezone'] ?? $_ENV['MINI_TIMEZONE'] ?? 'UTC';
 
@@ -1004,7 +989,7 @@ project/
 ## Development Server
 
 ```bash
-vendor/bin/mini serve                    # http://localhost
+vendor/bin/mini serve                    # http://localhost:8080
 vendor/bin/mini serve --port 3000        # Custom port
 vendor/bin/mini serve --host 0.0.0.0     # Bind to all interfaces
 ```

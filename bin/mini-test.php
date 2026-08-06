@@ -33,7 +33,11 @@ foreach ($args as $arg) {
     } elseif ($arg === '--help' || $arg === '-h') {
         showHelp();
         exit(0);
-    } elseif (!str_starts_with($arg, '-')) {
+    } elseif (str_starts_with($arg, '-')) {
+        fwrite(STDERR, "Error: Unknown option '$arg'\n");
+        fwrite(STDERR, "Run 'mini test --help' for usage.\n");
+        exit(1);
+    } else {
         // Positional arg: if it's an existing path use it, otherwise it's a filter
         if ($path === null && (is_dir($arg) || is_file($arg))) {
             $path = $arg;

@@ -2,13 +2,26 @@
 
 A full-featured and powerful zero dependencies PHP framework.
 
+## Positioning: a forkable core
+
+Mini is a **core framework**, designed to sit underneath a more complete, opinionated "Maxi"-style framework — or to be forked outright by a business that wants a foundation it can own and maintain for a decade without third-party abandonment risk. Consequences:
+
+- **Design questions are answered by asking: "does this belong in Mini core, or in a Maxi layer on top?"** Generic building blocks (routing, HTTP, SQL, auth contracts, events, validation) belong in Mini. Opinionated conveniences (e.g. a `GenericCRUDAPI` class, scaffolding, admin UIs) belong in a layer on top — do not add them here.
+- **Lindy APIs.** Prefer designs that have survived a long time (PSR, MIME, SQL, LINQ-inspired immutable composition) over trendy framework idioms (no Eloquent/Doctrine-style magic).
+- **The async future is PHP Fibers** (phasync-style runtimes): no shared mutable state except immutable config, nothing SAPI-bound. This is why direct output from routes throws.
+
+Breaking changes are recorded in `CHANGE-LOG.md` — check it when behavior differs from what you remember, and expect the orchestrating developer to maintain it.
+
+## Core facts
+
 1. Templating. Mini has pure-PHP templates with multi-level inheritance modelled after .NET Core. ($this->extend('layout'), $this->block('content')). 
    Use `mini\render('view', [...])` and the inheritance methods.
-2. Service access via typed helpers. `db()`, `cache()`, `auth()`, `mailer()`, `t()`, `fmt()`, `request()`, `session()` are plain functions in the mini
-   namespace. They are convenience methods for fetching services from mini's service container (`Mini::$mini->get($id)`).
+2. Service access via typed helpers. `db()`, `cache()`, `auth()`, `mailer()`, `t()`, `fmt()`, `request()`, `render()`, `log()` are plain functions in the mini
+   namespace. They are convenience methods for fetching services from mini's service container (`Mini::$mini->get($id)`). There is no `session()` helper —
+   `$_SESSION` (a fiber-safe proxy) auto-starts on access.
 3. Make applications translatable by wrapping text in `t("Hello {name}", ['name' => $n])` which uses ICU MessageFormat from intl extension, with 
    pluralization  etc. 
-4. htmlspecialchars shortcut is h().
+4. Escape output with `mini\h($str)` — an `htmlspecialchars(ENT_QUOTES, 'UTF-8')` shortcut defined in the autoloaded `functions.php`. It is namespaced, so in global-namespace templates either `use function mini\h;` or call `\mini\h()`; bare `h()` is not framework-provided there. `htmlspecialchars()` always works.
 5. Mini uses chain-of-responsibility handlers, not policy classes (Laravel) or voters (Symfony). Registration:
    $auth->for(Post::class)->listen(fn($q) => ...). Field-level authorization (can(Ability::Update, $post, 'fieldName')) is built in.
 6. The Unsafe suffix. Model::save() is auth-checked + row-scoped; Model::saveUnsafe() is final and bypasses both guards. Default to using the safe version.
@@ -31,7 +44,7 @@ Mini is more complete than the documentation lets on. Before claiming a feature 
 
 ## Dependencies
 
-Mini has zero non-PSR dependencies. It *provides* implementations for five PSR contracts (`container`, `http-message`, `http-factory`, `http-client`, `simple-cache`). Before adding a dependency, check whether Mini already covers it.
+Mini has zero non-PSR dependencies. It *provides* implementations for five PSR contracts (`container`, `http-message`, `http-client`, `simple-cache`, `log`). Before adding a dependency, check whether Mini already covers it.
 
 ## Fail Fast, Be Strict
 
@@ -128,3 +141,9 @@ Override `query()` to scope rows by user/tenant; the write guards inherit that s
 ## E-mail
 
 `mini\Mail` is full RFC 5322 with streaming MIME — large attachments don't materialise in memory. Declarative `Email` API, pluggable transports. Send via `mailer()`.
+
+## Working on Mini itself
+
+- Run targeted tests: `php bin/mini test tests/<Module>/` from the repo root.
+- Zero-dependency guarantee: never add a non-PSR runtime dependency. Mini provides the implementations.
+- Fail fast, be strict, never guess what a caller meant. Don't overengineer; don't underengineer.

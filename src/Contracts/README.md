@@ -1,6 +1,6 @@
 # Contracts - Framework Interfaces
 
-This namespace contains core interface contracts used throughout the Mini framework.
+This namespace contains the small set of core interface contracts (`MapInterface`, `CollectionInterface`, `PathInterface`) used throughout the Mini framework — stable seams a forkable core keeps deliberately minimal.
 
 These contracts define common patterns used internally by the framework and are available for your application code when implementing framework-compatible classes. They're kept minimal and focused on specific use cases rather than being general-purpose abstractions.
 

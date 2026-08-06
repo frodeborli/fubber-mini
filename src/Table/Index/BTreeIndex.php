@@ -1354,12 +1354,12 @@ final class BTreeIndex implements IndexInterface
     public function close(): void
     {
         // Auto-commit pending transaction before closing
-        if ($this->inTransaction && !empty($this->dirtyNodes) && $this->file !== null) {
+        if ($this->inTransaction && $this->file !== null) {
             $this->commit();
         } elseif ($this->inTransaction) {
-            // Rollback if no dirty nodes or file already closed
-            $this->dirtyNodes = [];
-            $this->nextTempId = -1;
+            // File already closed - discard pending state
+            $this->unwrittenPages = [];
+            $this->unwrittenPageCount = 0;
             $this->inTransaction = false;
             if ($this->lockFile !== null) {
                 flock($this->lockFile, LOCK_UN);

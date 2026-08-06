@@ -349,16 +349,16 @@ abstract class AbstractTable implements TableInterface
      */
     final public function getIterator(): Traversable
     {
-        // Fast path: no column projection needed
-        if (empty($this->visibleColumns)) {
-            yield from $this->materialize();
-            return;
-        }
-
-        // Slow path: project to visible columns only
+        // Project to visible columns only. materialize() may yield extra
+        // columns beyond getColumns() — e.g. FilteredTable/SortedTable request
+        // hidden filter/order columns from the source — so strip any surplus.
         $visibleCols = $this->getColumns();
         foreach ($this->materialize() as $id => $row) {
-            yield $id => (object) array_intersect_key((array) $row, $visibleCols);
+            $arr = (array) $row;
+            if (count($arr) !== count($visibleCols)) {
+                $row = (object) array_intersect_key($arr, $visibleCols);
+            }
+            yield $id => $row;
         }
     }
 

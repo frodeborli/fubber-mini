@@ -1,6 +1,6 @@
 # Controller - Attribute-Based Routing for Controllers
 
-Mini's controller system provides clean, type-safe routing with automatic parameter extraction and return value conversion.
+Mini's controller system provides clean, type-safe routing with automatic parameter extraction and return value conversion — a thin PSR-15 layer for a forkable core, with no framework-specific base-class lock-in beyond one small class.
 
 ## Quick Start
 
@@ -12,24 +12,20 @@ use Psr\Http\Message\ResponseInterface;
 
 class UserController extends AbstractController
 {
-    public function __construct()
-    {
-        parent::__construct();
-        $this->router->importRoutesFromAttributes($this);
-    }
+    // No constructor needed - AbstractController::__construct()
+    // imports #[GET]/#[POST]/... attribute routes automatically.
 
     #[GET('/')]
     public function index(): array
     {
-        return ['users' => db()->query("SELECT * FROM users")->fetchAll()];
+        return ['users' => db()->query("SELECT * FROM users")->all()];
     }
 
     #[GET('/{id}/')]
-    public function show(int $id): array
+    public function show(int $id): object
     {
-        $user = db()->query("SELECT * FROM users WHERE id = ?", [$id])->fetch();
-        if (!$user) throw new \mini\Http\NotFoundException();
-        return $user;
+        return db()->query("SELECT * FROM users")->eq('id', $id)->one()
+            ?? throw new \mini\Exceptions\NotFoundException();
     }
 
     #[POST('/')]
@@ -55,8 +51,8 @@ return new UserController();
 
 **Controllers return data, not responses.** The converter registry automatically transforms return values to HTTP responses:
 
-- `array` → JSON response
-- `string` → text/plain response
+- `array` / `stdClass` / `JsonSerializable` → JSON response
+- `string` / `int` / `float` / `bool` → JSON-encoded scalar response
 - `ResponseInterface` → used directly
 - Custom types → register converters
 
@@ -92,7 +88,7 @@ Attributes are repeatable - register multiple routes:
 #[GET('/people/')]
 public function list(): array
 {
-    return ['users' => db()->query("SELECT * FROM users")->fetchAll()];
+    return ['users' => db()->query("SELECT * FROM users")->all()];
 }
 ```
 
@@ -143,11 +139,12 @@ public function index(): array
     return ['users' => [...]];  // Becomes application/json
 }
 
-// String → text/plain response
+// String → JSON-encoded scalar response
 #[GET('/health/')]
 public function health(): string
 {
-    return "OK";  // Becomes text/plain
+    return "OK";  // Becomes application/json: "OK"
+    // Use $this->text('OK') for a text/plain response
 }
 
 // ResponseInterface → used directly
@@ -181,7 +178,7 @@ Then return domain objects directly:
 #[GET('/{id}/')]
 public function show(int $id): User
 {
-    return table(User::class)->find($id);  // Converted to JSON automatically
+    return User::find($id);  // Converted to JSON automatically
 }
 ```
 
@@ -237,7 +234,7 @@ The `respond()` helper checks the `Accept` header and serves HTML or JSON:
 #[GET('/{id}/')]
 public function show(int $id): ResponseInterface
 {
-    $user = db()->query("SELECT * FROM users WHERE id = ?", [$id])->fetch();
+    $user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$id]);
 
     // If client accepts HTML and _views/users/show.php exists → HTML
     // Otherwise → JSON
@@ -281,7 +278,7 @@ class UserController extends AbstractController
 {
     public function __construct()
     {
-        parent::__construct();
+        parent::__construct();  // Also imports any attribute routes
 
         // Manual registration
         $this->router->get('/', $this->index(...));
@@ -339,12 +336,6 @@ class UserController extends AbstractController
 ```php
 class PostController extends AbstractController
 {
-    public function __construct()
-    {
-        parent::__construct();
-        $this->router->importRoutesFromAttributes($this);
-    }
-
     #[GET('/')]
     public function index(): array
     {
@@ -360,7 +351,9 @@ class PostController extends AbstractController
     #[POST('/')]
     public function create(): array
     {
-        $post = new Post($_POST);
+        $post = new Post();
+        $post->title = $_POST['title'];
+        $post->content = $_POST['content'];
         $post->save();
         return ['id' => $post->id];
     }
@@ -369,7 +362,8 @@ class PostController extends AbstractController
     public function update(int $id): Post
     {
         $post = Post::find($id) ?? throw new \mini\Exceptions\NotFoundException();
-        $post->fill($_POST);
+        $post->title = $_POST['title'] ?? $post->title;
+        $post->content = $_POST['content'] ?? $post->content;
         $post->save();
         return $post;
     }
@@ -394,11 +388,7 @@ class AdminController extends AbstractController
         parent::__construct();
 
         // Guard all routes - runs before routing
-        if (!auth()->check() || !auth()->user()->isAdmin()) {
-            throw new AccessDeniedException();
-        }
-
-        $this->router->importRoutesFromAttributes($this);
+        auth()->requireLogin()->requireRole('admin');
     }
 
     #[GET('/')]
@@ -414,19 +404,13 @@ class AdminController extends AbstractController
 ```php
 class CommentController extends AbstractController
 {
-    public function __construct()
-    {
-        parent::__construct();
-        $this->router->importRoutesFromAttributes($this);
-    }
-
     #[GET('/posts/{postId}/comments/')]
     public function index(int $postId): array
     {
         return db()->query(
             "SELECT * FROM comments WHERE post_id = ?",
             [$postId]
-        )->fetchAll();
+        )->all();
     }
 
     #[POST('/posts/{postId}/comments/')]
@@ -446,18 +430,18 @@ class CommentController extends AbstractController
 Throw HTTP exceptions - they're automatically converted to responses:
 
 ```php
-use mini\Http\{NotFoundException, AccessDeniedException, BadRequestException};
+use mini\Exceptions\{NotFoundException, AccessDeniedException, BadRequestException};
 
 #[GET('/{id}/')]
-public function show(int $id): array
+public function show(int $id): object
 {
-    $user = db()->query("SELECT * FROM users WHERE id = ?", [$id])->fetch();
+    $user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$id]);
 
     if (!$user) {
         throw new NotFoundException("User not found");
     }
 
-    if (!auth()->canView($user)) {
+    if (!can(Ability::Read, $user)) {
         throw new AccessDeniedException();
     }
 

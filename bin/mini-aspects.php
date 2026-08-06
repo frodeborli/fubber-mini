@@ -36,9 +36,32 @@ if ($hostRoot === null) {
 
 $subcommand = $argv[1] ?? 'sync';
 if ($subcommand === '--help' || $subcommand === '-h' || $subcommand === 'help') {
-    echo "Usage: mini aspects [list]\n";
-    echo "  (no args)  Sync aspects/* with composer + bootstrap files.\n";
-    echo "  list       Show discovered aspects, their package names, and registered paths.\n";
+    echo <<<'TXT'
+Mini Aspect Bundles
+
+Keeps aspects/<name>/ bundles wired into the host project: each aspect is a
+real Composer path package with an auto-generated _bootstrap.php that
+registers its resource directories (_routes, _views, _config, _translations,
+_static, _migrations).
+
+Usage:
+  mini aspects [command]
+
+Commands:
+  sync          Sync aspects/* with Composer + bootstrap files (default)
+  list          Show discovered aspects, package names, and registered paths
+
+Options:
+  -h, --help    Show this help
+
+Examples:
+  mini aspects            Scaffold/update all aspects and patch composer.json
+  mini aspects list       Read-only overview of discovered aspects
+
+Custom bootstrap code belongs in aspects/<name>/bootstrap.php (no underscore);
+_bootstrap.php is regenerated on every sync.
+
+TXT;
     exit(0);
 }
 

@@ -21,7 +21,7 @@ auth()->requirePermission('...')    // throws AccessDeniedException
 
 ## Entity Authorization
 
-Override `providecan*()` on Model subclasses. Return `true`/`false`/`null` (null = no opinion = allowed).
+Override `provideCan*()` on Model subclasses (`provideCanList`/`provideCanCreate`/`provideCanRead`/`provideCanUpdate`/`provideCanDelete`). Return `true`/`false`/`null` (null = no opinion = allowed).
 
 `save()` and `delete()` check these automatically. Check manually with `can(Ability::Update, $entity)`.
 

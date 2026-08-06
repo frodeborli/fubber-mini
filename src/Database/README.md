@@ -1,13 +1,13 @@
 # Database
 
-Mini's database layer wraps a database engine (PDO by default) with an immutable query builder.
+Mini's database layer wraps a database engine (PDO by default) with an immutable query builder. It is a generic, SQL-first building block for a forkable core framework: plain SQL in, composable queries out — no ORM magic to inherit or work around.
 
 ## Quick Start
 
 ```php
-// Raw queries - returns iterable
+// Raw queries - returns a composable Query; rows are stdClass objects
 foreach (db()->query("SELECT * FROM users WHERE active = ?", [1]) as $row) {
-    echo $row['name'];
+    echo $row->name;
 }
 
 // Convenience methods
@@ -20,6 +20,10 @@ db()->exec("INSERT INTO users (name, email) VALUES (?, ?)", ['John', 'john@examp
 db()->exec("UPDATE users SET active = ? WHERE id = ?", [0, 123]);
 db()->exec("DELETE FROM users WHERE id = ?", [123]);
 
+// Structured writes
+$userId = db()->insert('users', ['name' => 'John', 'email' => 'john@example.com']); // returns insert id
+db()->upsert('users', ['email' => 'john@example.com', 'name' => 'John'], 'email');  // insert-or-update
+
 // Last insert ID
 $userId = db()->lastInsertId();
 
@@ -30,44 +34,88 @@ db()->transaction(function() {
 });
 ```
 
-## PartialQuery: Composable Queries
+## Query: Composable Queries
 
-PartialQuery is an immutable query builder. Each method returns a NEW instance, making queries safe to reuse and compose.
+`db()->query()` returns a `mini\Database\Query` — a read-focused facade over the immutable `PartialQuery` builder. Each method returns a NEW instance, making queries safe to reuse and compose. Mutations go through `db()->update()` / `db()->delete()`, not the query itself.
 
 ```php
 // Basic usage - iterate directly
-foreach (db()->partialQuery('users')->eq('active', 1) as $user) {
-    echo $user['name'];
+foreach (db()->query('SELECT * FROM users')->eq('active', 1) as $user) {
+    echo $user->name;
 }
 
 // Composition - original unchanged
-$active = db()->partialQuery('users')->eq('active', 1);
+$active = db()->query('SELECT * FROM users')->eq('active', 1);
 $admins = $active->eq('role', 'admin');      // New instance
 $mods = $active->eq('role', 'moderator');    // New instance
 
-// Methods - all conditions are combined with AND
+// Filtering - all conditions are combined with AND
 $query->eq('column', $value)      // = (NULL becomes IS NULL)
 $query->lt('column', $value)      // <
 $query->lte('column', $value)     // <=
 $query->gt('column', $value)      // >
 $query->gte('column', $value)     // >=
+$query->like('column', $pattern)  // LIKE
 $query->in('column', [...])       // IN (...)
-$query->in('column', $subquery)   // IN (SELECT ...) via CTE
+$query->in('column', $query2)     // IN (SELECT ...) real SQL subquery
+$query->or($p1, $p2, ...)         // OR-combined predicates
 $query->where('sql', $params)     // Raw WHERE clause (ANDed with existing)
+
+// Shaping
+$query->select('id, name')        // Replace SELECT column list
+$query->columns('id', 'name')     // Restrict to named columns
 $query->order('created_at DESC')  // ORDER BY (replaces previous)
-$query->limit(100)                // LIMIT (see "Default Limit" section)
+$query->orderBy('name', true)     // ORDER BY one column (asc/desc flag)
+$query->distinct()                // SELECT DISTINCT
+$query->limit(100)                // LIMIT (can only narrow - see below)
 $query->offset(50)                // OFFSET
+$query->withCTE('name', $query2)  // WITH name AS (...)
 
 // Execution
-foreach ($query as $row) { }      // Iterate
+foreach ($query as $row) { }      // Iterate (streaming)
 $row = $query->one();             // First row or null
-$total = $query->count();         // COUNT(*) ignoring LIMIT
+$row = $query->first();           // First row or RuntimeException
+$rows = $query->all();            // All rows as array
+$total = $query->count();         // Row count (respects LIMIT/OFFSET)
 $ids = $query->column();          // First column as array
+$value = $query->field();         // First column of first row
+$bool = $query->exists();         // Any rows?
+$row = $query->load($id);         // Single row by primary key
+```
+
+### Limits can only narrow
+
+A `Query` represents a *window* into data. `limit()` can shrink the window but never expand it, and `offset()` stays inside it:
+
+```php
+$q->limit(10)->limit(5);   // limit becomes 5 (shrink OK)
+$q->limit(10)->limit(20);  // limit stays 10 (can't expand)
+$q->limit(10)->offset(5);  // LIMIT 5 OFFSET 5 (still within the original 10)
+```
+
+This is what makes a query safe to hand to less-trusted code (e.g. a template): downstream code can only narrow the result set, never widen it.
+
+**For pagination**, prefer index-based cursors over OFFSET:
+
+```php
+// Good: cursor-based (efficient at any page)
+$posts = Post::query()
+    ->gt('id', $lastSeenId)
+    ->order('id')
+    ->limit(50);
+
+// Avoid: offset-based (slow on deep pages)
+$posts = Post::query()
+    ->order('id')
+    ->offset(10000)
+    ->limit(50);
 ```
 
 ## Model Pattern
 
 Define query methods on your model class. This is explicit, type-safe, and doesn't rely on magic methods.
+
+> Mini also ships `mini\Database\Model`, an Active Record base class with attribute-mapped tables (`#[Table]`, `#[PrimaryKey]`), auth-checked `save()`/`delete()` and row-scoped `updatable()`/`deletable()`. The plain-class pattern below is the zero-inheritance alternative; both build on the same `Query` API.
 
 ```php
 class User
@@ -80,21 +128,19 @@ class User
 
     /**
      * Base query with hydration
-     * @return PartialQuery<User>
+     * @return Query
      */
-    public static function query(): PartialQuery
+    public static function query(): Query
     {
-        return db()->partialQuery('users')->withEntityClass(self::class, false);
+        return db()->query('SELECT * FROM users')->withEntityClass(self::class, false);
     }
 
-    /** @return PartialQuery<User> */
-    public static function active(): PartialQuery
+    public static function active(): Query
     {
         return self::query()->eq('active', 1)->eq('deleted_at', null);
     }
 
-    /** @return PartialQuery<User> */
-    public static function admins(): PartialQuery
+    public static function admins(): Query
     {
         return self::active()->eq('role', 'admin');
     }
@@ -169,12 +215,12 @@ class User implements Hydration
     public string $fullName;
     public \DateTimeImmutable $createdAt;
 
-    public static function fromSqlRow(array $row): static
+    public static function fromSqlRow(object $row): static
     {
         $user = new static();
-        $user->id = $row['id'];
-        $user->fullName = $row['first_name'] . ' ' . $row['last_name'];
-        $user->createdAt = new \DateTimeImmutable($row['created_at']);
+        $user->id = $row->id;
+        $user->fullName = $row->first_name . ' ' . $row->last_name;
+        $user->createdAt = new \DateTimeImmutable($row->created_at);
         return $user;
     }
 
@@ -193,8 +239,10 @@ class User implements Hydration
 // Hydration uses fromSqlRow() automatically when reading
 $users = User::query()->limit(10);
 
-// Dehydration uses toSqlRow() automatically when writing
-$user->save();
+// Dehydration uses toSqlRow() automatically when the entity is written
+// through the framework (e.g. mini\Database\Model::save(), which runs
+// entities through the Dehydrator). For plain classes, call it yourself:
+db()->insert('users', $user->toSqlRow());
 ```
 
 ### Custom Value Objects with SqlValueHydrator
@@ -257,36 +305,33 @@ class User
     public int $id;
     public string $name;
 
-    public static function query(): PartialQuery
+    public static function query(): Query
     {
-        return db()->partialQuery('users')->withEntityClass(self::class, false);
+        return db()->query('SELECT * FROM users')->withEntityClass(self::class, false);
     }
 
     /**
      * Posts by this user
-     * @return PartialQuery<Post>
      */
-    public function posts(): PartialQuery
+    public function posts(): Query
     {
         return Post::query()->eq('user_id', $this->id);
     }
 
     /**
      * Published posts only
-     * @return PartialQuery<Post>
      */
-    public function publishedPosts(): PartialQuery
+    public function publishedPosts(): Query
     {
         return $this->posts()->where('published_at IS NOT NULL');
     }
 
     /**
      * Friends (many-to-many via friendships table)
-     * @return PartialQuery<User>
      */
-    public function friends(): PartialQuery
+    public function friends(): Query
     {
-        return db()->partialQuery('users', '
+        return db()->query('
             SELECT u.* FROM users u
             INNER JOIN friendships f ON (
                 (f.friend_id = u.id AND f.user_id = ?)
@@ -304,9 +349,9 @@ class Post
     public string $title;
     public ?string $published_at;
 
-    public static function query(): PartialQuery
+    public static function query(): Query
     {
-        return db()->partialQuery('posts')->withEntityClass(self::class, false);
+        return db()->query('SELECT * FROM posts')->withEntityClass(self::class, false);
     }
 
     /** Get the author */
@@ -315,14 +360,12 @@ class Post
         return User::find($this->user_id);
     }
 
-    /** @return PartialQuery<Comment> */
-    public function comments(): PartialQuery
+    public function comments(): Query
     {
         return Comment::query()->eq('post_id', $this->id);
     }
 
-    /** @return PartialQuery<Post> */
-    public static function published(): PartialQuery
+    public static function published(): Query
     {
         return self::query()->where('published_at IS NOT NULL');
     }
@@ -359,25 +402,25 @@ Define scoped query methods that embed authorization rules. The WHERE clause *is
 ```php
 class User
 {
-    public static function query(): PartialQuery
+    public static function query(): Query
     {
-        return db()->partialQuery('users')->withEntityClass(self::class, false);
+        return db()->query('SELECT * FROM users')->withEntityClass(self::class, false);
     }
 
     /** Users the current user can read */
-    public static function readable(): PartialQuery
+    public static function readable(): Query
     {
         return self::query()->eq('organization_id', Auth::orgId());
     }
 
     /** Users the current user can update */
-    public static function updatable(): PartialQuery
+    public static function updatable(): Query
     {
         return self::readable()->where('role != ?', ['admin']); // Can't edit admins
     }
 
     /** Users the current user can delete */
-    public static function deletable(): PartialQuery
+    public static function deletable(): Query
     {
         return self::updatable()->where('id != ?', [Auth::userId()]); // Can't delete self
     }
@@ -407,13 +450,13 @@ For simpler cases, use `::mine()` as a single security boundary:
 ```php
 class Post
 {
-    public static function query(): PartialQuery
+    public static function query(): Query
     {
-        return db()->partialQuery('posts')->withEntityClass(self::class, false);
+        return db()->query('SELECT * FROM posts')->withEntityClass(self::class, false);
     }
 
     /** Posts accessible to current user */
-    public static function mine(): PartialQuery
+    public static function mine(): Query
     {
         return self::query()->where('user_id = ? OR visibility = ?', [Auth::userId(), 'public']);
     }
@@ -465,52 +508,9 @@ db()->update(User::query()->in('id', $buyers), ['vip' => 1]);
 
 **Note:** Subqueries in `in()` require an explicit `->select('column')` to specify which column to match.
 
-## Default Limit: 1000 Rows
-
-Mini applies a default limit of 1000 rows to bulk fetch methods. This is a deliberate safety measure:
-
-- **Prevents accidental full-table scans** - Forgetting a LIMIT won't fetch millions of rows
-- **Encourages pagination as a first-class concern** - Developers should design for pagination from the start, not as an afterthought
-- **Follows BigTable/NoSQL best practices** - Use indexed cursors for efficient paging
-
-```php
-// These apply default 1000-row limit:
-foreach ($query as $row) { }     // Stops at 1000
-$query->toArray();               // Max 1000 elements
-$query->column();                // Max 1000 values
-
-// These do NOT apply default limit:
-$query->field();                 // Single scalar value
-$query->one();                   // Single row
-$query->count();                 // Aggregate, no row data
-$query->in('col', $subquery)     // Subqueries bypass limit automatically
-
-// Override when needed:
-$query->limit(5000);             // Explicit limit
-$query->limit(PHP_INT_MAX);      // Fetch all rows (bypass default)
-```
-
-**For pagination**, use index-based cursors rather than OFFSET:
-
-```php
-// Good: cursor-based (efficient at any page)
-$posts = Post::query()
-    ->gt('id', $lastSeenId)
-    ->order('id')
-    ->limit(50);
-
-// Avoid: offset-based (slow on deep pages)
-$posts = Post::query()
-    ->order('id')
-    ->offset(10000)
-    ->limit(50);
-```
-
-The limit applies only to the root query execution - subqueries used with `in()` are not limited since they're part of a larger query.
-
 ## Configuration
 
-By default, Mini uses SQLite at `_database.sqlite3`. For other databases:
+By default, Mini uses SQLite at `_database.sqlite3` in the project root. Configure another database via environment variable (`DATABASE_URL` or `MINI_DATABASE_URL`, e.g. `mysql://user:pass@host/dbname`), or via a config file:
 
 ```php
 // _config/PDO.php
@@ -521,11 +521,13 @@ return new PDO(
 );
 ```
 
-Mini auto-configures charset, timezone, error mode, and fetch mode.
+Mini auto-configures charset, timezone, error mode (exceptions), and fetch mode.
 
 ## Direct PDO Access
 
+When the default PDO backend is in use, the concrete `PDODatabase` exposes the connection:
+
 ```php
-$pdo = db()->getPdo();
+$pdo = db()->getPdo();  // PDODatabase only - not part of DatabaseInterface
 $stmt = $pdo->prepare("...");
 ```

@@ -4,7 +4,9 @@
 
 This document gives you everything you need to understand Mini. You don't need to read all the code and all the README files in the project to get an impression. Instead, we expect you to consult the README.md file whenever you use a feature - therefore we have placed our README.md files in the namespace directories under src/.
 
-Here is a tightened, polished, and high-impact version of what you wrote — keeping *all* the ideas, but improving flow, clarity, authority, and persuasive framing. I avoided altering your underlying message or philosophy; I simply elevated the communication so it reads like a compelling architectural recommendation from a senior engineer/CTO.
+## What Mini Is: A Forkable Core
+
+Mini is a **core framework**. It is meant to sit underneath a more complete, opinionated "Maxi"-style framework - or to be forked outright by a business that wants a head start it can own and maintain for a decade without third-party abandonment risk. That positioning drives every design question: **generic building blocks belong in Mini; opinionated conveniences (a `GenericCRUDAPI` class, scaffolded admin panels, a prescribed user model) belong in a layer on top of Mini, not in Mini itself.**
 
 ---
 
@@ -113,6 +115,8 @@ A modern coding assistant (Claude, ChatGPT, Cursor, etc.) can scaffold:
 
 Mini’s clarity makes this possible.
 Its simplicity is not a limitation — it’s what empowers rapid AI-driven development.
+
+The same reasoning applies to other deliberately excluded conveniences — OAuth/JWT flows, job queues, WebSockets/SSE, rate limiting, admin panels and CRUD generators. These are opinionated conveniences that belong in a "Maxi" layer built on top of Mini (or scaffolded per-application), not in the core.
 
 ## **Summary**
 
@@ -225,7 +229,7 @@ If you want full DI, install `league/container` and make `Mini::$mini` a delegat
 
 PHP bootstraps fresh for each request; don't design the framework to pretend everything has been instantiated and exists - it's wasteful and slow. Instead, instantiate things when code tries to locate it. There are plenty of frameworks that do dependency injection well, and while they are slower - you should use them instead if this is more important than the benefits you get from Mini.
 
-Our container supports Lifetime::Singleton, Lifetime::Scoped and Lifetime::Ephemeral. Most frameworks no longer have this Lifetime::Scoped - but Mini does, because it expects to be run in long lived async PHP servers - and then Lifetime::Scoped is what resembles Lifetime::Singleton in classic PHP.
+Our container supports Lifetime::Singleton, Lifetime::Scoped and Lifetime::Transient. Most frameworks no longer have this Lifetime::Scoped - but Mini does, because it expects to be run in long lived async PHP servers - and then Lifetime::Scoped is what resembles Lifetime::Singleton in classic PHP.
 
 ## Routing Philosophy
 
@@ -258,15 +262,15 @@ We provide Active Record style persistence via the abstract `Model` class. Entit
 
 We provide Eloquent-style queries, but we don't hide SQL:
 ```php
-$user = User::find(1); // convenience for User::query()->where('pk=', [1])->one();
-foreach (User::query()->where('is_admin=?', [1]) as $adminUser) {}; // materializes when iterated
+$user = User::find(1); // convenience for User::query()->where('pk = ?', [1])->one();
+foreach (User::query()->where('is_admin = ?', [1]) as $adminUser) {}; // materializes when iterated
 foreach (User::query()->eq('is_admin', 1) as $adminUser) {} // equivalent to the above
 ```
 
-Composable `PartialQuery` objects are immutable and can be passed around:
+Composable `Query` objects are immutable and can be passed around:
 ```php
 // Repository returns query, not results
-public static function admins(): PartialQuery {
+public static function admins(): Query {
     return self::query()->eq('is_admin', 1);
 }
 
@@ -276,7 +280,7 @@ User::admins()->eq('active', 1)->limit(10)->all();
 
 ### Virtual database tables
 
-In order to enable you to comfortably use CSV files, JSON files or even remote API's, Mini provides a recursive descent SQL parser that maps to a virtual table interface. You can easily create a virtual table that maps to a git versioned CSV file and create an entity class that enables you to work with that. Useful for example if you have a version controlled `countries.csv` file for example: `echo Countries::find('no')->name`. This SQL parser ensures that the same entity annotation logic that works for real database tables, is available for data that doesn't live in your database too. And it's fast. Just register a virtual table with mini\vdb() and you're done. The parser don't support JOIN's; a full database engine seems to be overkill for the purpose of this API and also very likely to be a safety concern for a long time. Better to not provide it now, than to regret it later.
+In order to enable you to comfortably use CSV files, JSON files or even remote API's, Mini provides a recursive descent SQL parser that maps to a virtual table interface. You can easily create a virtual table that maps to a git versioned CSV file and create an entity class that enables you to work with that. Useful for example if you have a version controlled `countries.csv` file for example: `echo Countries::find('no')->name`. This SQL parser ensures that the same entity annotation logic that works for real database tables, is available for data that doesn't live in your database too. And it's fast. `mini\Database\VirtualDatabase` (`src/Database/Virtual/`) has grown into a full federated SQL engine with SQL:2003 coverage - joins, subqueries, CTEs (including recursive), window functions and set algebra - executing across heterogeneous registered tables, with `queryTimeout` support for safely accepting user-provided SQL.
 
 ## Caching
 
@@ -295,7 +299,7 @@ Use `apcu` for L1 caching (caching local to the server). Mini provides a polyfil
 * Event dispatching and state machine: `src/Hooks`
 * HTTP and psr-7: `src/Http`
 * I18n: `src/I18n`
-* E-mailing (mini only does composition, not sending): `src/Mime`
+* E-mailing (from-scratch RFC 5322 with streaming MIME and pluggable transports, send via `mailer()`): `src/Mail`
 * SQL parser: `src/Parsing/SQL`
 * File based routing in `src/Router` - controller pattern based routing in `src/Controller/Router.php`.
 * Static file serving (facilitates the mounting of static file assets from composer dependencies mainly - by leveraging the overlay file system inspired file resolver in mini\Mini::$mini->paths) in `_static/*` in `src/Static`

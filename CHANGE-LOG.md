@@ -4,6 +4,24 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Release polish: strict alias columns, PSR-17 claim dropped, table projection (2026-08-06)
+
+**BREAKING CHANGES**
+
+Release-readiness pass across tests, dependencies, CLI and documentation. Behavior changes worth knowing:
+
+- **`AliasTable` rejects unqualified column names.** Filter/order/column methods on an aliased table now require the aliased name (`u.id`); passing `id` throws `InvalidArgumentException` naming the expected column instead of silently suffix-matching. Fail-fast per the documented design.
+- **`psr/http-factory` removed from `require`, and `psr/http-factory-implementation` removed from `provide`.** Mini ships no PSR-17 factories, so the old `provide` entry could satisfy another package's PSR-17 requirement and then fail at runtime. Packages that relied on Mini to pull `psr/http-factory` transitively, or to satisfy `psr/http-factory-implementation`, must now require it themselves.
+- **`psr/log-implementation: 3.0` added to `provide`** — Mini's `Logger` is a genuine PSR-3 implementation.
+- **Table iteration always projects to `getColumns()`.** Hidden columns requested internally for filtering/sorting no longer leak into output rows of `AbstractTable`-based tables.
+- **`GeneratorTable` caches small result sets as documented.** Fully-consumed generators of ≤1000 rows are cached, so the generator closure is no longer re-invoked on every iteration — observable if your closure has side effects. Partially-consumed generators are never cached.
+- **`BTreeIndex::close()` now auto-commits an open transaction.** It referenced properties removed in an earlier overlay refactor, so the auto-commit branch was dead and pending changes were silently discarded.
+- **`mini docs compatible <target>` requires an interface** — a class or unknown symbol now prints one error line to STDERR and exits 1 (previously an uncaught `ReflectionException`, exit 255).
+- **`mini db` REPL accepts piped/redirected stdin**, executing lines until EOF; previously it hung indefinitely on non-TTY stdin.
+- `Auth::requireLogin()` throws `AuthenticationRequiredException` (401), not `AccessDeniedException` (403). This was already the runtime behavior; stale tests were corrected. `requireRole()`/`requirePermission()` still throw `AccessDeniedException`.
+
+Removed as superseded: `src/Router/Router.php-old`, `WRITING-DOCUMENTATION.md`, `MINI-STYLE-DRAFT.md`, `VALIDATOR_REFACTOR_STATUS.md`, `CONVERTER-CONCEPT.md`, `HOWTO-UPDATE-AUTOLOADER.md`, stray root `test-*.php` scripts, and the `tests/_old/` tree.
+
 ## Router: route files must return a RequestHandler or Response (2026-08-06)
 
 **BREAKING CHANGE**

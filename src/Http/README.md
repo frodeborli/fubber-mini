@@ -1,6 +1,6 @@
 # Http - PSR-7 HTTP Messages & Error Handling
 
-This namespace provides HTTP-related utilities including PSR-7 message support and error handling.
+This namespace is Mini's own PSR-7/PSR-17 implementation plus error handling — the HTTP foundation a forkable core framework must own rather than depend on.
 
 ## Purpose
 
@@ -33,25 +33,28 @@ return $response;
 
 The namespace includes `ErrorHandler` which provides Mini's error and exception handling system. It displays user-friendly error pages in production and detailed error information in debug mode.
 
-Error pages are customizable via templates in `_errors/`:
-- `_errors/404.php` - Not found errors
-- `_errors/401.php` - Unauthorized
-- `_errors/403.php` - Forbidden
-- `_errors/500.php` - Server errors
+Error pages are customizable via templates in `_views/errors/` (application templates override the framework defaults):
+- `_views/errors/404.php` - Not found errors
+- `_views/errors/401.php` - Unauthorized
+- `_views/errors/403.php` - Forbidden
+- `_views/errors/500.php` - Server errors
 
 ## HTTP Exceptions
 
-Throw HTTP exceptions to trigger specific error pages:
+Throw HTTP exceptions (from `mini\Exceptions`) to trigger specific error pages:
 
 ```php
 // Throw 404
-throw new \mini\Http\NotFoundException('Page not found');
+throw new \mini\Exceptions\NotFoundException('Page not found');
 
 // Throw 400
-throw new \mini\Http\BadRequestException('Invalid input');
+throw new \mini\Exceptions\BadRequestException('Invalid input');
 
-// Throw 401/403
-throw new \mini\Http\AccessDeniedException('Login required');
+// Throw 401
+throw new \mini\Exceptions\AuthenticationRequiredException('Login required');
+
+// Throw 403
+throw new \mini\Exceptions\AccessDeniedException('Not permitted');
 ```
 
 The framework's error handler catches these and displays appropriate error pages.

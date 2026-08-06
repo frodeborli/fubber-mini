@@ -30,7 +30,8 @@ Options:
   --port <port>    Server port (default: 8080)
   --help, -h       Show this help
 
-Example:
+Examples:
+  mini serve
   mini serve --host 0.0.0.0 --port 3000
 
 TXT;

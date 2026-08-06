@@ -1,15 +1,10 @@
 # Static - Static File Serving
 
-PSR-15 middleware for serving static files from `_static/` directories with caching support.
+PSR-15 middleware for serving static files from `_static/` directories with caching support — runtime-portable asset serving for a forkable core (no SAPI/webserver-specific configuration required).
 
 ## Quick Start
 
-Enable static file serving by requiring the bootstrap:
-
-```php
-// In your bootstrap or _config/services.php
-require 'vendor/fubber/mini/src/Static/functions.php';
-```
+Static file serving is enabled automatically — `src/Static/functions.php` is loaded via Composer's `autoload.files` and registers the middleware on the dispatcher.
 
 Files in `_static/css/style.css` become accessible at `/css/style.css`.
 

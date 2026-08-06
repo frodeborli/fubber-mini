@@ -35,7 +35,13 @@ use Traversable;
  */
 class GeneratorTable extends AbstractTable
 {
+    /** Maximum number of rows to cache after a full iteration */
+    private const CACHE_LIMIT = 1000;
+
     private Closure $generator;
+
+    /** @var list<array{int|string, object}>|null Cached [key, row] pairs after a complete iteration */
+    private ?array $cache = null;
 
     public function __construct(Closure $generator, ColumnDef ...$columns)
     {
@@ -44,6 +50,37 @@ class GeneratorTable extends AbstractTable
         }
         $this->generator = $generator;
         parent::__construct(...$columns);
+    }
+
+    /**
+     * Yield raw [key, row] pairs, caching small result sets
+     *
+     * The closure is only invoked when no cache exists. The cache is filled
+     * only when the generator is consumed to completion (early termination
+     * via limit would otherwise cache an incomplete result set).
+     *
+     * @return Traversable<int, array{int|string, object}>
+     */
+    private function rows(): Traversable
+    {
+        if ($this->cache !== null) {
+            yield from $this->cache;
+            return;
+        }
+
+        $buffer = [];
+        foreach (($this->generator)() as $key => $row) {
+            if ($buffer !== null) {
+                $buffer[] = [$key, $row];
+                if (count($buffer) > self::CACHE_LIMIT) {
+                    $buffer = null; // Too large - stream without caching
+                }
+            }
+            yield [$key, $row];
+        }
+        if ($buffer !== null) {
+            $this->cache = $buffer;
+        }
     }
 
     protected function materialize(string ...$additionalColumns): Traversable
@@ -56,7 +93,7 @@ class GeneratorTable extends AbstractTable
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
-        foreach (($this->generator)() as $key => $row) {
+        foreach ($this->rows() as [$key, $row]) {
             if ($skipped < $offset) {
                 $skipped++;
                 continue;

@@ -1,6 +1,6 @@
 # Hooks - Event Dispatcher System
 
-Lightweight event dispatchers for extending framework behavior and building event-driven applications.
+Lightweight, typed event dispatchers for extending framework behavior and building event-driven applications — the generic extension-point primitives of a forkable core, so aspects and forks hook in without inventing ad-hoc mechanisms.
 
 ## Dispatcher Classes
 

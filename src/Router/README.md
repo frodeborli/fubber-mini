@@ -1,5 +1,7 @@
 # Router - File-Based Routing
 
+Filesystem-based routing with a strict, runtime-portable route-file contract — a Lindy convention (URLs map to files) a forkable core can keep stable for a decade.
+
 ## Philosophy
 
 Mini's router is **convention-driven, not configuration-heavy**. URL paths map directly to files in `_routes/` directory. When you need dynamic routing, use `__DEFAULT__.php` files with pattern matching. No route caching, no route compilation—just simple file-based routing that works.
@@ -21,7 +23,7 @@ No configuration needed! Router is automatically registered and available:
 // html/index.php (entry point)
 <?php
 require_once __DIR__ . '/../vendor/autoload.php';
-mini\router();
+mini\dispatch();
 ```
 
 ## Common Usage Examples
@@ -96,7 +98,7 @@ Result: 404 (framework-reserved files not accessible)
 <?php
 // _routes/users.php
 
-return fn() => db()->query("SELECT * FROM users")->fetchAll();  // array → JSON response
+return fn() => db()->query("SELECT * FROM users")->all();  // array → JSON response
 ```
 
 ### Route with Parameters (via $_GET)
@@ -166,7 +168,7 @@ return new class extends AbstractController {
     #[GET('/')]
     public function index(): array
     {
-        return db()->query("SELECT * FROM users")->fetchAll();
+        return db()->query("SELECT * FROM users")->all();
     }
 
     #[POST('/')]
@@ -177,7 +179,7 @@ return new class extends AbstractController {
     }
 
     #[GET('/{id:\d+}/')]
-    public function show(int $id): array
+    public function show(int $id): object
     {
         return db()->queryOne("SELECT * FROM users WHERE id = ?", [$id])
             ?? throw new \mini\Exceptions\NotFoundException();
@@ -255,10 +257,11 @@ use mini\Controller\Attributes\GET;
 
 return new class extends AbstractController {
     #[GET('/{id:\d+}/')]
-    public function show(int $id): array
+    public function show(int $id): object
     {
         // $id is automatically cast to int based on type hint
-        return db()->queryOne("SELECT * FROM products WHERE id = ?", [$id]);
+        return db()->queryOne("SELECT * FROM products WHERE id = ?", [$id])
+            ?? throw new \mini\Exceptions\NotFoundException();
     }
 };
 ```
@@ -357,14 +360,14 @@ Reroute targets may point to underscore-prefixed files (internal routing), and t
 
 ## Configuration
 
-**Config File:** `config/mini/Router/Router.php` (optional, defaults to simple Router instance)
+**Config File:** `_config/mini/Router/Router.php` (optional, defaults to simple Router instance)
 
 **Environment Variables:** None - routing is convention-based
 
 ## Overriding the Service
 
 ```php
-// config/mini/Router/Router.php
+// _config/mini/Router/Router.php
 
 // Return your own Router instance (or subclass) to customize routing
 return new mini\Router\Router();
@@ -376,8 +379,8 @@ Router throws `mini\Exceptions\NotFoundException` when no route matches. The dis
 
 ```php
 <?php // _views/errors/404.php - a template, rendered by the error handler ?>
-<h1><?= h(t('Page not found')) ?></h1>
-<p><?= h($_SERVER['REQUEST_URI']) ?></p>
+<h1><?= mini\h(mini\t('Page not found')) ?></h1>
+<p><?= mini\h($_SERVER['REQUEST_URI']) ?></p>
 ```
 
 ## Mounting PSR-15 Applications

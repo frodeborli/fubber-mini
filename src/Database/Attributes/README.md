@@ -1,12 +1,12 @@
 # Database Attributes
 
-Schema declaration attributes for entity classes. Inspired by Entity Framework Core's data annotations.
+Schema declaration attributes for entity classes — a Lindy, EF-Core-inspired annotation vocabulary that lets a forkable core describe schema in code without an ORM. Inspired by Entity Framework Core's data annotations.
 
-**Current Status:** Declaration only - these attributes document the database schema but are not yet used by the framework for automatic migrations or dehydration. They serve as:
+**Current Status:** Partially wired into the framework:
 
-1. **Documentation** - Schema lives alongside the code
-2. **Future tooling** - Migration generators can read these
-3. **IDE support** - Attributes provide context for developers
+- **`#[Table]` and `#[PrimaryKey]`** are parsed by `mini\model($class)` (`ModelInfo`) and drive `mini\Database\Model` (table name, primary key, auto-increment).
+- **`#[CreatedAt]` / `#[UpdatedAt]`** are honored by the `Dehydrator` — timestamps are filled in automatically on write.
+- **`#[Column]`, `#[ForeignKey]`, `#[Index]`, `#[NotMapped]`** are declaration-only for now: they document schema alongside the code and are available to future migration/schema tooling.
 
 ## Available Attributes
 
@@ -154,6 +154,23 @@ class User {
 
     #[NotMapped]
     public array $cachedData = [];  // Transient data
+}
+```
+
+### CreatedAt / UpdatedAt
+
+Automatic timestamps, applied by the `Dehydrator` on write. `#[CreatedAt]` is filled when the (initialized) value is null; uninitialized properties are skipped from the write entirely, so an uninitialized `#[CreatedAt]` property is never auto-filled. `#[UpdatedAt]` is refreshed on every save. Works with `DateTimeImmutable`, `DateTime`, and string properties.
+
+```php
+use mini\Database\Attributes\CreatedAt;
+use mini\Database\Attributes\UpdatedAt;
+
+class Post {
+    #[CreatedAt]
+    public ?\DateTimeImmutable $created_at = null;
+
+    #[UpdatedAt]
+    public ?\DateTimeImmutable $updated_at = null;
 }
 ```
 

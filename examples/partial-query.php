@@ -1,8 +1,11 @@
 <?php
 /**
- * PartialQuery Examples
+ * Query Examples
  *
- * Demonstrates the immutable query builder for composable SQL queries.
+ * Demonstrates the immutable, composable query facade returned by
+ * DatabaseInterface::query(). WHERE/ORDER/LIMIT clauses compose onto
+ * any base SQL, and each method returns a new instance - so queries
+ * can be passed around safely and only ever narrowed, never widened.
  */
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -10,7 +13,6 @@ require __DIR__ . '/../vendor/autoload.php';
 // Setup test database
 $pdo = new PDO('sqlite::memory:');
 $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-$pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
 
 $pdo->exec('
     CREATE TABLE users (
@@ -32,77 +34,31 @@ $pdo->exec("INSERT INTO users (name, email, active, role, age, created_at) VALUE
     ('Charlie Wilson', 'charlie@example.com', 1, 'user', 42, '2023-12-05')
 ");
 
-// Create database instance with trait
-$db = new class($pdo) implements mini\Database\DatabaseInterface {
-    use mini\Database\PartialQueryableTrait;
+$db = new mini\Database\PDODatabase($pdo);
 
-    private PDO $pdo;
-
-    public function __construct(PDO $pdo) { $this->pdo = $pdo; }
-    public function query(string $sql, array $params = []): iterable {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        while ($row = $stmt->fetch()) { yield $row; }
-    }
-    public function queryOne(string $sql, array $params = []): ?array {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetch() ?: null;
-    }
-    public function queryField(string $sql, array $params = []): mixed {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetchColumn();
-    }
-    public function queryColumn(string $sql, array $params = []): array {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetchAll(PDO::FETCH_COLUMN);
-    }
-    public function exec(string $sql, array $params = []): int {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->rowCount();
-    }
-    public function lastInsertId(): ?string { return $this->pdo->lastInsertId(); }
-    public function tableExists(string $tableName): bool { return true; }
-    public function transaction(\Closure $task): mixed { return $task($this); }
-    public function quote(mixed $value): string {
-        if ($value === null) return 'NULL';
-        if (is_int($value)) return $this->pdo->quote($value, PDO::PARAM_INT);
-        if (is_bool($value)) return $this->pdo->quote($value, PDO::PARAM_BOOL);
-        return $this->pdo->quote($value, PDO::PARAM_STR);
-    }
-    public function getDialect(): mini\Database\SqlDialect { return mini\Database\SqlDialect::Sqlite; }
-    public function delete(mini\Database\PartialQuery $query): int { return 0; }
-    public function update(mini\Database\PartialQuery $query, string|array $set): int { return 0; }
-    public function insert(string $table, array $data): string { return ''; }
-    public function upsert(string $table, array $data, string ...$conflictColumns): int { return 0; }
-};
-
-echo "=== PartialQuery Examples ===\n\n";
+echo "=== Query Examples ===\n\n";
 
 // Example 1: Basic usage
 echo "1. Basic query:\n";
-$users = $db->table('users')
+$users = $db->query('SELECT * FROM users')
     ->eq('active', 1)
     ->order('created_at DESC')
     ->limit(3);
 
 echo "   SQL: {$users}\n";
 foreach ($users as $user) {
-    echo "   - {$user['name']} ({$user['email']})\n";
+    echo "   - {$user->name} ({$user->email})\n";
 }
 
 // Example 2: Composable queries (reusable scopes)
 echo "\n2. Composable queries:\n";
 
 class User {
-    public static function active($db): mini\Database\PartialQuery {
-        return $db->table('users')->eq('active', 1);
+    public static function active($db): mini\Database\Query {
+        return $db->query('SELECT * FROM users')->eq('active', 1);
     }
 
-    public static function admins($db): mini\Database\PartialQuery {
+    public static function admins($db): mini\Database\Query {
         return self::active($db)->eq('role', 'admin');
     }
 }
@@ -115,7 +71,7 @@ echo "   Admins: {$admins->count()}\n";
 
 // Example 3: Immutability
 echo "\n3. Immutability (base query unchanged):\n";
-$base = $db->table('users');
+$base = $db->query('SELECT * FROM users');
 $adults = $base->gte('age', 30);
 $young = $base->lt('age', 30);
 
@@ -125,7 +81,7 @@ echo "   Young (<30): {$young->count()}\n";
 
 // Example 4: Complex filtering
 echo "\n4. Complex filtering:\n";
-$filtered = $db->table('users')
+$filtered = $db->query('SELECT * FROM users')
     ->eq('active', 1)
     ->gte('age', 25)
     ->lte('age', 35)
@@ -135,40 +91,36 @@ $filtered = $db->table('users')
 echo "   SQL: {$filtered}\n";
 echo "   Found: {$filtered->count()} users\n";
 foreach ($filtered as $user) {
-    echo "   - {$user['name']} (age {$user['age']}, {$user['role']})\n";
+    echo "   - {$user->name} (age {$user->age}, {$user->role})\n";
 }
 
 // Example 5: one() method
 echo "\n5. Fetch single row:\n";
-$admin = $db->table('users')->eq('role', 'admin')->one();
-echo "   Admin: {$admin['name']}\n";
+$admin = $db->query('SELECT * FROM users')->eq('role', 'admin')->one();
+echo "   Admin: {$admin->name}\n";
 
 // Example 6: column() method
 echo "\n6. Fetch column:\n";
-$names = $db->table('users')
+$names = $db->query('SELECT * FROM users')
     ->eq('active', 1)
-    ->select('name')
+    ->columns('name')
     ->order('age DESC')
     ->column();
 echo "   Names: " . implode(', ', $names) . "\n";
 
-// Example 7: Debugging
+// Example 7: Debugging via string cast
 echo "\n7. Debugging:\n";
-$query = $db->table('users')
+$query = $db->query('SELECT * FROM users')
     ->eq('active', 1)
     ->gte('age', 30);
 
 echo "   String cast: {$query}\n";
-echo "   Debug info:\n";
-$debug = $query->__debugInfo();
-echo "     SQL: {$debug['sql']}\n";
-echo "     Params: " . json_encode($debug['params']) . "\n";
 
 // Example 8: Multi-tenancy pattern
 echo "\n8. Multi-tenancy helper:\n";
 
-function tenantQuery($db, string $table, int $tenantId): mini\Database\PartialQuery {
-    return $db->table($table)->eq('tenant_id', $tenantId);
+function tenantQuery($db, string $table, int $tenantId): mini\Database\Query {
+    return $db->query('SELECT * FROM ' . $db->quoteIdentifier($table))->eq('tenant_id', $tenantId);
 }
 
 // Simulate multi-tenant usage (would use session in real app)

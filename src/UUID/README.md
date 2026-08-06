@@ -1,5 +1,7 @@
 # UUID - Universally Unique Identifiers
 
+Standards-based (RFC 9562) identifier generation with zero dependencies — a Lindy primitive a forkable core implements itself rather than importing.
+
 ## Philosophy
 
 Mini's UUID implementation provides **cryptographically secure, standards-compliant UUID generation** with sensible defaults and easy customization.
@@ -112,8 +114,6 @@ $post = db()->queryOne("SELECT * FROM posts WHERE id = ?", [$postId]);
 ```php
 // _routes/register.php
 return function() {
-    session();
-
     $userId = uuid();
 
     db()->exec(
@@ -415,7 +415,7 @@ db()->exec(
 
 // Query
 $row = db()->queryOne("SELECT id, title FROM posts WHERE id = ?", [uuidToBinary($id)]);
-$uuid = binaryToUuid($row['id']);
+$uuid = binaryToUuid($row->id);
 ```
 
 **Native UUID Type (PostgreSQL):**

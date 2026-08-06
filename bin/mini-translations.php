@@ -639,10 +639,13 @@ function showUsage(): void
 {
     echo "Translation Management Tool\n";
     echo "\n";
-    echo "Usage: vendor/bin/mini translations [action] [options]\n";
+    echo "Scans PHP files for t() calls and keeps _translations/ JSON files in sync.\n";
+    echo "\n";
+    echo "Usage:\n";
+    echo "  mini translations [action] [options]\n";
     echo "\n";
     echo "Actions:\n";
-    echo "  (none)                    Show current translation status (default)\n";
+    echo "  (none)                   Show current translation status (default)\n";
     echo "  add-missing              Add missing translation strings to default files\n";
     echo "  remove-orphans           Remove orphaned strings from default files\n";
     echo "  add-language LANG        Create new language translation files\n";
@@ -654,15 +657,15 @@ function showUsage(): void
     echo "                           (default: vendor,node_modules,.git,.svn)\n";
     echo "  --dir=PATH               Translations directory (default: ./_translations)\n";
     echo "                           Use 'translations' for framework translations\n";
-    echo "  --help                   Show this help message\n";
+    echo "  -h, --help               Show this help\n";
     echo "\n";
     echo "Examples:\n";
-    echo "  vendor/bin/mini translations                         # Show translation status\n";
-    echo "  vendor/bin/mini translations add-missing             # Add missing strings\n";
-    echo "  vendor/bin/mini translations remove-orphans          # Remove orphaned strings\n";
-    echo "  vendor/bin/mini translations --exclude=vendor,tests  # Custom exclusions\n";
-    echo "  vendor/bin/mini translations add-language es         # Create Spanish translations\n";
-    echo "  vendor/bin/mini translations update-language nb      # Update Norwegian translations\n";
+    echo "  mini translations                         # Show translation status\n";
+    echo "  mini translations add-missing             # Add missing strings\n";
+    echo "  mini translations remove-orphans          # Remove orphaned strings\n";
+    echo "  mini translations --exclude=vendor,tests  # Custom exclusions\n";
+    echo "  mini translations add-language es         # Create Spanish translations\n";
+    echo "  mini translations update-language nb      # Update Norwegian translations\n";
 }
 
 // Parse command line arguments
@@ -676,7 +679,7 @@ $excludedDirs = ['vendor', 'node_modules', '.git', '.svn']; // Default exclusion
 for ($i = 1; $i < $argc; $i++) {
     $arg = $argv[$i];
 
-    if ($arg === '--help') {
+    if ($arg === '--help' || $arg === '-h') {
         showUsage();
         exit(0);
     } elseif (str_starts_with($arg, '--format=')) {
@@ -685,29 +688,41 @@ for ($i = 1; $i < $argc; $i++) {
         $excludedDirs = explode(',', substr($arg, 10));
     } elseif (str_starts_with($arg, '--dir=')) {
         $translationsDir = substr($arg, 6);
-    } elseif ($action === null && !str_starts_with($arg, '--')) {
+    } elseif ($action === null && !str_starts_with($arg, '-')) {
         $action = $arg;
-    } elseif ($action === 'add-language' || $action === 'update-language') {
+    } elseif (($action === 'add-language' || $action === 'update-language') && $language === null && !str_starts_with($arg, '-')) {
         $language = $arg;
+    } else {
+        fwrite(STDERR, "Error: Unexpected argument '$arg'\n");
+        fwrite(STDERR, "Run 'mini translations --help' for usage.\n");
+        exit(1);
     }
+}
+
+// Validate action
+$validActions = [null, 'add-missing', 'remove-orphans', 'add-language', 'update-language'];
+if (!in_array($action, $validActions, true)) {
+    fwrite(STDERR, "Error: Unknown action '$action'\n");
+    fwrite(STDERR, "Run 'mini translations --help' for usage.\n");
+    exit(1);
 }
 
 // Validate format
 if (!in_array($format, ['text', 'json', 'csv', 'validate'])) {
-    echo "Error: Invalid format '$format'. Valid formats: text, json, csv, validate\n";
+    fwrite(STDERR, "Error: Invalid format '$format'. Valid formats: text, json, csv, validate\n");
     exit(1);
 }
 
 // Validate directory
 if (!is_dir($directory)) {
-    echo "Error: Directory '$directory' does not exist\n";
+    fwrite(STDERR, "Error: Directory '$directory' does not exist\n");
     exit(1);
 }
 
 // Validate language actions
 if (($action === 'add-language' || $action === 'update-language') && !$language) {
-    echo "Error: Language code required for action '$action'\n";
-    showUsage();
+    fwrite(STDERR, "Error: Language code required for action '$action'\n");
+    fwrite(STDERR, "Run 'mini translations --help' for usage.\n");
     exit(1);
 }
 

@@ -1,8 +1,8 @@
 <?php
 /**
- * PartialQuery DELETE and UPDATE Examples
+ * Query DELETE and UPDATE Examples
  *
- * Demonstrates composable DELETE and UPDATE operations using PartialQuery.
+ * Demonstrates composable DELETE and UPDATE operations using the Query facade.
  */
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -33,131 +33,25 @@ $pdo->exec("INSERT INTO users (name, email, status, login_count, last_login, cre
 ");
 
 // Create database instance
-$db = new class($pdo) implements mini\Database\DatabaseInterface {
-    use mini\Database\PartialQueryableTrait;
+$db = new mini\Database\PDODatabase($pdo);
 
-    private PDO $pdo;
-
-    public function __construct(PDO $pdo) { $this->pdo = $pdo; }
-
-    public function query(string $sql, array $params = []): iterable {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        while ($row = $stmt->fetch()) { yield $row; }
-    }
-
-    public function queryOne(string $sql, array $params = []): ?array {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetch() ?: null;
-    }
-
-    public function queryField(string $sql, array $params = []): mixed {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetchColumn();
-    }
-
-
-    public function queryColumn(string $sql, array $params = []): array {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetchAll(PDO::FETCH_COLUMN);
-    }
-
-    public function exec(string $sql, array $params = []): int {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->rowCount();
-    }
-
-    public function lastInsertId(): ?string {
-        return $this->pdo->lastInsertId();
-    }
-
-    public function tableExists(string $tableName): bool {
-        return true;
-    }
-
-    public function transaction(\Closure $task): mixed {
-        return $task($this);
-    }
-
-    public function quote(mixed $value): string {
-        if ($value === null) return 'NULL';
-        if (is_int($value)) return $this->pdo->quote($value, PDO::PARAM_INT);
-        if (is_bool($value)) return $this->pdo->quote($value, PDO::PARAM_BOOL);
-        return $this->pdo->quote($value, PDO::PARAM_STR);
-    }
-    public function getDialect(): mini\Database\SqlDialect { return mini\Database\SqlDialect::Sqlite; }
-
-    public function delete(mini\Database\PartialQuery $query): int {
-        $where = $query->getWhere();
-        $sql = "DELETE FROM {$query->getTable()}";
-        if ($where['sql']) $sql .= " WHERE {$where['sql']}";
-        $sql .= " LIMIT {$query->getLimit()}";
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($where['params']);
-        return $stmt->rowCount();
-    }
-
-    public function update(mini\Database\PartialQuery $query, string|array $set): int {
-        $where = $query->getWhere();
-
-        if (is_string($set)) {
-            $sql = "UPDATE {$query->getTable()} SET {$set}";
-            $params = $where['params'];
-        } else {
-            $setParts = [];
-            $setParams = [];
-            foreach ($set as $column => $value) {
-                $setParts[] = "$column = ?";
-                $setParams[] = $value;
-            }
-            $sql = "UPDATE {$query->getTable()} SET " . implode(', ', $setParts);
-            $params = array_merge($setParams, $where['params']);
-        }
-
-        if ($where['sql']) $sql .= " WHERE {$where['sql']}";
-        $sql .= " LIMIT {$query->getLimit()}";
-
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->rowCount();
-    }
-
-    public function insert(string $table, array $data): string {
-        $columns = array_keys($data);
-        $values = array_values($data);
-        $placeholders = implode(', ', array_fill(0, count($data), '?'));
-        $sql = "INSERT INTO $table (" . implode(', ', $columns) . ") VALUES ($placeholders)";
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($values);
-        return $this->lastInsertId() ?? '';
-    }
-
-    public function upsert(string $table, array $data, string ...$conflictColumns): int {
-        return 0; // Not used in this example
-    }
-};
-
-echo "=== PartialQuery DELETE/UPDATE Examples ===\n\n";
+echo "=== Query DELETE/UPDATE Examples ===\n\n";
 
 // Define reusable scopes
 class User {
-    public static function query($db): mini\Database\PartialQuery {
-        return $db->table('users');
+    public static function query($db): mini\Database\Query {
+        return $db->query('SELECT * FROM users');
     }
 
-    public static function spam($db): mini\Database\PartialQuery {
+    public static function spam($db): mini\Database\Query {
         return self::query($db)->eq('status', 'spam');
     }
 
-    public static function inactive($db): mini\Database\PartialQuery {
+    public static function inactive($db): mini\Database\Query {
         return self::query($db)->eq('status', 'inactive');
     }
 
-    public static function pending($db): mini\Database\PartialQuery {
+    public static function pending($db): mini\Database\Query {
         return self::query($db)->eq('status', 'pending');
     }
 }
@@ -183,7 +77,7 @@ $updated = $db->update(
 echo "   Updated: $updated rows\n";
 $archived = iterator_to_array(User::query($db)->eq('status', 'archived'));
 foreach ($archived as $user) {
-    echo "   - {$user['name']}: {$user['status']}\n";
+    echo "   - {$user->name}: {$user->status}\n";
 }
 echo "\n";
 
@@ -196,7 +90,7 @@ $updated = $db->update(
 echo "   Updated: $updated rows\n";
 $active = iterator_to_array(User::query($db)->eq('status', 'active'));
 foreach ($active as $user) {
-    echo "   - {$user['name']}: login_count = {$user['login_count']}\n";
+    echo "   - {$user->name}: login_count = {$user->login_count}\n";
 }
 echo "\n";
 

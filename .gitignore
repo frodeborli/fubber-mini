@@ -17,20 +17,17 @@ Thumbs.db
 Desktop.ini
 
 # Test artifacts
-/tests/database.sqlite3
 /tests/cache/
 /tests/tmp/
 
 # SQLLogicTest data (clone from github.com/dolthub/sqllogictest)
 /tests/sqllogictest-data/
 
-# Default SQLite database (created by bootstrap when no DATABASE_URL set)
-_database.sqlite3
+# SQLite dev/test artifacts (covers _database.sqlite3 created by bootstrap)
+*.sqlite3
 
 # Example/debug files
-/examples/*.sqlite3
 /examples/cache/
-cache_example.sqlite3
 
 # Environment files
 .env

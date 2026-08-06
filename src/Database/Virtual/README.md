@@ -1,55 +1,63 @@
 # Virtual Database System
 
-SQL interface to non-SQL data sources via `TableInterface`.
+A federated SQL engine over any `TableInterface` data source — part of a forkable core so the same SQL runs against PDO tables, in-memory data, CSV files, or remote APIs without extra dependencies.
+
+`VirtualDatabase` implements `DatabaseInterface`: it parses SQL (SQL:2003-level coverage — all join types, subqueries, CTEs including `WITH RECURSIVE`, window functions, `UNION`/`INTERSECT`/`EXCEPT`, aggregates) and executes it against registered tables. See `src/Database/VDB-STATUS.md` for the current coverage list.
 
 ## Quick Start
 
 ```php
-use mini\Database\VirtualDatabase;
-use mini\Table\FilteredTable;
+use mini\Table\ArrayTable;
+use mini\Table\ColumnDef;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
 
-$vdb = new VirtualDatabase();
+// Register in-memory data on the shared engine
+$countries = new ArrayTable(
+    new ColumnDef('code', ColumnType::Text, IndexType::Primary),
+    new ColumnDef('name', ColumnType::Text),
+    new ColumnDef('continent', ColumnType::Text),
+);
+$countries->insert(['code' => 'NO', 'name' => 'Norway', 'continent' => 'Europe']);
+$countries->insert(['code' => 'SE', 'name' => 'Sweden', 'continent' => 'Europe']);
+$countries->insert(['code' => 'US', 'name' => 'United States', 'continent' => 'North America']);
 
-// Register a PartialQuery as a virtual table (SQL-backed view)
-$vdb->registerTable('active_users', db()->from('users')->eq('active', 1));
-
-// Register in-memory data using FilteredTable
-$vdb->registerTable('countries', new FilteredTable(
-    source: new class implements TableInterface {
-        public function getIterator(): Traversable {
-            yield 'no' => (object)['code' => 'NO', 'name' => 'Norway', 'continent' => 'Europe'];
-            yield 'se' => (object)['code' => 'SE', 'name' => 'Sweden', 'continent' => 'Europe'];
-            yield 'us' => (object)['code' => 'US', 'name' => 'United States', 'continent' => 'North America'];
-        }
-        // ... implement other TableInterface methods
-    }
-));
+vdb()->getEngine()->registerTable('countries', $countries);
 
 // Query with SQL
-foreach ($vdb->query("SELECT * FROM countries WHERE continent = ?", ['Europe']) as $row) {
+foreach (vdb()->query("SELECT * FROM countries WHERE continent = ?", ['Europe']) as $row) {
     echo $row->name;  // Note: rows are stdClass objects
 }
 ```
 
 ## Architecture
 
-### Core Interfaces (in `mini\Table`)
+### Core Interfaces (in `mini\Table\Contracts`)
 
-- **`SetInterface`** - Membership testing for IN clauses (`has()`)
-- **`TableInterface`** - Read-only table with filtering (`eq`, `lt`, `gt`, `in`, `like`, `union`, `except`), ordering, and pagination
-- **`MutableTableInterface`** - Extends TableInterface with `insert()`, `update()`, `delete()`
+- **`SetInterface`** - Membership testing for IN clauses (`has()`, `getColumns()`)
+- **`TableInterface`** - Immutable, filterable table: `eq`, `lt`, `lte`, `gt`, `gte`, `in`, `like`, `or`, `union`, `except`, `columns`, `order`, `limit`, `offset`, `distinct`, `withAlias`, `load`, `exists`, ...
+- **`MutableTableInterface`** - Extends TableInterface with `insert(array $row)`, `update(TableInterface $query, array $changes)`, `delete(TableInterface $query)`
 
-### Classes
+### Table Implementations (in `mini\Table`)
 
-- **`VirtualDatabase`** - Implements `DatabaseInterface`, parses SQL, translates to TableInterface calls
-- **`FilteredTable`** - Composable wrapper that delegates filters to source, handles ordering/limit/offset
-- **`UnionTable`** - Union of two tables with filter pushdown to both sides
-- **`Set`** - Simple in-memory set for IN clauses
-- **`Collation`** - Helper for creating collators (binary, nocase, locale-specific)
+- **`ArrayTable`** - Pure-PHP in-memory table (mutable, indexed)
+- **`InMemoryTable`** - SQLite-backed in-memory table (mutable)
+- **`CSVTable`** - `CSVTable::fromFile(...)` / `CSVTable::fromString(...)`
+- **`JSONTable`** - Table over JSON data
+- **`GeneratorTable`** - Table over a generator closure (streaming sources, remote APIs)
+- **`PartialQuery`** - SQL-backed view of a real database table (implements `TableInterface`)
+
+Composition wrappers (joins, sorting, unions, aliasing, ...) live in `mini\Table\Wrappers` — the engine assembles them from parsed SQL; you rarely construct them by hand.
+
+### Engine Classes (in `mini\Database`)
+
+- **`VirtualDatabase`** - The engine: implements `DatabaseInterface`, parses SQL, plans and executes against registered tables
+- **`Session`** - Per-request/fiber wrapper around the engine with isolated temporary tables (`CREATE TEMPORARY TABLE ...`); this is what `vdb()` returns
+- **`mini\Database\Virtual\Collation`** - Helper for creating collators (binary, nocase, locale-specific)
 
 ## TableInterface
 
-All table implementations must be immutable - each method returns a new instance:
+All table implementations must be immutable - each filter method returns a new instance:
 
 ```php
 $all = $table;
@@ -67,147 +75,62 @@ foreach ($table as $rowId => $row) {
 }
 ```
 
-### Methods
+## Registering Tables
 
 ```php
-interface TableInterface extends SetInterface, IteratorAggregate, Countable
-{
-    // Filtering
-    public function eq(string $column, int|float|string|null $value): TableInterface;
-    public function lt(string $column, int|float|string $value): TableInterface;
-    public function lte(string $column, int|float|string $value): TableInterface;
-    public function gt(string $column, int|float|string $value): TableInterface;
-    public function gte(string $column, int|float|string $value): TableInterface;
-    public function in(string $column, SetInterface $values): TableInterface;
-    public function like(string $column, string $pattern): TableInterface;
+$engine = vdb()->getEngine();  // The singleton VirtualDatabase
 
-    // Set operations (for OR and NOT)
-    public function union(TableInterface $other): TableInterface;
-    public function except(TableInterface $other): TableInterface;
+// Any TableInterface implementation
+$engine->registerTable('data', $arrayTable);
+$engine->registerTable('rates', CSVTable::fromFile('rates.csv'));
 
-    // Projection (for subqueries)
-    public function columns(string ...$columns): TableInterface;
-    public function has(string|int|float|stdClass $member): bool;
-
-    // Ordering and pagination
-    public function order(string $spec): TableInterface;
-    public function limit(int $n): TableInterface;
-    public function offset(int $n): TableInterface;
-}
+// SQL on any table, no engine setup needed:
+$users = PartialQuery::fromTable($generatorTable)
+    ->eq('status', 'active')
+    ->order('name')
+    ->limit(10);
 ```
 
-## FilteredTable
+### Shadowing Real Tables (testing)
 
-Composable wrapper that delegates filter methods to source:
+`db()->withTables()` creates a VirtualDatabase where named tables are replaced with mock data while all other real tables remain queryable — JOINs between mock and real data work:
 
 ```php
-use mini\Table\FilteredTable;
-
-class CsvTable implements TableInterface
-{
-    public function eq(string $column, $value): TableInterface
-    {
-        return new FilteredTable(
-            source: $this,
-            filter: fn($row) => ($row->$column ?? null) === $value,
-            // orderFn: optional - return ordered TableInterface if source has index
-        );
-    }
-
-    // Other filter methods delegate similarly...
-}
+$testDb = db()->withTables(['users' => $mockUsers]);
+$testDb->query('SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id');
 ```
 
-### Order Optimization
+### Model-Scoped Tables (authorization)
 
-FilteredTable supports efficient ordering via `orderFn`:
+`registerModel()` wraps an already-registered mutable table with a `Model` class's row-level scopes (`query()`, `updatable()`, `deletable()`) and insert gate, so SQL executed through the engine respects the model's authorization:
 
 ```php
-new FilteredTable(
-    source: $this,
-    filter: fn($row) => $row->status === 'active',
-    orderFn: fn($spec) => $this->hasIndexFor($spec) ? $this->order($spec) : null,
-);
+$engine->registerTable('posts', $postsTable);
+$engine->registerModel('posts', Post::class);
 ```
 
-- If `orderFn` returns a `TableInterface`, FilteredTable streams from it (pre-sorted)
-- If `orderFn` returns `null`, FilteredTable buffers and sorts in-memory
+## Accepting User-Provided SQL
 
-## UnionTable
-
-Handles OR operations by pushing filters to both sides:
+The engine supports a query timeout, making it safe to expose SQL to API consumers:
 
 ```php
-// WHERE status = 'active' OR role = 'admin'
-$result = $table->eq('status', 'active')->union($table->eq('role', 'admin'));
-
-// Further filtering pushes to both sides:
-$result->gt('age', 18);  // Becomes: (active AND age>18) UNION (admin AND age>18)
+$engine->setQueryTimeout(2.0);  // seconds; QueryTimeoutException on excess
 ```
 
-## Using PartialQuery as a Virtual Table
+## Temporary Tables
 
-Since `PartialQuery` implements `TableInterface`, you can register SQL-backed views:
+Each request/fiber gets its own `Session` with isolated temp tables:
 
 ```php
-// Create a filtered view of a real table
-$vdb->registerTable('friends',
-    db()->from('users')->eq('relationship', 'friend')
-);
-
-// Query it with additional filters
-$vdb->query("SELECT * FROM friends WHERE age > ?", [25]);
-// Translates to: SELECT * FROM users WHERE relationship = 'friend' AND age > 25
+vdb()->exec("CREATE TEMPORARY TABLE tmp AS SELECT * FROM users WHERE active = 1");
+foreach (vdb()->query("SELECT * FROM tmp") as $row) { ... }
 ```
-
-## MutableTableInterface
-
-For tables that support write operations:
-
-```php
-interface MutableTableInterface extends TableInterface
-{
-    public function insert(array $row): int|string;
-    public function update(array $changes): int;
-    public function delete(): int;
-}
-```
-
-UPDATE and DELETE operate on the current filtered state:
-
-```php
-$table->eq('status', 'inactive')->delete();  // DELETE WHERE status = 'inactive'
-$table->gt('age', 65)->update(['retired' => true]);  // UPDATE WHERE age > 65
-```
-
-## SQL Translation
-
-VirtualDatabase translates SQL WHERE clauses to TableInterface method calls:
-
-| SQL | TableInterface |
-|-----|----------------|
-| `column = ?` | `eq('column', $value)` |
-| `column < ?` | `lt('column', $value)` |
-| `column <= ?` | `lte('column', $value)` |
-| `column > ?` | `gt('column', $value)` |
-| `column >= ?` | `gte('column', $value)` |
-| `column IS NULL` | `eq('column', null)` |
-| `column IS NOT NULL` | `except(eq('column', null))` |
-| `column != ?` | `except(eq('column', $value))` |
-| `column IN (...)` | `in('column', new Set([...]))` |
-| `column LIKE ?` | `like('column', $pattern)` |
-| `a AND b` | Chain: `->eq(...)->gt(...)` |
-| `a OR b` | `union()` |
-| `NOT a` | `except(a)` |
-| `ORDER BY col DESC` | `order('col DESC')` |
-| `LIMIT n` | `limit(n)` |
 
 ## Helper Function
 
-Access VirtualDatabase via the `vdb()` helper:
+Access the engine via the `vdb()` helper (override the engine via `_config/mini/Database/VirtualDatabase.php`):
 
 ```php
-// Configure in _config/mini/Database/VirtualDatabase.php
 $result = vdb()->query("SELECT * FROM countries WHERE continent = ?", ['Europe']);
 $row = vdb()->queryOne("SELECT * FROM users WHERE id = ?", [123]);
 $count = vdb()->queryField("SELECT COUNT(*) FROM products");

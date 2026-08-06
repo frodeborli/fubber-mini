@@ -1,6 +1,6 @@
 # Mini Mail
 
-RFC 5322 email composition with automatic MIME structure generation.
+RFC 5322 email composition with automatic MIME structure generation — a from-scratch implementation of the Lindy mail standards (RFC 5322, MIME, RFC 2047), so a forkable core carries no mailer dependency.
 
 ## Quick Start
 
@@ -184,6 +184,7 @@ return new Mailer(new NativeMailTransport(), 'noreply@example.com');
 |-----------|-------------|
 | `NativeMailTransport` | Uses PHP's `mail()` function (default) |
 | `SendmailTransport` | Pipes directly to sendmail binary |
+| `FileTransport` | Appends raw messages to a log file (development/testing) |
 
 ### Custom Transport
 

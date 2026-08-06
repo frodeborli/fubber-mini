@@ -54,7 +54,7 @@ myproject/
 {
     "name": "vendor/myproject",
     "require": {
-        "php": "^8.2",
+        "php": ">=8.3",
         "fubber/mini": "dev-main"
     },
     "autoload": {

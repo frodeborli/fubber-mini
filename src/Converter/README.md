@@ -1,5 +1,7 @@
 # Converter - Type Conversion System
 
+A reflection-based type-conversion registry — the single generic mechanism a forkable core needs to turn return values into responses (and SQL values into PHP types) without per-framework serializers.
+
 ## Philosophy
 
 Mini provides **automatic type conversion** with reflection-based type matching. Transform route return values, exceptions, and domain objects to HTTP responses without manual serialization code in every route handler.
@@ -52,7 +54,7 @@ $registry = Mini::$mini->get(ConverterRegistryInterface::class);
 // Register application-specific converters
 $registry->register(function(MyModel $model): ResponseInterface {
     $json = json_encode($model->toArray());
-    return new Response(200, ['Content-Type' => 'application/json'], $json);
+    return new Response($json, ['Content-Type' => 'application/json']);
 });
 ```
 
@@ -84,49 +86,49 @@ return new class extends ConverterRegistry {
 ### Basic Conversion
 
 ```php
-// String to response
+// String to response (default converter JSON-encodes scalars)
 $response = convert("Hello", ResponseInterface::class);
-// → 200 text/plain response with "Hello"
+// → 200 application/json response: "Hello"
 
 // Array to response
 $response = convert(['users' => $users], ResponseInterface::class);
 // → 200 application/json response
-
-// Exception to response
-$response = convert(new \RuntimeException('Error'), ResponseInterface::class);
-// → 500 error page response
 ```
+
+Exceptions are not converted through this registry — the dispatcher has a separate exception-converter registry (`$dispatcher->registerExceptionConverter(...)`), with framework defaults mapping `NotFoundException` → 404, `AuthenticationRequiredException` → 401, `AccessDeniedException` → 403, `BadRequestException` → 400.
 
 ### Route Return Value Conversion
 
-Routes can return any value - converters transform it to a PSR-7 Response:
+Closures returned from route files (and controller methods) can return any value - converters transform it to a PSR-7 Response. The route file itself must return the Closure, never the raw data:
 
 ```php
 // _routes/api/users.php
-return ['users' => db()->query("SELECT * FROM users")->toArray()];
-// Automatically converted to JSON response
+return fn() => ['users' => db()->query("SELECT * FROM users")->all()];
+// Closure return value automatically converted to JSON response
 
 // _routes/ping.php
-return "pong";
-// Automatically converted to text/plain response
+return fn() => "pong";
+// Converted to a JSON response by the default scalar converter
 
 // _routes/profile.php
-$user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$_GET['id']]);
-return $user ?: throw new NotFoundException('User not found');
-// Array converted to JSON, or exception converted to 404 error page
+return fn() => db()->queryOne("SELECT * FROM users WHERE id = ?", [$_GET['id']])
+    ?? throw new \mini\Exceptions\NotFoundException('User not found');
+// Object converted to JSON, or exception converted to 404 by the dispatcher
 ```
 
 ### Exception to HTTP Response
 
-Exceptions are automatically converted to appropriate error pages:
+Exceptions thrown during dispatch are converted by the dispatcher's exception converters (a separate registry from the return-value converters):
 
 ```php
 throw new \RuntimeException('Something went wrong');
-// Converter transforms to 500 error page response
+// Dispatcher renders a 500 error page response
 
-// In debug mode, exception message is shown
+// In debug mode, exception details are shown
 // In production, generic "Internal Server Error" message
 ```
+
+Register application-specific exception converters via `$dispatcher->registerExceptionConverter(fn(MyException $e): ResponseInterface => ...)`.
 
 ## Registering Converters
 
@@ -149,23 +151,23 @@ $registry = Mini::$mini->get(ConverterRegistryInterface::class);
 ```php
 // bootstrap.php
 $registry->register(function(string $text): ResponseInterface {
-    return new Response(200, ['Content-Type' => 'text/plain'], $text);
+    return new Response($text, ['Content-Type' => 'text/plain']);
 });
 ```
 
 ### Union Input Types
 
-Handle multiple input types with a single converter:
+Handle multiple input types with a single converter (use `replace()` when the types collide with the framework defaults, as `string` and `array` do):
 
 ```php
 // bootstrap.php
-$registry->register(function(string|array $data): ResponseInterface {
+$registry->replace(function(string|array $data): ResponseInterface {
     if (is_string($data)) {
-        return new Response(200, ['Content-Type' => 'text/plain'], $data);
+        return new Response($data, ['Content-Type' => 'text/plain']);
     }
 
     $json = json_encode($data);
-    return new Response(200, ['Content-Type' => 'application/json'], $json);
+    return new Response($json, ['Content-Type' => 'application/json']);
 });
 ```
 
@@ -182,11 +184,11 @@ $registry->register(function(array $data): ResponseInterface {
 
     if (str_contains($accept, 'application/json')) {
         $json = json_encode($data);
-        return new Response(200, ['Content-Type' => 'application/json'], $json);
+        return new Response($json, ['Content-Type' => 'application/json']);
     }
 
     $html = render('data-view', ['data' => $data]);
-    return new Response(200, ['Content-Type' => 'text/html'], $html);
+    return new Response($html, ['Content-Type' => 'text/html']);
 });
 ```
 
@@ -201,9 +203,8 @@ interface Jsonable {
 // Any Jsonable object → JSON response
 $registry->register(function(Jsonable $obj): ResponseInterface {
     return new Response(
-        200,
-        ['Content-Type' => 'application/json'],
-        $obj->toJson()
+        $obj->toJson(),
+        ['Content-Type' => 'application/json']
     );
 });
 
@@ -215,8 +216,7 @@ class User implements Jsonable {
 }
 
 // _routes/api/user.php
-$user = new User();
-return $user;  // Automatically converted to JSON response
+return fn() => new User();  // Closure result converted to JSON response
 ```
 
 ## Advanced Features
@@ -247,12 +247,12 @@ Single-type converters override union members:
 ```php
 // Register union converter
 $registry->register(function(string|int $data): ResponseInterface {
-    return new Response(200, [], (string)$data);
+    return new Response((string)$data);
 });
 
 // Register more specific single-type converter (overrides union member)
 $registry->register(function(string $text): ResponseInterface {
-    return new Response(200, ['Content-Type' => 'text/plain'], $text);
+    return new Response($text, ['Content-Type' => 'text/plain']);
 });
 
 // Convert string
@@ -287,7 +287,7 @@ Use `replace()` to override existing converters without throwing conflicts:
 ```php
 // Override the default string→Response converter
 $registry->replace(function(string $text): ResponseInterface {
-    return new Response(200, ['Content-Type' => 'text/html'], "<p>$text</p>");
+    return new Response("<p>$text</p>", ['Content-Type' => 'text/html']);
 });
 ```
 
@@ -341,7 +341,7 @@ Wraps typed closures and uses reflection to extract types:
 ```php
 $converter = new ClosureConverter(
     function(string $text): ResponseInterface {
-        return new Response(200, [], $text);
+        return new Response($text);
     }
 );
 
@@ -377,9 +377,11 @@ $has = $registry->has($input, ResponseInterface::class);
 // Get converter
 $converter = $registry->get($input, ResponseInterface::class);
 
-// Convert value
+// Convert value (throws RuntimeException if no converter found)
 $response = $registry->convert($input, ResponseInterface::class);
-// Returns null if no converter found
+
+// Non-throwing variant: returns null and sets $found = false
+$response = $registry->tryConvert($input, ResponseInterface::class, null, $found);
 ```
 
 ## Practical Examples
@@ -405,23 +407,22 @@ class NotFoundException extends \Exception {
 // Get registry and register converters for specific exceptions
 $registry = Mini::$mini->get(ConverterRegistryInterface::class);
 
-$registry->register(function(ValidationException $e): ResponseInterface {
+$dispatcher = Mini::$mini->get(HttpDispatcher::class);
+
+$dispatcher->registerExceptionConverter(function(ValidationException $e): ResponseInterface {
     $json = json_encode(['errors' => $e->errors]);
-    return new Response(400, ['Content-Type' => 'application/json'], $json);
+    return new Response($json, ['Content-Type' => 'application/json'], 400);
 });
 
-$registry->register(function(NotFoundException $e): ResponseInterface {
-    $body = render('404', ['message' => $e->getMessage()]);
-    return new Response(404, ['Content-Type' => 'text/html'], $body);
+$dispatcher->registerExceptionConverter(function(NotFoundException $e): ResponseInterface {
+    $body = render('errors/404.php', ['message' => $e->getMessage()]);
+    return new Response($body, ['Content-Type' => 'text/html'], 404);
 });
 
 // Usage in routes
 // _routes/api/users.php
-$user = db()->queryOne("SELECT * FROM users WHERE id = ?", [$_GET['id']]);
-if (!$user) {
-    throw new NotFoundException('User not found');
-}
-return $user;
+return fn() => db()->queryOne("SELECT * FROM users WHERE id = ?", [$_GET['id']])
+    ?? throw new NotFoundException('User not found');
 ```
 
 ### Domain Model Serialization
@@ -451,7 +452,7 @@ $registry->register(function(Product $product): ResponseInterface {
         'name' => $product->name,
         'price' => $product->price,
     ]);
-    return new Response(200, ['Content-Type' => 'application/json'], $json);
+    return new Response($json, ['Content-Type' => 'application/json']);
 });
 
 $registry->register(function(ProductCollection $collection): ResponseInterface {
@@ -461,16 +462,18 @@ $registry->register(function(ProductCollection $collection): ResponseInterface {
             $collection->products
         )
     ]);
-    return new Response(200, ['Content-Type' => 'application/json'], $json);
+    return new Response($json, ['Content-Type' => 'application/json']);
 });
 
-// Routes return domain objects
+// Routes return domain objects (from the route Closure)
 // _routes/products.php
-$products = array_map(
-    fn($row) => new Product($row['id'], $row['name'], $row['price']),
-    db()->query("SELECT * FROM products")->toArray()
-);
-return new ProductCollection($products);
+return function(): ProductCollection {
+    $products = array_map(
+        fn($row) => new Product($row->id, $row->name, $row->price),
+        db()->query("SELECT * FROM products")->all()
+    );
+    return new ProductCollection($products);
+};
 ```
 
 ### Multi-Format API
@@ -487,23 +490,23 @@ $registry->register(function(array $data): ResponseInterface {
     // JSON (API clients)
     if (str_contains($accept, 'application/json')) {
         $json = json_encode($data);
-        return new Response(200, ['Content-Type' => 'application/json'], $json);
+        return new Response($json, ['Content-Type' => 'application/json']);
     }
 
     // XML (legacy clients)
     if (str_contains($accept, 'application/xml')) {
         $xml = arrayToXml($data);
-        return new Response(200, ['Content-Type' => 'application/xml'], $xml);
+        return new Response($xml, ['Content-Type' => 'application/xml']);
     }
 
     // HTML (browsers)
     $html = render('data-view', ['data' => $data]);
-    return new Response(200, ['Content-Type' => 'text/html'], $html);
+    return new Response($html, ['Content-Type' => 'text/html']);
 });
 
 // Single route handler supports all formats
 // _routes/api/users.php
-return ['users' => db()->query("SELECT * FROM users")->toArray()];
+return fn() => ['users' => db()->query("SELECT * FROM users")->all()];
 // Returns JSON, XML, or HTML based on Accept header
 ```
 
@@ -514,7 +517,7 @@ return ['users' => db()->query("SELECT * FROM users")->toArray()];
 3. **Single responsibility** - One converter per input→output type combination
 4. **Use union types wisely** - Only when conversion logic is truly shared
 5. **Leverage specificity** - Register general converters, override with specific ones
-6. **Handle null gracefully** - Remember `convert()` returns null when no converter found
+6. **Fail fast or try** - `convert()` throws when no converter is found; use `tryConvert()` when a miss is expected
 7. **Type-first design** - Let type system guide converter selection
 8. **Content negotiation** - Use Accept header for format selection
 

@@ -122,9 +122,13 @@ class ReadlineManager
             throw new RuntimeException("ReadlineManager: prompt() called while already prompting");
         }
 
-        if (!function_exists('readline_callback_handler_install')) {
-            // Fallback for systems without readline callback support
-            echo $alternativePrompt ?? $this->prompt;
+        if (!function_exists('readline_callback_handler_install') || !stream_isatty(STDIN)) {
+            // Fallback for systems without readline callback support, and for
+            // piped/redirected stdin: readline's callback API never delivers
+            // input without a TTY, which would make loop() spin forever.
+            if (stream_isatty(STDIN)) {
+                echo $alternativePrompt ?? $this->prompt;
+            }
             $line = fgets(STDIN);
             return $line === false ? null : rtrim($line, "\n\r");
         }

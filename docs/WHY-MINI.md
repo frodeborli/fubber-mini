@@ -8,7 +8,7 @@ This is not a comparison document. The aim is to make the design intent explicit
 
 ## Zero non-PSR dependencies
 
-**The fact.** Mini's `composer.json` requires `php >=8.3`, the seven `psr/*` interface packages, and two conditional `symfony/polyfill-intl-*` shims that activate only when PHP's `intl` extension is missing. Mini *provides* implementations for five PSR contracts (`container`, `http-message`, `http-factory`, `http-client`, `simple-cache`).
+**The fact.** Mini's `composer.json` requires `php >=8.3`, the seven `psr/*` interface packages, and two conditional `symfony/polyfill-intl-*` shims that activate only when PHP's `intl` extension is missing. Mini *provides* implementations for five PSR contracts (`container`, `http-message`, `http-client`, `simple-cache`, `log`).
 
 **What this motivates.**
 
@@ -32,6 +32,20 @@ This is not a comparison document. The aim is to make the design intent explicit
 - A developer's existing PHP knowledge transfers. There is no framework-specific equivalent of well-known engine features to learn.
 
 **The tradeoff.** Mini requires the `intl` extension for full functionality (the polyfills cover partial functionality when intl is missing). Requires PDO for the default database driver. These are universally available in production PHP environments but represent a stricter runtime requirement than frameworks that ship pure-PHP fallbacks.
+
+---
+
+## The Lindy stance
+
+**The fact.** Where Mini has to pick an API design, it picks the one that has already survived the longest: PSR contracts over framework-specific interfaces, SQL over ORM DSLs, MIME trees over mailer abstractions, plain PHP templates over template languages, LINQ-style immutable query composition over fluent mutable builders, the filesystem over routing tables.
+
+**What this motivates.**
+
+- The Lindy effect: an API that has been stable for twenty years is more likely to remain stable for another twenty than one invented last year. Betting on SQL, RFC 5322, ICU, PSR-7 and the filesystem means betting on things that no longer change.
+- Knowledge transfer is symmetric. What a developer learns while using Mini (SQL, MIME, PSR-7 semantics, ICU MessageFormat) is portable knowledge; what they already know arrives applicable. There is deliberately no Eloquent-style or Doctrine-style magic layer whose conventions exist only inside one framework.
+- A fork stays maintainable without the original author, because the framework's bets do not require maintainer attention to stay current. Trendy idioms need upkeep; forty-year-old ones do not.
+
+**The tradeoff.** Mini forgoes the ergonomic sugar that newer idioms provide — no magic accessors, no auto-inferred relations, no convention-heavy scaffolding. The code you write is slightly more explicit in exchange for staying legible for decades.
 
 ---
 
@@ -113,7 +127,7 @@ The fiber-safe `$_GET`/`$_POST`/`$_COOKIE`/`$_SESSION` proxies, the streaming `H
 
 ## Small enough to fork
 
-**The fact.** Mini's `src/` directory is approximately 64,000 lines across 327 PHP files. The framework has zero non-PSR dependencies. The PSR-7 interface boundary is the application's actual contact with the framework. The Lindy stance ensures the framework's bets are on patterns that survive without maintainer attention (filesystem routing, intl extension, plain PHP templates).
+**The fact.** Mini's `src/` directory is approximately 64,000 lines across ~330 PHP files. The framework has zero non-PSR dependencies. The PSR-7 interface boundary is the application's actual contact with the framework. The Lindy stance ensures the framework's bets are on patterns that survive without maintainer attention (filesystem routing, intl extension, plain PHP templates).
 
 **What this motivates.**
 
@@ -125,6 +139,20 @@ The fiber-safe `$_GET`/`$_POST`/`$_COOKIE`/`$_SESSION` proxies, the streaming `H
 
 ---
 
+## A forkable core, not a finished product line
+
+**The fact.** Mini is deliberately a *core* framework. It provides generic, long-lived building blocks — routing, HTTP, data access, validation, hooks, mail, i18n — and deliberately excludes opinionated conveniences. There is no generic CRUD-API base class, no admin scaffolding, no prescribed user model. Those belong in an opinionated layer built *on top of* Mini — a "Maxi"-style framework, or the application itself.
+
+**What this motivates.**
+
+- The line between "belongs in Mini" and "does not" is crisp and evaluable: generic building blocks that any application shape can use belong in Mini; conveniences that presume an application shape belong above it. Design questions inside the repo should be judged against that line.
+- A business that wants a head start it can own outright can fork Mini and maintain the fork for a decade. The zero-dependency, ~64K-LOC, Lindy-leaning design exists precisely so a fork carries no third-party abandonment risk — the fork's maintenance burden is bounded by code the forking team can actually read.
+- Opinionated layers can iterate at their own pace. A "Maxi" layer can ship a `GenericCRUDAPI`, admin UIs, an auth stack, and tutorial-friendly conventions without those opinions calcifying into the core underneath.
+
+**The tradeoff.** Out of the box, Mini asks more of the developer than a batteries-included framework does. That is the intended division of labour: the core stays small, general, and forkable; opinions live in layers that are cheaper to replace.
+
+---
+
 ## What Mini is positioned for
 
 The design choices above compose into a framework with a specific intended use:
@@ -132,6 +160,10 @@ The design choices above compose into a framework with a specific intended use:
 **Applications that you expect to run for a long time.** The longevity argument — engine-native APIs, zero non-PSR dependencies, PSR exit paths, fork-survivable — pays off at scale of years, not weeks.
 
 **Applications where the architecture should be driven by the domain.** Mini does not provide a User model, an authentication scheme, a content type system, or any other domain-specific opinion. It provides infrastructure primitives. This is a strength when the application has its own architectural shape (wiki, CMS, CRM, social network, ticketing system, multi-tenant SaaS) and a weakness when the application would benefit from inheriting an opinionated architecture.
+
+**Serving as the substrate for an opinionated layer.** Mini is designed to sit underneath a more complete, opinionated framework — whether that is a published "Maxi"-style layer or a company-internal one. The core stays generic; the layer above carries the opinions.
+
+**Being forked.** A team that wants full ownership of its foundation can fork Mini and maintain the fork independently for years. Every design choice above (no transitive dependencies, engine-native APIs, Lindy bets, bounded size) is also a choice that keeps a fork viable.
 
 **Applications built by developers who know what they want.** A team that has answered "how should our auth work, how should our data layer look, how should our routes be organized" benefits from a framework that does not impose other answers. A team without those answers benefits from a framework that provides them — Laravel, Symfony, and Rails are excellent at this.
 
@@ -159,7 +191,9 @@ The design choices above compose into a framework with a specific intended use:
 | Lazy loading | Scales from prototype to platform without rewrite | Some container-resolution indirection |
 | PSR-everywhere | Composable with the entire Packagist ecosystem | PSR design choices (immutability, etc.) baked in |
 | Aspects as Composer packages | Modules are standard PHP packages; extraction is config-only | Per-aspect ceremony (mitigated by `mini aspects`) |
+| Lindy API bets (PSR, SQL, MIME, plain PHP) | Stability without maintainer attention; portable knowledge | No convention-heavy magic or ergonomic sugar |
 | Vertical stack with phasync/Swerve | Scaling path owned end-to-end | Swerve not yet released |
 | ~64K LOC, no transitive deps | Forkable by one developer; survives author absence | Less feature surface than batteries-included frameworks |
+| Core-only scope (no Maxi opinions) | Crisp inclusion criterion; opinionated layers stay replaceable | More assembly required out of the box |
 
 Each row is a deliberate choice with a known tradeoff. The framework is consistent in its choices — every choice in column 2 reinforces every other choice in column 2. That consistency is what makes the design coherent rather than a collection of features.

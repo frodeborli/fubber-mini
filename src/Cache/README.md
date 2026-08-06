@@ -1,5 +1,7 @@
 # Cache - PSR-16 SimpleCache
 
+Mini's own PSR-16 implementation with driver auto-detection — caching a forkable core can ship without external dependencies, swappable via one config file.
+
 ## Philosophy
 
 Mini provides **smart caching with zero configuration**. We auto-detect the best available driver and provide a clean PSR-16 interface. No setup required, but fully customizable when needed.
@@ -110,7 +112,7 @@ return new class($memcached) implements \Psr\SimpleCache\CacheInterface {
 <?php
 // _config/Psr/SimpleCache/CacheInterface.php
 
-return new \mini\Cache\DatabaseCache(db());
+return new \mini\Cache\DatabaseCache();  // Uses db(), stores in mini_cache table
 ```
 
 ## Common Usage Examples
@@ -150,13 +152,13 @@ function getPopularPosts() {
 
     if ($posts === null) {
         // Cache miss - fetch from database
-        // Note: toArray() materializes the result for caching
+        // Note: all() materializes the result for caching
         $posts = db()->query("
             SELECT * FROM posts
             WHERE published = 1
             ORDER BY views DESC
             LIMIT 10
-        ")->toArray();
+        ")->all();
 
         // Cache for 1 hour
         cache()->set($cacheKey, $posts, 3600);
@@ -314,7 +316,7 @@ if ($html === null) {
     ?>
     <div class="hero">
         <?php foreach (getHeroSlides() as $slide): ?>
-            <div class="slide"><?= h($slide['title']) ?></div>
+            <div class="slide"><?= mini\h($slide['title']) ?></div>
         <?php endforeach ?>
     </div>
     <?php

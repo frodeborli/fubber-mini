@@ -11,7 +11,7 @@ use mini\Test;
 use mini\Mini;
 use mini\Auth\Auth;
 use mini\Auth\AuthInterface;
-use mini\Exceptions\AccessDeniedException;
+use mini\Exceptions\AuthenticationRequiredException;
 
 $test = new class extends Test {
     private Auth $auth;
@@ -53,7 +53,7 @@ $test = new class extends Test {
     {
         $this->assertThrows(
             fn() => $this->auth->requireLogin(),
-            AccessDeniedException::class
+            AuthenticationRequiredException::class
         );
     }
 

@@ -1,5 +1,7 @@
 # Authorizer - Authorization System
 
+Capability-based authorization for a forkable core: a single `can()` primitive with chain-of-responsibility handlers — no policy classes or voters to inherit.
+
 ## Overview
 
 Check if a user can perform actions on resources:
@@ -222,7 +224,7 @@ if (!can(Ability::List, User::class)) {
     throw new \mini\Exceptions\AccessDeniedException();
 }
 
-$users = User::all();
+return fn() => User::query()->all();  // → JSON response
 ```
 
 ### API Authorization
@@ -257,6 +259,9 @@ function updateUser(int $id, array $data): void
         throw new ValidationException($error);
     }
 
-    $user->update($data);
+    foreach ($data as $field => $value) {
+        $user->$field = $value;
+    }
+    $user->save();
 }
 ```

@@ -5,7 +5,7 @@
  * Measures parsing, planning, and execution time separately for VDB.
  * SQLite prepares statements fresh each time (no query cache benefit).
  */
-require_once "vendor/autoload.php";
+require_once __DIR__ . "/../vendor/autoload.php";
 
 use mini\Database\VirtualDatabase;
 use mini\Parsing\SQL\SqlParser;

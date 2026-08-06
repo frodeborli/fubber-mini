@@ -7,6 +7,24 @@
  * Usage: php bin/mini-benchmark.php
  */
 
+if (array_intersect(['--help', '-h'], array_slice($argv, 1))) {
+    echo <<<'TXT'
+Mini Framework Benchmark
+
+Starts a temporary PHP dev server on 127.0.0.1:8765 serving html/ and
+measures request throughput against /ping (Apache Bench if available,
+otherwise curl).
+
+Usage:
+  mini benchmark
+
+Options:
+  -h, --help    Show this help
+
+TXT;
+    exit(0);
+}
+
 echo "\nMini Framework Benchmark\n";
 echo str_repeat("=", 40) . "\n\n";
 
@@ -34,5 +52,5 @@ if ($code === 0) {
 }
 
 // Cleanup
-posix_kill($pid, 15);
+posix_kill((int) $pid, 15);
 echo "\n";
