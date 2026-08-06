@@ -61,6 +61,13 @@ class CrossJoinTable extends AbstractTable
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
+        // LIMIT 0 must emit nothing. The loops below use an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
+
         foreach ($this->left as $leftRow) {
             foreach ($this->right as $rightRow) {
                 if ($skipped++ < $offset) {

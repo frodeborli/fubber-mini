@@ -163,7 +163,7 @@ class SqlLexer
         self::$pattern = '~' .
             '(?<WS>\s+)|' .                                       // whitespace (skipped)
             '(?<CMT>--[^\n]*|\#[^\n]*|/\*[\s\S]*?\*/)|' .         // comments (skipped)
-            '(?<NUM>\d+(?:\.\d*)?)|' .                            // numbers
+            '(?<NUM>\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)|' .           // numbers (incl. exponent: 1e3, 1.5e-2)
             "'(?<STR>(?:[^'\\\\]|''|\\\\.)*)'|" .                 // strings
             "[xX]'(?<HEX>[0-9a-fA-F]*)'|" .                       // hex blobs
             '(?<POS>\?)|' .                                       // positional placeholder

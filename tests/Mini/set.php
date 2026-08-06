@@ -4,69 +4,95 @@
  */
 
 require __DIR__ . '/../../ensure-autoloader.php';
-require_once __DIR__ . '/../assert.php';
 
 use mini\Mini;
 use mini\Lifetime;
+use mini\Test;
 
-$mini = Mini::$mini;
+$test = new class extends Test {
 
-// Test 1: set() during Bootstrap phase works without warning
-$mockService = new stdClass();
-$mockService->name = 'MockService';
+    private \stdClass $mockService;
 
-$mini->set('test.mock', $mockService);
+    /** Observations made while still in the Bootstrap phase (harness bootstraps after setUp()) */
+    private bool $bootstrapPhaseHas;
+    private mixed $bootstrapPhaseGet;
+    private mixed $bootstrapPhaseRetrieved1;
+    private mixed $bootstrapPhaseRetrieved2;
 
-assert_true($mini->has('test.mock'), 'Service should be registered');
-assert_eq($mockService, $mini->get('test.mock'), 'Should return the exact instance');
-echo "✓ set() works during Bootstrap phase\n";
+    protected function setUp(): void
+    {
+        $mini = Mini::$mini;
 
-// Test 2: set() auto-registers service definition
-assert_true($mini->has('test.mock'), 'has() should return true for set() services');
-echo "✓ set() auto-registers service definition\n";
+        // set() during Bootstrap phase works without warning
+        $this->mockService = new \stdClass();
+        $this->mockService->name = 'MockService';
+        $mini->set('test.mock', $this->mockService);
 
-// Test 3: set() returns same instance on subsequent get() calls (singleton behavior)
-$retrieved1 = $mini->get('test.mock');
-$retrieved2 = $mini->get('test.mock');
-assert_true($retrieved1 === $retrieved2, 'Should return same instance');
-echo "✓ set() services behave as singletons\n";
+        $this->bootstrapPhaseHas = $mini->has('test.mock');
+        $this->bootstrapPhaseGet = $mini->get('test.mock');
 
-// Register a lazy service before bootstrap (for test 6)
-$mini->addService('test.lazy', Lifetime::Singleton, fn() => new stdClass());
+        // Subsequent get() calls must return the same instance (singleton behavior)
+        $this->bootstrapPhaseRetrieved1 = $mini->get('test.mock');
+        $this->bootstrapPhaseRetrieved2 = $mini->get('test.mock');
 
-// Transition to Ready phase
-\mini\bootstrap();
-
-// Test 4: set() during Ready phase triggers warning
-$warningTriggered = false;
-$previousHandler = set_error_handler(function($errno, $errstr) use (&$warningTriggered) {
-    if ($errno === E_USER_WARNING && str_contains($errstr, 'Ready phase')) {
-        $warningTriggered = true;
-        return true;
+        // Register a lazy service before bootstrap (shadowed in the last test)
+        $mini->addService('test.lazy', Lifetime::Singleton, fn() => new \stdClass());
     }
-    return false;
-});
 
-$readyService = new stdClass();
-$mini->set('test.ready', $readyService);
-restore_error_handler();
+    public function testSetWorksDuringBootstrapPhase(): void
+    {
+        $this->assertTrue($this->bootstrapPhaseHas, 'Service should be registered');
+        $this->assertSame($this->mockService, $this->bootstrapPhaseGet, 'Should return the exact instance');
+    }
 
-assert_true($warningTriggered, 'Warning should be triggered during Ready phase');
-assert_eq($readyService, $mini->get('test.ready'), 'Service should still be set');
-echo "✓ set() during Ready phase triggers warning\n";
+    public function testSetAutoRegistersServiceDefinition(): void
+    {
+        $this->assertTrue(Mini::$mini->has('test.mock'), 'has() should return true for set() services');
+    }
 
-// Test 5: Cannot shadow already instantiated service
-assert_throws(
-    fn() => $mini->set('test.mock', new stdClass()),
-    LogicException::class,
-    'Should throw when shadowing instantiated service'
-);
-echo "✓ set() throws when shadowing instantiated service\n";
+    public function testSetServicesBehaveAsSingletons(): void
+    {
+        $this->assertTrue(
+            $this->bootstrapPhaseRetrieved1 === $this->bootstrapPhaseRetrieved2,
+            'Should return same instance'
+        );
+    }
 
-// Test 6: Can shadow registered but not-yet-instantiated service
-// test.lazy was registered before bootstrap but never retrieved
-// Suppress warning for this test
-@$mini->set('test.lazy', new stdClass());
-echo "✓ set() can shadow registered but not-yet-instantiated service\n";
+    public function testSetDuringReadyPhaseTriggersWarning(): void
+    {
+        $warningTriggered = false;
+        set_error_handler(function($errno, $errstr) use (&$warningTriggered) {
+            if ($errno === E_USER_WARNING && str_contains($errstr, 'Ready phase')) {
+                $warningTriggered = true;
+                return true;
+            }
+            return false;
+        });
 
-echo "\n✅ All Mini::set() tests passed!\n";
+        $readyService = new \stdClass();
+        Mini::$mini->set('test.ready', $readyService);
+        restore_error_handler();
+
+        $this->assertTrue($warningTriggered, 'Warning should be triggered during Ready phase');
+        $this->assertSame($readyService, Mini::$mini->get('test.ready'), 'Service should still be set');
+    }
+
+    public function testSetThrowsWhenShadowingInstantiatedService(): void
+    {
+        $this->assertThrows(
+            fn() => Mini::$mini->set('test.mock', new \stdClass()),
+            \LogicException::class,
+            'Should throw when shadowing instantiated service'
+        );
+    }
+
+    public function testSetCanShadowRegisteredButNotInstantiatedService(): void
+    {
+        // test.lazy was registered before bootstrap but never retrieved.
+        // Suppress the Ready-phase warning for this test.
+        @Mini::$mini->set('test.lazy', new \stdClass());
+        $this->assertTrue(Mini::$mini->has('test.lazy'));
+    }
+};
+
+exit($test->run());

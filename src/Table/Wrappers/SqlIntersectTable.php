@@ -88,6 +88,13 @@ class SqlIntersectTable extends AbstractTable
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
+        // LIMIT 0 must emit nothing. The loops below use an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
+
         foreach ($iterTable->columns(...$iterCols) as $id => $row) {
             // Build member with probe table's column names for has() check
             $member = $this->remapRow($row, $iterCols, $probeCols);

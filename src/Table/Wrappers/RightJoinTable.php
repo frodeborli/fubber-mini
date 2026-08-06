@@ -8,6 +8,7 @@ use mini\Table\Contracts\SetInterface;
 use mini\Table\Contracts\TableInterface;
 use mini\Table\OrderDef;
 use mini\Table\Types\IndexType;
+use mini\Table\Types\Operator;
 use mini\Table\Predicate;
 use mini\Table\Utility\PredicateFilter;
 use Traversable;
@@ -99,14 +100,23 @@ class RightJoinTable extends AbstractTable
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
+        // LIMIT 0 must emit nothing. The loops below use an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
+
         // For each right row, find matching left rows
         foreach ($this->right as $rightRow) {
             // Build bindings from right row
             $bindings = $this->extractBindings($rightRow);
 
-            // Apply bound predicate as filters to left table
-            $boundPredicate = $this->bindPredicate->bind($bindings);
-            $matchingLeft = PredicateFilter::apply($this->left, $boundPredicate);
+            // A comparison with NULL is UNKNOWN, never a match — NULL keys do
+            // not join, they fall through to the null-extended row.
+            $matchingLeft = in_array(null, $bindings, true)
+                ? []
+                : PredicateFilter::apply($this->left, $this->bindPredicate->bind($bindings));
 
             $hadMatch = false;
             foreach ($matchingLeft as $leftRow) {
@@ -198,37 +208,37 @@ class RightJoinTable extends AbstractTable
 
     public function eq(string $column, mixed $value): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->eq($column, $value));
+        return new FilteredTable($this, $column, Operator::Eq, $value);
     }
 
     public function lt(string $column, mixed $value): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->lt($column, $value));
+        return new FilteredTable($this, $column, Operator::Lt, $value);
     }
 
     public function lte(string $column, mixed $value): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->lte($column, $value));
+        return new FilteredTable($this, $column, Operator::Lte, $value);
     }
 
     public function gt(string $column, mixed $value): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->gt($column, $value));
+        return new FilteredTable($this, $column, Operator::Gt, $value);
     }
 
     public function gte(string $column, mixed $value): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->gte($column, $value));
+        return new FilteredTable($this, $column, Operator::Gte, $value);
     }
 
     public function in(string $column, SetInterface $values): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->in($column, $values));
+        return new FilteredTable($this, $column, Operator::In, $values);
     }
 
     public function like(string $column, string $pattern): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->like($column, $pattern));
+        return new FilteredTable($this, $column, Operator::Like, $pattern);
     }
 
     public function count(): int

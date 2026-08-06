@@ -463,7 +463,41 @@ class SqlParser
             $stmt = new AST\UnionNode($stmt, $right, $all, $operator);
         }
 
+        if ($stmt instanceof AST\UnionNode) {
+            $this->liftTrailingSort($stmt);
+        }
+
         return $stmt;
+    }
+
+    /**
+     * Move a trailing ORDER BY / LIMIT / OFFSET from the last operand onto the
+     * set operation itself.
+     *
+     * `parseSelectStatement()` greedily consumes the trailing sort/pagination,
+     * so in `A UNION B ORDER BY x LIMIT 1` they end up parsed as part of `B`.
+     * SQL:2003 says they apply to the whole set result: the operands of a set
+     * operator are `<query term>`s and cannot carry their own ORDER BY. Leaving
+     * them on `B` sorts and limits only the last branch — a silently wrong
+     * answer.
+     */
+    private function liftTrailingSort(AST\UnionNode $node): void
+    {
+        $right = $node->right;
+        if (!$right instanceof SelectStatement) {
+            return;
+        }
+        if ($right->orderBy === null && $right->limit === null && $right->offset === null) {
+            return;
+        }
+
+        $node->orderBy = $right->orderBy;
+        $node->limit = $right->limit;
+        $node->offset = $right->offset;
+
+        $right->orderBy = null;
+        $right->limit = null;
+        $right->offset = null;
     }
 
     /**
@@ -816,8 +850,10 @@ class SqlParser
 
         $this->expect(SqlLexer::T_LPAREN);
 
-        // Check for Subquery (supports UNION/INTERSECT/EXCEPT)
-        if ($this->current()['type'] === SqlLexer::T_SELECT) {
+        // Check for Subquery (supports UNION/INTERSECT/EXCEPT and a leading WITH -
+        // SQL:2003 allows a full <query expression> here, not just a SELECT)
+        if ($this->current()['type'] === SqlLexer::T_SELECT
+            || $this->current()['type'] === SqlLexer::T_WITH) {
             $subquery = $this->parseSelectOrUnion();
             $this->expect(SqlLexer::T_RPAREN);
             return new InOperation($left, new SubqueryNode($subquery), $negated);
@@ -1037,9 +1073,14 @@ class SqlParser
         $args = [];
         $distinct = false;
 
-        // Handle DISTINCT inside function: COUNT(DISTINCT col)
+        // Set quantifier inside an aggregate: COUNT(DISTINCT col) / SUM(ALL col).
+        // ALL is the SQL:2003 default, so it only has to be accepted.
         if ($this->match(SqlLexer::T_DISTINCT)) {
             $distinct = true;
+        } elseif ($this->current()['type'] === SqlLexer::T_ALL
+            && $this->peek()['type'] !== SqlLexer::T_RPAREN
+        ) {
+            $this->match(SqlLexer::T_ALL);
         }
 
         if ($this->current()['type'] !== SqlLexer::T_RPAREN) {

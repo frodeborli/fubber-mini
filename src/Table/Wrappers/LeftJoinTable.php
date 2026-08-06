@@ -8,6 +8,7 @@ use mini\Table\Contracts\SetInterface;
 use mini\Table\Contracts\TableInterface;
 use mini\Table\OrderDef;
 use mini\Table\Types\IndexType;
+use mini\Table\Types\Operator;
 use mini\Table\Predicate;
 use Traversable;
 
@@ -28,6 +29,17 @@ use Traversable;
  */
 class LeftJoinTable extends AbstractTable
 {
+    /** Maps the filter method name to the equivalent FilteredTable operator. */
+    private const OPERATORS = [
+        'eq' => Operator::Eq,
+        'lt' => Operator::Lt,
+        'lte' => Operator::Lte,
+        'gt' => Operator::Gt,
+        'gte' => Operator::Gte,
+        'in' => Operator::In,
+        'like' => Operator::Like,
+    ];
+
     private Predicate $bindPredicate;
     private array $bindParams;
     private array $rightColNames;
@@ -95,12 +107,26 @@ class LeftJoinTable extends AbstractTable
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
+        // LIMIT 0 must emit nothing. The loops below use an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
+
         foreach ($this->left as $leftRow) {
             $hadMatch = false;
 
             foreach ($this->right as $rightRow) {
                 // Bind right values and test against left row
                 $bindings = $this->extractBindings($rightRow);
+
+                // A comparison with NULL is UNKNOWN, never a match — NULL keys
+                // do not join, they fall through to the null-extended row.
+                if (in_array(null, $bindings, true)) {
+                    continue;
+                }
+
                 $boundPredicate = $this->bindPredicate->bind($bindings);
 
                 if ($boundPredicate->test($leftRow)) {
@@ -235,20 +261,29 @@ class LeftJoinTable extends AbstractTable
 
     /**
      * Push a filter operation to the appropriate source table
+     *
+     * Only filters on LEFT columns may be pushed down: every left row survives
+     * the join (null-extended when unmatched), so filtering before the join is
+     * equivalent to filtering after it.
+     *
+     * Filters on RIGHT columns must NOT be pushed. The right side is the
+     * null-supplying side: removing right rows before the join turns matched
+     * rows into null-extended rows instead of removing them, which silently
+     * returns extra rows. Those filters are applied to the join output.
      */
     private function pushFilter(string $method, string $column, mixed $value): TableInterface
     {
         $leftCols = $this->left->getColumns();
-        $rightCols = $this->right->getColumns();
 
         if (isset($leftCols[$column])) {
             $filtered = $this->left->$method($column, $value);
             return $this->withFilteredSources($filtered, $this->right);
         }
 
+        $rightCols = $this->right->getColumns();
+
         if (isset($rightCols[$column])) {
-            $filtered = $this->right->$method($column, $value);
-            return $this->withFilteredSources($this->left, $filtered);
+            return new FilteredTable($this, $column, self::OPERATORS[$method], $value);
         }
 
         throw new \InvalidArgumentException("Unknown column in LEFT JOIN: '$column'");

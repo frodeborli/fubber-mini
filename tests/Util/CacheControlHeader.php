@@ -4,171 +4,189 @@
  */
 
 require __DIR__ . '/../../ensure-autoloader.php';
-require __DIR__ . '/../assert.php';
 
+use mini\Test;
 use mini\Util\CacheControlHeader;
 
-echo "Testing CacheControlHeader...\n";
+$test = new class extends Test {
 
-// =============================================================================
-// Parsing tests
-// =============================================================================
+    // ─────────────────────────────────────────────────────────────────────────
+    // Parsing
+    // ─────────────────────────────────────────────────────────────────────────
 
-// Test: Parse empty/null
-$cc = new CacheControlHeader(null);
-assert_true($cc->isEmpty(), 'Null header should be empty');
-assert_eq('', (string) $cc, 'Empty header should render as empty string');
-echo "  ✓ Handles null/empty header\n";
+    public function testHandlesNullEmptyHeader(): void
+    {
+        $cc = new CacheControlHeader(null);
+        $this->assertTrue($cc->isEmpty(), 'Null header should be empty');
+        $this->assertSame('', (string) $cc, 'Empty header should render as empty string');
+    }
 
-// Test: Parse simple flags
-$cc = new CacheControlHeader('no-cache, no-store, must-revalidate');
-assert_true($cc->has('no-cache'));
-assert_true($cc->has('no-store'));
-assert_true($cc->has('must-revalidate'));
-assert_false($cc->has('public'));
-assert_eq(true, $cc->get('no-cache'), 'Flag directives should return true');
-echo "  ✓ Parses flag directives\n";
+    public function testParsesFlagDirectives(): void
+    {
+        $cc = new CacheControlHeader('no-cache, no-store, must-revalidate');
+        $this->assertTrue($cc->has('no-cache'));
+        $this->assertTrue($cc->has('no-store'));
+        $this->assertTrue($cc->has('must-revalidate'));
+        $this->assertFalse($cc->has('public'));
+        $this->assertSame(true, $cc->get('no-cache'), 'Flag directives should return true');
+    }
 
-// Test: Parse directives with values
-$cc = new CacheControlHeader('public, max-age=3600, s-maxage=60');
-assert_true($cc->has('public'));
-assert_true($cc->has('max-age'));
-assert_eq('3600', $cc->get('max-age'));
-assert_eq('60', $cc->get('s-maxage'));
-echo "  ✓ Parses value directives\n";
+    public function testParsesValueDirectives(): void
+    {
+        $cc = new CacheControlHeader('public, max-age=3600, s-maxage=60');
+        $this->assertTrue($cc->has('public'));
+        $this->assertTrue($cc->has('max-age'));
+        $this->assertSame('3600', $cc->get('max-age'));
+        $this->assertSame('60', $cc->get('s-maxage'));
+    }
 
-// Test: Case insensitivity
-$cc = new CacheControlHeader('Public, Max-Age=100');
-assert_true($cc->has('public'));
-assert_true($cc->has('PUBLIC'));
-assert_eq('100', $cc->get('MAX-AGE'));
-echo "  ✓ Case insensitive\n";
+    public function testCaseInsensitive(): void
+    {
+        $cc = new CacheControlHeader('Public, Max-Age=100');
+        $this->assertTrue($cc->has('public'));
+        $this->assertTrue($cc->has('PUBLIC'));
+        $this->assertSame('100', $cc->get('MAX-AGE'));
+    }
 
-// =============================================================================
-// Modification tests
-// =============================================================================
+    // ─────────────────────────────────────────────────────────────────────────
+    // Modification
+    // ─────────────────────────────────────────────────────────────────────────
 
-// Test: with() adds directive
-$cc = new CacheControlHeader('public');
-$cc2 = $cc->with('max-age', '3600');
-assert_false($cc->has('max-age'), 'Original should be unchanged');
-assert_true($cc2->has('max-age'), 'New instance should have directive');
-assert_eq('3600', $cc2->get('max-age'));
-echo "  ✓ with() is immutable and adds directives\n";
+    public function testWithIsImmutableAndAddsDirectives(): void
+    {
+        $cc = new CacheControlHeader('public');
+        $cc2 = $cc->with('max-age', '3600');
+        $this->assertFalse($cc->has('max-age'), 'Original should be unchanged');
+        $this->assertTrue($cc2->has('max-age'), 'New instance should have directive');
+        $this->assertSame('3600', $cc2->get('max-age'));
+    }
 
-// Test: with() for flags
-$cc = new CacheControlHeader();
-$cc = $cc->with('private');
-assert_true($cc->has('private'));
-assert_eq(true, $cc->get('private'));
-echo "  ✓ with() works for flag directives\n";
+    public function testWithWorksForFlagDirectives(): void
+    {
+        $cc = new CacheControlHeader();
+        $cc = $cc->with('private');
+        $this->assertTrue($cc->has('private'));
+        $this->assertSame(true, $cc->get('private'));
+    }
 
-// Test: without() removes directive
-$cc = new CacheControlHeader('public, max-age=3600');
-$cc2 = $cc->without('max-age');
-assert_true($cc->has('max-age'), 'Original should be unchanged');
-assert_false($cc2->has('max-age'), 'New instance should not have directive');
-assert_true($cc2->has('public'), 'Other directives should remain');
-echo "  ✓ without() is immutable and removes directives\n";
+    public function testWithoutIsImmutableAndRemovesDirectives(): void
+    {
+        $cc = new CacheControlHeader('public, max-age=3600');
+        $cc2 = $cc->without('max-age');
+        $this->assertTrue($cc->has('max-age'), 'Original should be unchanged');
+        $this->assertFalse($cc2->has('max-age'), 'New instance should not have directive');
+        $this->assertTrue($cc2->has('public'), 'Other directives should remain');
+    }
 
-// Test: without() on non-existent returns same instance
-$cc = new CacheControlHeader('public');
-$cc2 = $cc->without('nonexistent');
-assert_true($cc === $cc2, 'Should return same instance if nothing to remove');
-echo "  ✓ without() returns same instance if directive not present\n";
+    public function testWithoutReturnsSameInstanceIfDirectiveNotPresent(): void
+    {
+        $cc = new CacheControlHeader('public');
+        $cc2 = $cc->without('nonexistent');
+        $this->assertTrue($cc === $cc2, 'Should return same instance if nothing to remove');
+    }
 
-// =============================================================================
-// Visibility restriction tests
-// =============================================================================
+    // ─────────────────────────────────────────────────────────────────────────
+    // Visibility restriction
+    // ─────────────────────────────────────────────────────────────────────────
 
-// Test: Restrict public to private
-$cc = new CacheControlHeader('public, max-age=3600');
-$cc2 = $cc->withRestrictedVisibility('private');
-assert_false($cc2->has('public'), 'public should be removed');
-assert_true($cc2->has('private'), 'private should be added');
-assert_true($cc2->has('max-age'), 'Other directives should remain');
-echo "  ✓ withRestrictedVisibility() changes public to private\n";
+    public function testWithRestrictedVisibilityChangesPublicToPrivate(): void
+    {
+        $cc = new CacheControlHeader('public, max-age=3600');
+        $cc2 = $cc->withRestrictedVisibility('private');
+        $this->assertFalse($cc2->has('public'), 'public should be removed');
+        $this->assertTrue($cc2->has('private'), 'private should be added');
+        $this->assertTrue($cc2->has('max-age'), 'Other directives should remain');
+    }
 
-// Test: Restrict private to no-cache (more restrictive)
-$cc = new CacheControlHeader('private');
-$cc2 = $cc->withRestrictedVisibility('no-cache');
-assert_false($cc2->has('private'));
-assert_true($cc2->has('no-cache'));
-echo "  ✓ withRestrictedVisibility() can make more restrictive\n";
+    public function testWithRestrictedVisibilityCanMakeMoreRestrictive(): void
+    {
+        $cc = new CacheControlHeader('private');
+        $cc2 = $cc->withRestrictedVisibility('no-cache');
+        $this->assertFalse($cc2->has('private'));
+        $this->assertTrue($cc2->has('no-cache'));
+    }
 
-// Test: Don't loosen restriction
-$cc = new CacheControlHeader('no-store');
-$cc2 = $cc->withRestrictedVisibility('private');
-assert_true($cc2->has('no-store'), 'no-store should remain (more restrictive)');
-assert_false($cc2->has('private'), 'Should not add less restrictive');
-echo "  ✓ withRestrictedVisibility() doesn't loosen restrictions\n";
+    public function testWithRestrictedVisibilityDoesNotLoosenRestrictions(): void
+    {
+        $cc = new CacheControlHeader('no-store');
+        $cc2 = $cc->withRestrictedVisibility('private');
+        $this->assertTrue($cc2->has('no-store'), 'no-store should remain (more restrictive)');
+        $this->assertFalse($cc2->has('private'), 'Should not add less restrictive');
+    }
 
-// Test: withPrivate() shorthand
-$cc = new CacheControlHeader('public');
-$cc2 = $cc->withPrivate();
-assert_true($cc2->has('private'));
-assert_false($cc2->has('public'));
-echo "  ✓ withPrivate() works\n";
+    public function testWithPrivateWorks(): void
+    {
+        $cc = new CacheControlHeader('public');
+        $cc2 = $cc->withPrivate();
+        $this->assertTrue($cc2->has('private'));
+        $this->assertFalse($cc2->has('public'));
+    }
 
-// Test: withNoStore()
-$cc = new CacheControlHeader('public, max-age=3600');
-$cc2 = $cc->withNoStore();
-assert_true($cc2->has('no-store'));
-assert_true($cc2->has('no-cache'));
-assert_true($cc2->has('must-revalidate'));
-assert_false($cc2->has('public'));
-echo "  ✓ withNoStore() sets full no-cache policy\n";
+    public function testWithNoStoreSetsFullNoCachePolicy(): void
+    {
+        $cc = new CacheControlHeader('public, max-age=3600');
+        $cc2 = $cc->withNoStore();
+        $this->assertTrue($cc2->has('no-store'));
+        $this->assertTrue($cc2->has('no-cache'));
+        $this->assertTrue($cc2->has('must-revalidate'));
+        $this->assertFalse($cc2->has('public'));
+    }
 
-// =============================================================================
-// TTL restriction tests
-// =============================================================================
+    // ─────────────────────────────────────────────────────────────────────────
+    // TTL restriction
+    // ─────────────────────────────────────────────────────────────────────────
 
-// Test: Cap max-age when higher
-$cc = new CacheControlHeader('max-age=3600');
-$cc2 = $cc->withMaxTtl(60);
-assert_eq('60', $cc2->get('max-age'));
-echo "  ✓ withMaxTtl() caps higher values\n";
+    public function testWithMaxTtlCapsHigherValues(): void
+    {
+        $cc = new CacheControlHeader('max-age=3600');
+        $cc2 = $cc->withMaxTtl(60);
+        $this->assertSame('60', $cc2->get('max-age'));
+    }
 
-// Test: Don't increase max-age
-$cc = new CacheControlHeader('max-age=30');
-$cc2 = $cc->withMaxTtl(3600);
-assert_eq('30', $cc2->get('max-age'), 'Should keep lower value');
-echo "  ✓ withMaxTtl() keeps lower values\n";
+    public function testWithMaxTtlKeepsLowerValues(): void
+    {
+        $cc = new CacheControlHeader('max-age=30');
+        $cc2 = $cc->withMaxTtl(3600);
+        $this->assertSame('30', $cc2->get('max-age'), 'Should keep lower value');
+    }
 
-// Test: Set max-age when not present
-$cc = new CacheControlHeader('public');
-$cc2 = $cc->withMaxTtl(60);
-assert_eq('60', $cc2->get('max-age'));
-echo "  ✓ withMaxTtl() sets value when not present\n";
+    public function testWithMaxTtlSetsValueWhenNotPresent(): void
+    {
+        $cc = new CacheControlHeader('public');
+        $cc2 = $cc->withMaxTtl(60);
+        $this->assertSame('60', $cc2->get('max-age'));
+    }
 
-// Test: withMaxSharedTtl
-$cc = new CacheControlHeader('s-maxage=3600');
-$cc2 = $cc->withMaxSharedTtl(60);
-assert_eq('60', $cc2->get('s-maxage'));
-echo "  ✓ withMaxSharedTtl() works\n";
+    public function testWithMaxSharedTtlWorks(): void
+    {
+        $cc = new CacheControlHeader('s-maxage=3600');
+        $cc2 = $cc->withMaxSharedTtl(60);
+        $this->assertSame('60', $cc2->get('s-maxage'));
+    }
 
-// =============================================================================
-// Rendering tests
-// =============================================================================
+    // ─────────────────────────────────────────────────────────────────────────
+    // Rendering
+    // ─────────────────────────────────────────────────────────────────────────
 
-// Test: Render mixed directives
-$cc = new CacheControlHeader();
-$cc = $cc->with('private')->with('max-age', '3600')->with('must-revalidate');
-$str = (string) $cc;
-assert_contains('private', $str);
-assert_contains('max-age=3600', $str);
-assert_contains('must-revalidate', $str);
-echo "  ✓ Renders correctly\n";
+    public function testRendersCorrectly(): void
+    {
+        $cc = new CacheControlHeader();
+        $cc = $cc->with('private')->with('max-age', '3600')->with('must-revalidate');
+        $str = (string) $cc;
+        $this->assertStringContainsString('private', $str);
+        $this->assertStringContainsString('max-age=3600', $str);
+        $this->assertStringContainsString('must-revalidate', $str);
+    }
 
-// Test: Invalid visibility throws
-$thrown = false;
-try {
-    $cc = new CacheControlHeader();
-    $cc->withRestrictedVisibility('invalid');
-} catch (InvalidArgumentException $e) {
-    $thrown = true;
-}
-assert_true($thrown, 'Should throw on invalid visibility');
-echo "  ✓ Throws on invalid visibility\n";
+    public function testThrowsOnInvalidVisibility(): void
+    {
+        $cc = new CacheControlHeader();
+        $this->assertThrows(
+            fn() => $cc->withRestrictedVisibility('invalid'),
+            \InvalidArgumentException::class,
+            'Should throw on invalid visibility'
+        );
+    }
+};
 
-echo "\nAll CacheControlHeader tests passed!\n";
+exit($test->run());

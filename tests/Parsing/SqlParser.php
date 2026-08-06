@@ -5,8 +5,8 @@
  * Tests for lexer and parser correctness.
  */
 require __DIR__ . '/../../ensure-autoloader.php';
-require __DIR__ . '/../assert.php';
 
+use mini\Test;
 use mini\Parsing\SQL\SqlLexer;
 use mini\Parsing\SQL\SqlParser;
 use mini\Parsing\SQL\AstParameterBinder;
@@ -21,535 +21,635 @@ use mini\Parsing\SQL\AST\{
     InOperation,
     BetweenOperation,
     ColumnNode,
-    JoinNode
+    JoinNode,
+    SubqueryNode,
+    UnionNode,
+    WithStatement
 };
 
-// --- Lexer Tests ---
-
-// Test: t.* tokenizes correctly (no trailing dot in identifier)
-$lexer = new SqlLexer('SELECT t.* FROM x');
-$tokens = $lexer->tokenize();
-assert_eq('SELECT', $tokens[0]['type']);
-assert_eq('IDENTIFIER', $tokens[1]['type']);
-assert_eq('t', $tokens[1]['value']);
-assert_eq('DOT', $tokens[2]['type']);
-assert_eq('STAR', $tokens[3]['type']);
-assert_eq('*', $tokens[3]['value']);
-echo "✓ t.* tokenizes correctly\n";
-
-// Test: table.column tokenizes as separate tokens
-$lexer = new SqlLexer('SELECT users.name FROM users');
-$tokens = $lexer->tokenize();
-assert_eq('IDENTIFIER', $tokens[1]['type']);
-assert_eq('users', $tokens[1]['value']);
-assert_eq('DOT', $tokens[2]['type']);
-assert_eq('IDENTIFIER', $tokens[3]['type']);
-assert_eq('name', $tokens[3]['value']);
-echo "✓ table.column tokenizes correctly\n";
-
-// Test: Numbers with multiple dots only accept first dot
-$lexer = new SqlLexer('SELECT 1.2.3');
-$tokens = $lexer->tokenize();
-assert_eq('NUMBER', $tokens[1]['type']);
-assert_eq('1.2', $tokens[1]['value']);
-assert_eq('DOT', $tokens[2]['type']);
-assert_eq('NUMBER', $tokens[3]['type']);
-assert_eq('3', $tokens[3]['value']);
-echo "✓ Numbers stop at second dot\n";
-
-// Test: Valid decimal numbers
-$lexer = new SqlLexer('SELECT 3.14159');
-$tokens = $lexer->tokenize();
-assert_eq('NUMBER', $tokens[1]['type']);
-assert_eq('3.14159', $tokens[1]['value']);
-echo "✓ Valid decimal numbers work\n";
-
-// --- Parser Tests ---
-
-// Test: SELECT t.* FROM x parses correctly
-$parser = new SqlParser();
-$ast = $parser->parse('SELECT t.* FROM x');
-assert_true($ast instanceof SelectStatement);
-assert_eq(1, count($ast->columns));
-assert_true($ast->columns[0]->expression instanceof IdentifierNode);
-assert_eq(['t', '*'], $ast->columns[0]->expression->parts);
-assert_true($ast->columns[0]->expression->isWildcard());
-echo "✓ SELECT t.* parses correctly\n";
-
-// Test: SELECT * still works
-$ast = $parser->parse('SELECT * FROM users');
-assert_eq(['*'], $ast->columns[0]->expression->parts);
-assert_true($ast->columns[0]->expression->isWildcard());
-echo "✓ SELECT * still works\n";
-
-// Test: Qualified column names
-$ast = $parser->parse('SELECT users.id, users.name FROM users');
-assert_eq(['users', 'id'], $ast->columns[0]->expression->parts);
-assert_eq(['users', 'name'], $ast->columns[1]->expression->parts);
-assert_true($ast->columns[0]->expression->isQualified());
-assert_eq('id', $ast->columns[0]->expression->getName());
-assert_eq(['users'], $ast->columns[0]->expression->getQualifier());
-echo "✓ Qualified column names work\n";
-
-// Test: Schema-qualified names (db.table.column)
-$ast = $parser->parse('SELECT mydb.users.id FROM mydb.users');
-assert_eq(['mydb', 'users', 'id'], $ast->columns[0]->expression->parts);
-assert_eq('id', $ast->columns[0]->expression->getName());
-assert_eq(['mydb', 'users'], $ast->columns[0]->expression->getQualifier());
-echo "✓ Schema-qualified names work\n";
-
-// Test: Quoted identifiers with dots inside (backticks)
-$ast = $parser->parse('SELECT `my.table`.`weird-col` FROM `my.table`');
-assert_eq(['my.table', 'weird-col'], $ast->columns[0]->expression->parts);
-assert_eq('weird-col', $ast->columns[0]->expression->getName());
-assert_eq('my.table.weird-col', $ast->columns[0]->expression->getFullName());
-echo "✓ Backtick-quoted identifiers with internal dots work\n";
-
-// Test: Double-quoted identifiers (standard SQL)
-$lexer = new SqlLexer('SELECT "column name" FROM "table name"');
-$tokens = $lexer->tokenize();
-assert_eq('IDENTIFIER', $tokens[1]['type']);
-assert_eq('column name', $tokens[1]['value']);
-assert_eq('IDENTIFIER', $tokens[3]['type']);
-assert_eq('table name', $tokens[3]['value']);
-echo "✓ Double-quoted identifiers tokenize correctly\n";
-
-// Test: Double-quoted identifiers with escaped quotes
-$lexer = new SqlLexer('SELECT "col""name" FROM t');
-$tokens = $lexer->tokenize();
-assert_eq('IDENTIFIER', $tokens[1]['type']);
-assert_eq('col"name', $tokens[1]['value']);
-echo "✓ Escaped double quotes in identifiers work\n";
-
-// Test: Double-quoted identifiers parse correctly
-$ast = $parser->parse('SELECT "user name", "order-date" FROM "my table"');
-assert_eq(['user name'], $ast->columns[0]->expression->parts);
-assert_eq(['order-date'], $ast->columns[1]->expression->parts);
-assert_eq('my table', $ast->from->getName());
-echo "✓ Double-quoted identifiers parse correctly\n";
-
-// Test: Mixed quote styles (backticks and double quotes)
-$ast = $parser->parse('SELECT `col1`, "col2" FROM `t1`');
-assert_eq(['col1'], $ast->columns[0]->expression->parts);
-assert_eq(['col2'], $ast->columns[1]->expression->parts);
-echo "✓ Mixed backtick and double-quote identifiers work\n";
-
-// Test: Arithmetic with proper precedence (multiplication before addition)
-$ast = $parser->parse('SELECT a + b * c FROM t');
-$expr = $ast->columns[0]->expression;
-assert_true($expr instanceof BinaryOperation);
-assert_eq('+', $expr->operator);
-// Left should be 'a', right should be 'b * c'
-assert_true($expr->left instanceof IdentifierNode);
-assert_eq('a', $expr->left->getName());
-assert_true($expr->right instanceof BinaryOperation);
-assert_eq('*', $expr->right->operator);
-echo "✓ Arithmetic precedence: a + b * c parses as a + (b * c)\n";
-
-// Test: Arithmetic with division
-$ast = $parser->parse('SELECT total / count FROM stats');
-$expr = $ast->columns[0]->expression;
-assert_true($expr instanceof BinaryOperation);
-assert_eq('/', $expr->operator);
-echo "✓ Division operator works\n";
-
-// Test: LIMIT with placeholder
-$ast = $parser->parse('SELECT * FROM users LIMIT ?');
-assert_true($ast->limit instanceof PlaceholderNode);
-assert_eq('?', $ast->limit->token);
-echo "✓ LIMIT ? parses correctly\n";
-
-// Test: LIMIT with number literal
-$ast = $parser->parse('SELECT * FROM users LIMIT 10');
-assert_true($ast->limit instanceof LiteralNode);
-assert_eq('10', $ast->limit->value);
-echo "✓ LIMIT 10 parses correctly\n";
-
-// Test: Comparison operators restricted (reject arithmetic as comparison)
-$ast = $parser->parse('SELECT * FROM users WHERE age > 18');
-assert_true($ast->where instanceof BinaryOperation);
-assert_eq('>', $ast->where->operator);
-echo "✓ Comparison operators work\n";
-
-// Test: LIMIT rejects non-number/placeholder
-assert_throws(
-    fn() => $parser->parse('SELECT * FROM users LIMIT foo'),
-    SqlSyntaxException::class
-);
-echo "✓ LIMIT rejects identifier\n";
-
-assert_throws(
-    fn() => $parser->parse("SELECT * FROM users LIMIT 'ten'"),
-    SqlSyntaxException::class
-);
-echo "✓ LIMIT rejects string\n";
-
-// Test: IN accepts scalar values
-$ast = $parser->parse('SELECT * FROM t WHERE x IN (1, 2, 3)');
-assert_true($ast->where instanceof InOperation);
-assert_count(3, $ast->where->values);
-echo "✓ IN with scalar values works\n";
-
-// Test: IN accepts arithmetic expressions
-$ast = $parser->parse('SELECT * FROM t WHERE x IN (a + 1, b * 2)');
-assert_true($ast->where instanceof InOperation);
-assert_true($ast->where->values[0] instanceof BinaryOperation);
-echo "✓ IN with arithmetic expressions works\n";
-
-// Test: IN rejects boolean expressions (comparison in list would leave trailing tokens)
-assert_throws(
-    fn() => $parser->parse('SELECT * FROM t WHERE x IN (a = b)'),
-    SqlSyntaxException::class
-);
-echo "✓ IN rejects comparison expressions\n";
-
-// Test: Generic NOT boolean operator
-$ast = $parser->parse('SELECT * FROM t WHERE NOT is_active');
-assert_true($ast->where instanceof UnaryOperation);
-assert_eq('NOT', $ast->where->operator);
-assert_true($ast->where->expression instanceof IdentifierNode);
-echo "✓ Generic NOT works\n";
-
-// Test: NOT with parenthesized expression
-$ast = $parser->parse('SELECT * FROM t WHERE NOT (a = b)');
-assert_true($ast->where instanceof UnaryOperation);
-assert_eq('NOT', $ast->where->operator);
-assert_true($ast->where->expression instanceof BinaryOperation);
-echo "✓ NOT (expr) works\n";
-
-// Test: NULL literal
-$ast = $parser->parse('SELECT NULL FROM t');
-assert_true($ast->columns[0]->expression instanceof LiteralNode);
-assert_null($ast->columns[0]->expression->value);
-assert_eq('null', $ast->columns[0]->expression->valueType);
-echo "✓ NULL literal works\n";
-
-// Test: TRUE/FALSE literals
-$ast = $parser->parse('SELECT TRUE, FALSE FROM t');
-assert_true($ast->columns[0]->expression instanceof LiteralNode);
-assert_eq(true, $ast->columns[0]->expression->value);
-assert_eq('boolean', $ast->columns[0]->expression->valueType);
-assert_eq(false, $ast->columns[1]->expression->value);
-echo "✓ TRUE/FALSE literals work\n";
-
-// Test: Boolean in WHERE
-$ast = $parser->parse('SELECT * FROM t WHERE is_active = TRUE');
-assert_true($ast->where instanceof BinaryOperation);
-assert_true($ast->where->right instanceof LiteralNode);
-assert_eq(true, $ast->where->right->value);
-echo "✓ Boolean in WHERE works\n";
-
-// --- JOIN Tests ---
-
-// Test: Simple JOIN (INNER)
-$ast = $parser->parse('SELECT * FROM users JOIN orders ON users.id = orders.user_id');
-assert_count(1, $ast->joins);
-assert_true($ast->joins[0] instanceof JoinNode);
-assert_eq('INNER', $ast->joins[0]->joinType);
-assert_eq(['orders'], $ast->joins[0]->table->parts);
-assert_true($ast->joins[0]->condition instanceof BinaryOperation);
-echo "✓ Simple JOIN works\n";
-
-// Test: INNER JOIN explicit
-$ast = $parser->parse('SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id');
-assert_eq('INNER', $ast->joins[0]->joinType);
-echo "✓ INNER JOIN works\n";
-
-// Test: LEFT JOIN
-$ast = $parser->parse('SELECT * FROM users LEFT JOIN orders ON users.id = orders.user_id');
-assert_eq('LEFT', $ast->joins[0]->joinType);
-echo "✓ LEFT JOIN works\n";
-
-// Test: LEFT OUTER JOIN
-$ast = $parser->parse('SELECT * FROM users LEFT OUTER JOIN orders ON users.id = orders.user_id');
-assert_eq('LEFT', $ast->joins[0]->joinType);
-echo "✓ LEFT OUTER JOIN works\n";
-
-// Test: RIGHT JOIN
-$ast = $parser->parse('SELECT * FROM users RIGHT JOIN orders ON users.id = orders.user_id');
-assert_eq('RIGHT', $ast->joins[0]->joinType);
-echo "✓ RIGHT JOIN works\n";
-
-// Test: FULL JOIN
-$ast = $parser->parse('SELECT * FROM a FULL JOIN b ON a.id = b.id');
-assert_eq('FULL', $ast->joins[0]->joinType);
-echo "✓ FULL JOIN works\n";
-
-// Test: CROSS JOIN (no ON clause)
-$ast = $parser->parse('SELECT * FROM a CROSS JOIN b');
-assert_eq('CROSS', $ast->joins[0]->joinType);
-assert_null($ast->joins[0]->condition);
-echo "✓ CROSS JOIN works\n";
-
-// Test: Multiple JOINs
-$ast = $parser->parse('
-    SELECT * FROM users u
-    JOIN orders o ON u.id = o.user_id
-    LEFT JOIN products p ON o.product_id = p.id
-');
-assert_count(2, $ast->joins);
-assert_eq('INNER', $ast->joins[0]->joinType);
-assert_eq('LEFT', $ast->joins[1]->joinType);
-echo "✓ Multiple JOINs work\n";
-
-// Test: JOIN with table alias
-$ast = $parser->parse('SELECT * FROM users u JOIN orders o ON u.id = o.user_id');
-assert_eq('u', $ast->fromAlias);
-assert_eq('o', $ast->joins[0]->alias);
-echo "✓ JOIN with aliases works\n";
-
-// Test: JOIN with AS alias
-$ast = $parser->parse('SELECT * FROM users AS u JOIN orders AS o ON u.id = o.user_id');
-assert_eq('u', $ast->fromAlias);
-assert_eq('o', $ast->joins[0]->alias);
-echo "✓ JOIN with AS aliases works\n";
-
-// Test: JOIN with qualified table name
-$ast = $parser->parse('SELECT * FROM mydb.users JOIN mydb.orders ON users.id = orders.user_id');
-assert_eq(['mydb', 'users'], $ast->from->parts);
-assert_eq(['mydb', 'orders'], $ast->joins[0]->table->parts);
-echo "✓ JOIN with qualified table names works\n";
-
-// Test: JOIN requires ON (except CROSS)
-assert_throws(
-    fn() => $parser->parse('SELECT * FROM a JOIN b'),
-    SqlSyntaxException::class
-);
-echo "✓ JOIN without ON throws error\n";
-
-// Test: JOIN with placeholder in condition
-$ast = $parser->parse('SELECT * FROM users u JOIN orders o ON u.id = o.user_id AND o.status = ?');
-$binder = new AstParameterBinder(['active']);
-$bound = $binder->bind($ast);
-assert_true($bound->joins[0]->condition instanceof BinaryOperation);
-echo "✓ JOIN condition with placeholder binds correctly\n";
-
-// --- DISTINCT Tests ---
-
-// Test: SELECT DISTINCT
-$ast = $parser->parse('SELECT DISTINCT name FROM users');
-assert_true($ast->distinct);
-echo "✓ SELECT DISTINCT works\n";
-
-// Test: SELECT without DISTINCT
-$ast = $parser->parse('SELECT name FROM users');
-assert_false($ast->distinct);
-echo "✓ SELECT without DISTINCT has distinct=false\n";
-
-// --- GROUP BY / HAVING Tests ---
-
-// Test: GROUP BY single column
-$ast = $parser->parse('SELECT status, COUNT(*) FROM orders GROUP BY status');
-assert_not_null($ast->groupBy);
-assert_count(1, $ast->groupBy);
-assert_true($ast->groupBy[0] instanceof IdentifierNode);
-echo "✓ GROUP BY single column works\n";
-
-// Test: GROUP BY multiple columns
-$ast = $parser->parse('SELECT year, month, SUM(total) FROM sales GROUP BY year, month');
-assert_count(2, $ast->groupBy);
-echo "✓ GROUP BY multiple columns works\n";
-
-// Test: GROUP BY with HAVING
-$ast = $parser->parse('SELECT status, COUNT(*) c FROM orders GROUP BY status HAVING c > 10');
-assert_not_null($ast->groupBy);
-assert_not_null($ast->having);
-assert_true($ast->having instanceof BinaryOperation);
-echo "✓ GROUP BY with HAVING works\n";
-
-// Test: Full query with GROUP BY, HAVING, ORDER BY
-$ast = $parser->parse('
-    SELECT category, COUNT(*) cnt
-    FROM products
-    WHERE active = TRUE
-    GROUP BY category
-    HAVING cnt > 5
-    ORDER BY cnt DESC
-    LIMIT 10
-');
-assert_not_null($ast->where);
-assert_not_null($ast->groupBy);
-assert_not_null($ast->having);
-assert_not_null($ast->orderBy);
-assert_not_null($ast->limit);
-echo "✓ Full aggregation query works\n";
-
-// --- BETWEEN Tests ---
-
-// Test: BETWEEN
-$ast = $parser->parse('SELECT * FROM t WHERE x BETWEEN 1 AND 10');
-assert_true($ast->where instanceof BetweenOperation);
-assert_false($ast->where->negated);
-assert_true($ast->where->low instanceof LiteralNode);
-assert_true($ast->where->high instanceof LiteralNode);
-echo "✓ BETWEEN works\n";
-
-// Test: NOT BETWEEN
-$ast = $parser->parse('SELECT * FROM t WHERE x NOT BETWEEN 1 AND 10');
-assert_true($ast->where instanceof BetweenOperation);
-assert_true($ast->where->negated);
-echo "✓ NOT BETWEEN works\n";
-
-// Test: BETWEEN with expressions
-$ast = $parser->parse('SELECT * FROM t WHERE date BETWEEN ? AND ?');
-$binder = new AstParameterBinder(['2024-01-01', '2024-12-31']);
-$bound = $binder->bind($ast);
-assert_true($bound->where->low instanceof LiteralNode);
-assert_eq('2024-01-01', $bound->where->low->value);
-echo "✓ BETWEEN with placeholders binds correctly\n";
-
-// --- Binder Tests ---
-
-// Test: Null binding stores actual null
-$parser = new SqlParser();
-$ast = $parser->parse('SELECT * FROM users WHERE name = ?');
-$binder = new AstParameterBinder([null]);
-$bound = $binder->bind($ast);
-assert_true($bound->where->right instanceof LiteralNode);
-assert_eq('null', $bound->where->right->valueType);
-assert_null($bound->where->right->value);
-echo "✓ Null binds as actual null value\n";
-
-// Test: LIMIT placeholder binding
-$ast = $parser->parse('SELECT * FROM users LIMIT ?');
-$binder = new AstParameterBinder([25]);
-$bound = $binder->bind($ast);
-assert_true($bound->limit instanceof LiteralNode);
-assert_eq('25', $bound->limit->value);
-assert_eq('number', $bound->limit->valueType);
-echo "✓ LIMIT placeholder binds correctly\n";
-
-// Test: Column expression binding
-$ast = $parser->parse('SELECT price * ? AS discounted FROM products');
-$binder = new AstParameterBinder([0.9]);
-$bound = $binder->bind($ast);
-$expr = $bound->columns[0]->expression;
-assert_true($expr instanceof BinaryOperation);
-assert_true($expr->right instanceof LiteralNode);
-assert_eq('0.9', $expr->right->value);
-echo "✓ Column expression placeholders bind correctly\n";
-
-// Test: INSERT binding
-$ast = $parser->parse('INSERT INTO users (name, age) VALUES (?, ?)');
-$binder = new AstParameterBinder(['Alice', 30]);
-$bound = $binder->bind($ast);
-assert_eq('Alice', $bound->values[0][0]->value);
-assert_eq('30', $bound->values[0][1]->value);
-echo "✓ INSERT placeholders bind correctly\n";
-
-// Test: UPDATE binding
-$ast = $parser->parse('UPDATE users SET name = ? WHERE id = ?');
-$binder = new AstParameterBinder(['Bob', 1]);
-$bound = $binder->bind($ast);
-assert_eq('Bob', $bound->updates[0]['value']->value);
-assert_eq('1', $bound->where->right->value);
-echo "✓ UPDATE placeholders bind correctly\n";
-
-// Test: DELETE binding
-$ast = $parser->parse('DELETE FROM users WHERE id = ?');
-$binder = new AstParameterBinder([42]);
-$bound = $binder->bind($ast);
-assert_eq('42', $bound->where->right->value);
-echo "✓ DELETE placeholders bind correctly\n";
-
-// Test: Named placeholders
-$ast = $parser->parse('SELECT * FROM users WHERE name = :name AND age > :age');
-$binder = new AstParameterBinder(['name' => 'Alice', 'age' => 18]);
-$bound = $binder->bind($ast);
-assert_eq('Alice', $bound->where->left->right->value);
-assert_eq('18', $bound->where->right->right->value);
-echo "✓ Named placeholders bind correctly\n";
-
-// --- Scalar Subquery Tests ---
-
-use mini\Parsing\SQL\AST\SubqueryNode;
-use mini\Parsing\SQL\AST\UnionNode;
-use mini\Parsing\SQL\AST\WithStatement;
-
-// Test: Simple scalar subquery
-$ast = $parser->parse('SELECT (SELECT MAX(id) FROM users) AS max_id FROM dual');
-assert_true($ast->columns[0]->expression instanceof SubqueryNode);
-assert_true($ast->columns[0]->expression->query instanceof SelectStatement);
-echo "✓ Simple scalar subquery works\n";
-
-// Test: Scalar subquery with UNION
-$ast = $parser->parse('SELECT (SELECT 1 UNION SELECT 2) AS val FROM dual');
-assert_true($ast->columns[0]->expression instanceof SubqueryNode);
-assert_true($ast->columns[0]->expression->query instanceof UnionNode);
-echo "✓ Scalar subquery with UNION works\n";
-
-// Test: Scalar subquery with WITH (CTE)
-$ast = $parser->parse('SELECT (WITH cte AS (SELECT 1 AS n) SELECT n FROM cte) AS val FROM dual');
-assert_true($ast->columns[0]->expression instanceof SubqueryNode);
-assert_true($ast->columns[0]->expression->query instanceof WithStatement);
-echo "✓ Scalar subquery with WITH (CTE) works\n";
-
-// Test: Scalar subquery in WHERE clause
-$ast = $parser->parse('SELECT * FROM t WHERE x = (SELECT MAX(y) FROM s)');
-assert_true($ast->where instanceof BinaryOperation);
-assert_true($ast->where->right instanceof SubqueryNode);
-echo "✓ Scalar subquery in WHERE clause works\n";
-
-// --- SQL:2008 FETCH/OFFSET Syntax Tests ---
-
-// Test: FETCH FIRST n ROWS ONLY (no offset)
-$ast = $parser->parse('SELECT * FROM users FETCH FIRST 10 ROWS ONLY');
-assert_eq('10', $ast->limit->value);
-assert_eq(null, $ast->offset);
-echo "✓ FETCH FIRST n ROWS ONLY works\n";
-
-// Test: FETCH NEXT n ROWS ONLY (same as FIRST)
-$ast = $parser->parse('SELECT * FROM users FETCH NEXT 5 ROWS ONLY');
-assert_eq('5', $ast->limit->value);
-assert_eq(null, $ast->offset);
-echo "✓ FETCH NEXT n ROWS ONLY works\n";
-
-// Test: OFFSET n ROWS FETCH FIRST m ROWS ONLY
-$ast = $parser->parse('SELECT * FROM users OFFSET 10 ROWS FETCH FIRST 5 ROWS ONLY');
-assert_eq('10', $ast->offset->value);
-assert_eq('5', $ast->limit->value);
-echo "✓ OFFSET n ROWS FETCH FIRST m ROWS ONLY works\n";
-
-// Test: OFFSET n ROWS FETCH NEXT m ROWS ONLY
-$ast = $parser->parse('SELECT * FROM users OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY');
-assert_eq('20', $ast->offset->value);
-assert_eq('10', $ast->limit->value);
-echo "✓ OFFSET n ROWS FETCH NEXT m ROWS ONLY works\n";
-
-// Test: OFFSET n ROWS without FETCH (offset only)
-$ast = $parser->parse('SELECT * FROM users OFFSET 5 ROWS');
-assert_eq('5', $ast->offset->value);
-assert_eq(null, $ast->limit);
-echo "✓ OFFSET n ROWS without FETCH works\n";
-
-// Test: Simple OFFSET n (PostgreSQL style, no ROWS keyword)
-$ast = $parser->parse('SELECT * FROM users OFFSET 5');
-assert_eq('5', $ast->offset->value);
-assert_eq(null, $ast->limit);
-echo "✓ Simple OFFSET n (PostgreSQL style) works\n";
-
-// Test: FETCH with ROW (singular) instead of ROWS
-$ast = $parser->parse('SELECT * FROM users FETCH FIRST 1 ROW ONLY');
-assert_eq('1', $ast->limit->value);
-echo "✓ FETCH with ROW (singular) works\n";
-
-// Test: SQL:2008 with ORDER BY
-$ast = $parser->parse('SELECT * FROM users ORDER BY id OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY');
-assert_eq('id', $ast->orderBy[0]['column']->getName());
-assert_eq('10', $ast->offset->value);
-assert_eq('5', $ast->limit->value);
-echo "✓ SQL:2008 syntax with ORDER BY works\n";
-
-// Test: SQL:2008 with placeholders
-$ast = $parser->parse('SELECT * FROM users OFFSET ? ROWS FETCH NEXT ? ROWS ONLY');
-assert_true($ast->offset instanceof PlaceholderNode);
-assert_true($ast->limit instanceof PlaceholderNode);
-echo "✓ SQL:2008 syntax with placeholders works\n";
-
-// Test: Traditional LIMIT/OFFSET still works
-$ast = $parser->parse('SELECT * FROM users LIMIT 10 OFFSET 5');
-assert_eq('10', $ast->limit->value);
-assert_eq('5', $ast->offset->value);
-echo "✓ Traditional LIMIT/OFFSET still works\n";
-
-echo "\n✓ All SQL parser tests passed!\n";
+$test = new class extends Test {
+
+    private SqlParser $parser;
+
+    protected function setUp(): void
+    {
+        $this->parser = new SqlParser();
+    }
+
+    // ── Lexer ───────────────────────────────────────────────────────────────
+
+    /** t.* tokenizes correctly (no trailing dot in identifier) */
+    public function testLexerTokenizesTableWildcard(): void
+    {
+        $lexer = new SqlLexer('SELECT t.* FROM x');
+        $tokens = $lexer->tokenize();
+        $this->assertSame('SELECT', $tokens[0]['type']);
+        $this->assertSame('IDENTIFIER', $tokens[1]['type']);
+        $this->assertSame('t', $tokens[1]['value']);
+        $this->assertSame('DOT', $tokens[2]['type']);
+        $this->assertSame('STAR', $tokens[3]['type']);
+        $this->assertSame('*', $tokens[3]['value']);
+    }
+
+    /** table.column tokenizes as separate tokens */
+    public function testLexerTokenizesQualifiedColumn(): void
+    {
+        $lexer = new SqlLexer('SELECT users.name FROM users');
+        $tokens = $lexer->tokenize();
+        $this->assertSame('IDENTIFIER', $tokens[1]['type']);
+        $this->assertSame('users', $tokens[1]['value']);
+        $this->assertSame('DOT', $tokens[2]['type']);
+        $this->assertSame('IDENTIFIER', $tokens[3]['type']);
+        $this->assertSame('name', $tokens[3]['value']);
+    }
+
+    /** Numbers with multiple dots only accept the first dot */
+    public function testLexerNumbersStopAtSecondDot(): void
+    {
+        $lexer = new SqlLexer('SELECT 1.2.3');
+        $tokens = $lexer->tokenize();
+        $this->assertSame('NUMBER', $tokens[1]['type']);
+        $this->assertSame('1.2', $tokens[1]['value']);
+        $this->assertSame('DOT', $tokens[2]['type']);
+        $this->assertSame('NUMBER', $tokens[3]['type']);
+        $this->assertSame('3', $tokens[3]['value']);
+    }
+
+    public function testLexerValidDecimalNumbers(): void
+    {
+        $lexer = new SqlLexer('SELECT 3.14159');
+        $tokens = $lexer->tokenize();
+        $this->assertSame('NUMBER', $tokens[1]['type']);
+        $this->assertSame('3.14159', $tokens[1]['value']);
+    }
+
+    /** Double-quoted identifiers (standard SQL) */
+    public function testLexerDoubleQuotedIdentifiers(): void
+    {
+        $lexer = new SqlLexer('SELECT "column name" FROM "table name"');
+        $tokens = $lexer->tokenize();
+        $this->assertSame('IDENTIFIER', $tokens[1]['type']);
+        $this->assertSame('column name', $tokens[1]['value']);
+        $this->assertSame('IDENTIFIER', $tokens[3]['type']);
+        $this->assertSame('table name', $tokens[3]['value']);
+    }
+
+    /** Double-quoted identifiers with escaped quotes */
+    public function testLexerEscapedDoubleQuotesInIdentifiers(): void
+    {
+        $lexer = new SqlLexer('SELECT "col""name" FROM t');
+        $tokens = $lexer->tokenize();
+        $this->assertSame('IDENTIFIER', $tokens[1]['type']);
+        $this->assertSame('col"name', $tokens[1]['value']);
+    }
+
+    // ── Parser: columns and identifiers ─────────────────────────────────────
+
+    public function testSelectTableWildcardParses(): void
+    {
+        $ast = $this->parser->parse('SELECT t.* FROM x');
+        $this->assertInstanceOf(SelectStatement::class, $ast);
+        $this->assertSame(1, count($ast->columns));
+        $this->assertInstanceOf(IdentifierNode::class, $ast->columns[0]->expression);
+        $this->assertSame(['t', '*'], $ast->columns[0]->expression->parts);
+        $this->assertTrue($ast->columns[0]->expression->isWildcard());
+    }
+
+    public function testSelectStarStillWorks(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users');
+        $this->assertSame(['*'], $ast->columns[0]->expression->parts);
+        $this->assertTrue($ast->columns[0]->expression->isWildcard());
+    }
+
+    public function testQualifiedColumnNames(): void
+    {
+        $ast = $this->parser->parse('SELECT users.id, users.name FROM users');
+        $this->assertSame(['users', 'id'], $ast->columns[0]->expression->parts);
+        $this->assertSame(['users', 'name'], $ast->columns[1]->expression->parts);
+        $this->assertTrue($ast->columns[0]->expression->isQualified());
+        $this->assertSame('id', $ast->columns[0]->expression->getName());
+        $this->assertSame(['users'], $ast->columns[0]->expression->getQualifier());
+    }
+
+    /** Schema-qualified names (db.table.column) */
+    public function testSchemaQualifiedNames(): void
+    {
+        $ast = $this->parser->parse('SELECT mydb.users.id FROM mydb.users');
+        $this->assertSame(['mydb', 'users', 'id'], $ast->columns[0]->expression->parts);
+        $this->assertSame('id', $ast->columns[0]->expression->getName());
+        $this->assertSame(['mydb', 'users'], $ast->columns[0]->expression->getQualifier());
+    }
+
+    /** Quoted identifiers with dots inside (backticks) */
+    public function testBacktickIdentifiersWithInternalDots(): void
+    {
+        $ast = $this->parser->parse('SELECT `my.table`.`weird-col` FROM `my.table`');
+        $this->assertSame(['my.table', 'weird-col'], $ast->columns[0]->expression->parts);
+        $this->assertSame('weird-col', $ast->columns[0]->expression->getName());
+        $this->assertSame('my.table.weird-col', $ast->columns[0]->expression->getFullName());
+    }
+
+    public function testDoubleQuotedIdentifiersParse(): void
+    {
+        $ast = $this->parser->parse('SELECT "user name", "order-date" FROM "my table"');
+        $this->assertSame(['user name'], $ast->columns[0]->expression->parts);
+        $this->assertSame(['order-date'], $ast->columns[1]->expression->parts);
+        $this->assertSame('my table', $ast->from->getName());
+    }
+
+    /** Mixed quote styles (backticks and double quotes) */
+    public function testMixedQuoteStyles(): void
+    {
+        $ast = $this->parser->parse('SELECT `col1`, "col2" FROM `t1`');
+        $this->assertSame(['col1'], $ast->columns[0]->expression->parts);
+        $this->assertSame(['col2'], $ast->columns[1]->expression->parts);
+    }
+
+    // ── Parser: expressions ─────────────────────────────────────────────────
+
+    /** a + b * c parses as a + (b * c) */
+    public function testArithmeticPrecedence(): void
+    {
+        $ast = $this->parser->parse('SELECT a + b * c FROM t');
+        $expr = $ast->columns[0]->expression;
+        $this->assertInstanceOf(BinaryOperation::class, $expr);
+        $this->assertSame('+', $expr->operator);
+        // Left should be 'a', right should be 'b * c'
+        $this->assertInstanceOf(IdentifierNode::class, $expr->left);
+        $this->assertSame('a', $expr->left->getName());
+        $this->assertInstanceOf(BinaryOperation::class, $expr->right);
+        $this->assertSame('*', $expr->right->operator);
+    }
+
+    public function testDivisionOperator(): void
+    {
+        $ast = $this->parser->parse('SELECT total / count FROM stats');
+        $expr = $ast->columns[0]->expression;
+        $this->assertInstanceOf(BinaryOperation::class, $expr);
+        $this->assertSame('/', $expr->operator);
+    }
+
+    public function testLimitWithPlaceholder(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users LIMIT ?');
+        $this->assertInstanceOf(PlaceholderNode::class, $ast->limit);
+        $this->assertSame('?', $ast->limit->token);
+    }
+
+    public function testLimitWithNumberLiteral(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users LIMIT 10');
+        $this->assertInstanceOf(LiteralNode::class, $ast->limit);
+        $this->assertSame('10', $ast->limit->value);
+    }
+
+    /** Comparison operators restricted (reject arithmetic as comparison) */
+    public function testComparisonOperators(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users WHERE age > 18');
+        $this->assertInstanceOf(BinaryOperation::class, $ast->where);
+        $this->assertSame('>', $ast->where->operator);
+    }
+
+    /** LIMIT rejects non-number/placeholder */
+    public function testLimitRejectsIdentifierAndString(): void
+    {
+        $this->assertThrows(
+            fn() => $this->parser->parse('SELECT * FROM users LIMIT foo'),
+            SqlSyntaxException::class
+        );
+        $this->assertThrows(
+            fn() => $this->parser->parse("SELECT * FROM users LIMIT 'ten'"),
+            SqlSyntaxException::class
+        );
+    }
+
+    public function testInWithScalarValues(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM t WHERE x IN (1, 2, 3)');
+        $this->assertInstanceOf(InOperation::class, $ast->where);
+        $this->assertCount(3, $ast->where->values);
+    }
+
+    public function testInWithArithmeticExpressions(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM t WHERE x IN (a + 1, b * 2)');
+        $this->assertInstanceOf(InOperation::class, $ast->where);
+        $this->assertInstanceOf(BinaryOperation::class, $ast->where->values[0]);
+    }
+
+    /** IN rejects boolean expressions (comparison in list would leave trailing tokens) */
+    public function testInRejectsComparisonExpressions(): void
+    {
+        $this->assertThrows(
+            fn() => $this->parser->parse('SELECT * FROM t WHERE x IN (a = b)'),
+            SqlSyntaxException::class
+        );
+    }
+
+    /** Generic NOT boolean operator */
+    public function testGenericNot(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM t WHERE NOT is_active');
+        $this->assertInstanceOf(UnaryOperation::class, $ast->where);
+        $this->assertSame('NOT', $ast->where->operator);
+        $this->assertInstanceOf(IdentifierNode::class, $ast->where->expression);
+    }
+
+    public function testNotWithParenthesizedExpression(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM t WHERE NOT (a = b)');
+        $this->assertInstanceOf(UnaryOperation::class, $ast->where);
+        $this->assertSame('NOT', $ast->where->operator);
+        $this->assertInstanceOf(BinaryOperation::class, $ast->where->expression);
+    }
+
+    public function testNullLiteral(): void
+    {
+        $ast = $this->parser->parse('SELECT NULL FROM t');
+        $this->assertInstanceOf(LiteralNode::class, $ast->columns[0]->expression);
+        $this->assertNull($ast->columns[0]->expression->value);
+        $this->assertSame('null', $ast->columns[0]->expression->valueType);
+    }
+
+    public function testTrueFalseLiterals(): void
+    {
+        $ast = $this->parser->parse('SELECT TRUE, FALSE FROM t');
+        $this->assertInstanceOf(LiteralNode::class, $ast->columns[0]->expression);
+        $this->assertSame(true, $ast->columns[0]->expression->value);
+        $this->assertSame('boolean', $ast->columns[0]->expression->valueType);
+        $this->assertSame(false, $ast->columns[1]->expression->value);
+    }
+
+    public function testBooleanInWhere(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM t WHERE is_active = TRUE');
+        $this->assertInstanceOf(BinaryOperation::class, $ast->where);
+        $this->assertInstanceOf(LiteralNode::class, $ast->where->right);
+        $this->assertSame(true, $ast->where->right->value);
+    }
+
+    // ── JOIN ────────────────────────────────────────────────────────────────
+
+    /** Simple JOIN defaults to INNER */
+    public function testSimpleJoin(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users JOIN orders ON users.id = orders.user_id');
+        $this->assertCount(1, $ast->joins);
+        $this->assertInstanceOf(JoinNode::class, $ast->joins[0]);
+        $this->assertSame('INNER', $ast->joins[0]->joinType);
+        $this->assertSame(['orders'], $ast->joins[0]->table->parts);
+        $this->assertInstanceOf(BinaryOperation::class, $ast->joins[0]->condition);
+    }
+
+    public function testInnerJoinExplicit(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id');
+        $this->assertSame('INNER', $ast->joins[0]->joinType);
+    }
+
+    public function testLeftJoin(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users LEFT JOIN orders ON users.id = orders.user_id');
+        $this->assertSame('LEFT', $ast->joins[0]->joinType);
+    }
+
+    public function testLeftOuterJoin(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users LEFT OUTER JOIN orders ON users.id = orders.user_id');
+        $this->assertSame('LEFT', $ast->joins[0]->joinType);
+    }
+
+    public function testRightJoin(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users RIGHT JOIN orders ON users.id = orders.user_id');
+        $this->assertSame('RIGHT', $ast->joins[0]->joinType);
+    }
+
+    public function testFullJoin(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM a FULL JOIN b ON a.id = b.id');
+        $this->assertSame('FULL', $ast->joins[0]->joinType);
+    }
+
+    /** CROSS JOIN (no ON clause) */
+    public function testCrossJoin(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM a CROSS JOIN b');
+        $this->assertSame('CROSS', $ast->joins[0]->joinType);
+        $this->assertNull($ast->joins[0]->condition);
+    }
+
+    public function testMultipleJoins(): void
+    {
+        $ast = $this->parser->parse('
+            SELECT * FROM users u
+            JOIN orders o ON u.id = o.user_id
+            LEFT JOIN products p ON o.product_id = p.id
+        ');
+        $this->assertCount(2, $ast->joins);
+        $this->assertSame('INNER', $ast->joins[0]->joinType);
+        $this->assertSame('LEFT', $ast->joins[1]->joinType);
+    }
+
+    public function testJoinWithTableAlias(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users u JOIN orders o ON u.id = o.user_id');
+        $this->assertSame('u', $ast->fromAlias);
+        $this->assertSame('o', $ast->joins[0]->alias);
+    }
+
+    public function testJoinWithAsAlias(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users AS u JOIN orders AS o ON u.id = o.user_id');
+        $this->assertSame('u', $ast->fromAlias);
+        $this->assertSame('o', $ast->joins[0]->alias);
+    }
+
+    public function testJoinWithQualifiedTableNames(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM mydb.users JOIN mydb.orders ON users.id = orders.user_id');
+        $this->assertSame(['mydb', 'users'], $ast->from->parts);
+        $this->assertSame(['mydb', 'orders'], $ast->joins[0]->table->parts);
+    }
+
+    /** JOIN requires ON (except CROSS) */
+    public function testJoinWithoutOnThrows(): void
+    {
+        $this->assertThrows(
+            fn() => $this->parser->parse('SELECT * FROM a JOIN b'),
+            SqlSyntaxException::class
+        );
+    }
+
+    public function testJoinConditionWithPlaceholderBinds(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users u JOIN orders o ON u.id = o.user_id AND o.status = ?');
+        $binder = new AstParameterBinder(['active']);
+        $bound = $binder->bind($ast);
+        $this->assertInstanceOf(BinaryOperation::class, $bound->joins[0]->condition);
+    }
+
+    // ── DISTINCT ────────────────────────────────────────────────────────────
+
+    public function testSelectDistinct(): void
+    {
+        $ast = $this->parser->parse('SELECT DISTINCT name FROM users');
+        $this->assertTrue($ast->distinct);
+    }
+
+    public function testSelectWithoutDistinct(): void
+    {
+        $ast = $this->parser->parse('SELECT name FROM users');
+        $this->assertFalse($ast->distinct);
+    }
+
+    // ── GROUP BY / HAVING ───────────────────────────────────────────────────
+
+    public function testGroupBySingleColumn(): void
+    {
+        $ast = $this->parser->parse('SELECT status, COUNT(*) FROM orders GROUP BY status');
+        $this->assertNotNull($ast->groupBy);
+        $this->assertCount(1, $ast->groupBy);
+        $this->assertInstanceOf(IdentifierNode::class, $ast->groupBy[0]);
+    }
+
+    public function testGroupByMultipleColumns(): void
+    {
+        $ast = $this->parser->parse('SELECT year, month, SUM(total) FROM sales GROUP BY year, month');
+        $this->assertCount(2, $ast->groupBy);
+    }
+
+    public function testGroupByWithHaving(): void
+    {
+        $ast = $this->parser->parse('SELECT status, COUNT(*) c FROM orders GROUP BY status HAVING c > 10');
+        $this->assertNotNull($ast->groupBy);
+        $this->assertNotNull($ast->having);
+        $this->assertInstanceOf(BinaryOperation::class, $ast->having);
+    }
+
+    /** Full query with GROUP BY, HAVING, ORDER BY */
+    public function testFullAggregationQuery(): void
+    {
+        $ast = $this->parser->parse('
+            SELECT category, COUNT(*) cnt
+            FROM products
+            WHERE active = TRUE
+            GROUP BY category
+            HAVING cnt > 5
+            ORDER BY cnt DESC
+            LIMIT 10
+        ');
+        $this->assertNotNull($ast->where);
+        $this->assertNotNull($ast->groupBy);
+        $this->assertNotNull($ast->having);
+        $this->assertNotNull($ast->orderBy);
+        $this->assertNotNull($ast->limit);
+    }
+
+    // ── BETWEEN ─────────────────────────────────────────────────────────────
+
+    public function testBetween(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM t WHERE x BETWEEN 1 AND 10');
+        $this->assertInstanceOf(BetweenOperation::class, $ast->where);
+        $this->assertFalse($ast->where->negated);
+        $this->assertInstanceOf(LiteralNode::class, $ast->where->low);
+        $this->assertInstanceOf(LiteralNode::class, $ast->where->high);
+    }
+
+    public function testNotBetween(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM t WHERE x NOT BETWEEN 1 AND 10');
+        $this->assertInstanceOf(BetweenOperation::class, $ast->where);
+        $this->assertTrue($ast->where->negated);
+    }
+
+    public function testBetweenWithPlaceholdersBinds(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM t WHERE date BETWEEN ? AND ?');
+        $binder = new AstParameterBinder(['2024-01-01', '2024-12-31']);
+        $bound = $binder->bind($ast);
+        $this->assertInstanceOf(LiteralNode::class, $bound->where->low);
+        $this->assertSame('2024-01-01', $bound->where->low->value);
+    }
+
+    // ── Parameter binder ────────────────────────────────────────────────────
+
+    /** Null binding stores actual null */
+    public function testNullBindsAsActualNull(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users WHERE name = ?');
+        $binder = new AstParameterBinder([null]);
+        $bound = $binder->bind($ast);
+        $this->assertInstanceOf(LiteralNode::class, $bound->where->right);
+        $this->assertSame('null', $bound->where->right->valueType);
+        $this->assertNull($bound->where->right->value);
+    }
+
+    public function testLimitPlaceholderBinds(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users LIMIT ?');
+        $binder = new AstParameterBinder([25]);
+        $bound = $binder->bind($ast);
+        $this->assertInstanceOf(LiteralNode::class, $bound->limit);
+        $this->assertSame('25', $bound->limit->value);
+        $this->assertSame('number', $bound->limit->valueType);
+    }
+
+    public function testColumnExpressionPlaceholdersBind(): void
+    {
+        $ast = $this->parser->parse('SELECT price * ? AS discounted FROM products');
+        $binder = new AstParameterBinder([0.9]);
+        $bound = $binder->bind($ast);
+        $expr = $bound->columns[0]->expression;
+        $this->assertInstanceOf(BinaryOperation::class, $expr);
+        $this->assertInstanceOf(LiteralNode::class, $expr->right);
+        $this->assertSame('0.9', $expr->right->value);
+    }
+
+    public function testInsertPlaceholdersBind(): void
+    {
+        $ast = $this->parser->parse('INSERT INTO users (name, age) VALUES (?, ?)');
+        $binder = new AstParameterBinder(['Alice', 30]);
+        $bound = $binder->bind($ast);
+        $this->assertSame('Alice', $bound->values[0][0]->value);
+        $this->assertSame('30', $bound->values[0][1]->value);
+    }
+
+    public function testUpdatePlaceholdersBind(): void
+    {
+        $ast = $this->parser->parse('UPDATE users SET name = ? WHERE id = ?');
+        $binder = new AstParameterBinder(['Bob', 1]);
+        $bound = $binder->bind($ast);
+        $this->assertSame('Bob', $bound->updates[0]['value']->value);
+        $this->assertSame('1', $bound->where->right->value);
+    }
+
+    public function testDeletePlaceholdersBind(): void
+    {
+        $ast = $this->parser->parse('DELETE FROM users WHERE id = ?');
+        $binder = new AstParameterBinder([42]);
+        $bound = $binder->bind($ast);
+        $this->assertSame('42', $bound->where->right->value);
+    }
+
+    public function testNamedPlaceholdersBind(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users WHERE name = :name AND age > :age');
+        $binder = new AstParameterBinder(['name' => 'Alice', 'age' => 18]);
+        $bound = $binder->bind($ast);
+        $this->assertSame('Alice', $bound->where->left->right->value);
+        $this->assertSame('18', $bound->where->right->right->value);
+    }
+
+    // ── Scalar subqueries ───────────────────────────────────────────────────
+
+    public function testSimpleScalarSubquery(): void
+    {
+        $ast = $this->parser->parse('SELECT (SELECT MAX(id) FROM users) AS max_id FROM dual');
+        $this->assertInstanceOf(SubqueryNode::class, $ast->columns[0]->expression);
+        $this->assertInstanceOf(SelectStatement::class, $ast->columns[0]->expression->query);
+    }
+
+    public function testScalarSubqueryWithUnion(): void
+    {
+        $ast = $this->parser->parse('SELECT (SELECT 1 UNION SELECT 2) AS val FROM dual');
+        $this->assertInstanceOf(SubqueryNode::class, $ast->columns[0]->expression);
+        $this->assertInstanceOf(UnionNode::class, $ast->columns[0]->expression->query);
+    }
+
+    public function testScalarSubqueryWithCte(): void
+    {
+        $ast = $this->parser->parse('SELECT (WITH cte AS (SELECT 1 AS n) SELECT n FROM cte) AS val FROM dual');
+        $this->assertInstanceOf(SubqueryNode::class, $ast->columns[0]->expression);
+        $this->assertInstanceOf(WithStatement::class, $ast->columns[0]->expression->query);
+    }
+
+    public function testScalarSubqueryInWhere(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM t WHERE x = (SELECT MAX(y) FROM s)');
+        $this->assertInstanceOf(BinaryOperation::class, $ast->where);
+        $this->assertInstanceOf(SubqueryNode::class, $ast->where->right);
+    }
+
+    // ── SQL:2008 FETCH/OFFSET ───────────────────────────────────────────────
+
+    /** FETCH FIRST n ROWS ONLY (no offset) */
+    public function testFetchFirstRowsOnly(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users FETCH FIRST 10 ROWS ONLY');
+        $this->assertSame('10', $ast->limit->value);
+        $this->assertSame(null, $ast->offset);
+    }
+
+    /** FETCH NEXT n ROWS ONLY (same as FIRST) */
+    public function testFetchNextRowsOnly(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users FETCH NEXT 5 ROWS ONLY');
+        $this->assertSame('5', $ast->limit->value);
+        $this->assertSame(null, $ast->offset);
+    }
+
+    public function testOffsetRowsFetchFirstRowsOnly(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users OFFSET 10 ROWS FETCH FIRST 5 ROWS ONLY');
+        $this->assertSame('10', $ast->offset->value);
+        $this->assertSame('5', $ast->limit->value);
+    }
+
+    public function testOffsetRowsFetchNextRowsOnly(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY');
+        $this->assertSame('20', $ast->offset->value);
+        $this->assertSame('10', $ast->limit->value);
+    }
+
+    /** OFFSET n ROWS without FETCH (offset only) */
+    public function testOffsetRowsWithoutFetch(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users OFFSET 5 ROWS');
+        $this->assertSame('5', $ast->offset->value);
+        $this->assertSame(null, $ast->limit);
+    }
+
+    /** Simple OFFSET n (PostgreSQL style, no ROWS keyword) */
+    public function testSimpleOffsetPostgresStyle(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users OFFSET 5');
+        $this->assertSame('5', $ast->offset->value);
+        $this->assertSame(null, $ast->limit);
+    }
+
+    /** FETCH with ROW (singular) instead of ROWS */
+    public function testFetchWithSingularRow(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users FETCH FIRST 1 ROW ONLY');
+        $this->assertSame('1', $ast->limit->value);
+    }
+
+    public function testSql2008SyntaxWithOrderBy(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users ORDER BY id OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY');
+        $this->assertSame('id', $ast->orderBy[0]['column']->getName());
+        $this->assertSame('10', $ast->offset->value);
+        $this->assertSame('5', $ast->limit->value);
+    }
+
+    public function testSql2008SyntaxWithPlaceholders(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users OFFSET ? ROWS FETCH NEXT ? ROWS ONLY');
+        $this->assertInstanceOf(PlaceholderNode::class, $ast->offset);
+        $this->assertInstanceOf(PlaceholderNode::class, $ast->limit);
+    }
+
+    public function testTraditionalLimitOffsetStillWorks(): void
+    {
+        $ast = $this->parser->parse('SELECT * FROM users LIMIT 10 OFFSET 5');
+        $this->assertSame('10', $ast->limit->value);
+        $this->assertSame('5', $ast->offset->value);
+    }
+};
+
+exit($test->run());

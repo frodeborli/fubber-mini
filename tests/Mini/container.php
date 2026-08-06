@@ -6,72 +6,100 @@
  */
 
 require __DIR__ . '/../../ensure-autoloader.php';
-require_once __DIR__ . '/../assert.php';
 
 use mini\Mini;
 use mini\Lifetime;
+use mini\Test;
 
-$mini = Mini::$mini;
+$test = new class extends Test {
 
-// Register test services BEFORE bootstrap (while in Bootstrap phase)
-$mini->addService('test.singleton', Lifetime::Singleton, fn() => new stdClass());
-$mini->addService('test.transient', Lifetime::Transient, fn() => new stdClass());
-$mini->addService('test.scoped', Lifetime::Scoped, fn() => new stdClass());
-$mini->addService('test.with-mini', Lifetime::Singleton, fn() => Mini::$mini);
+    /**
+     * Exception raised by a duplicate addService() call made while still in the
+     * Bootstrap phase. Captured in setUp() because after bootstrap() every
+     * addService() call throws regardless of duplication, which would make the
+     * assertion pass for the wrong reason.
+     */
+    private ?\Throwable $duplicateRegistrationError = null;
 
-// Test: Cannot register duplicate service
-assert_throws(
-    fn() => $mini->addService('test.singleton', Lifetime::Singleton, fn() => new stdClass()),
-    LogicException::class
-);
-echo "✓ addService() throws on duplicate registration\n";
+    protected function setUp(): void
+    {
+        $mini = Mini::$mini;
 
-// Bootstrap framework (required for Scoped services)
-\mini\bootstrap();
+        // Register test services BEFORE bootstrap (while in Bootstrap phase)
+        $mini->addService('test.singleton', Lifetime::Singleton, fn() => new \stdClass());
+        $mini->addService('test.transient', Lifetime::Transient, fn() => new \stdClass());
+        $mini->addService('test.scoped', Lifetime::Scoped, fn() => new \stdClass());
+        $mini->addService('test.with-mini', Lifetime::Singleton, fn() => Mini::$mini);
 
-// Test: Cannot register services after bootstrap
-assert_throws(
-    fn() => $mini->addService('test.new', Lifetime::Singleton, fn() => new stdClass()),
-    LogicException::class
-);
-echo "✓ addService() throws after bootstrap (Ready phase)\n";
+        try {
+            $mini->addService('test.singleton', Lifetime::Singleton, fn() => new \stdClass());
+        } catch (\Throwable $e) {
+            $this->duplicateRegistrationError = $e;
+        }
 
-// Test: Singleton returns same instance
-$singleton1 = $mini->get('test.singleton');
-$singleton2 = $mini->get('test.singleton');
-assert_true($singleton1 === $singleton2, 'Singleton should return same instance');
-echo "✓ Singleton returns same instance\n";
+        // The harness bootstraps after setUp() (required for Scoped services)
+    }
 
-// Test: Transient returns new instance each time
-$transient1 = $mini->get('test.transient');
-$transient2 = $mini->get('test.transient');
-assert_false($transient1 === $transient2, 'Transient should return different instances');
-echo "✓ Transient returns new instance each time\n";
+    public function testAddServiceThrowsOnDuplicateRegistration(): void
+    {
+        $this->assertNotNull(
+            $this->duplicateRegistrationError,
+            'Duplicate addService() during Bootstrap phase should throw'
+        );
+        $this->assertInstanceOf(\LogicException::class, $this->duplicateRegistrationError);
+    }
 
-// Test: Scoped returns same instance within request
-$scoped1 = $mini->get('test.scoped');
-$scoped2 = $mini->get('test.scoped');
-assert_true($scoped1 === $scoped2, 'Scoped should return same instance in same request');
-echo "✓ Scoped returns same instance within request\n";
+    public function testAddServiceThrowsAfterBootstrap(): void
+    {
+        $this->assertThrows(
+            fn() => Mini::$mini->addService('test.new', Lifetime::Singleton, fn() => new \stdClass()),
+            \LogicException::class
+        );
+    }
 
-// Test: has() returns true for registered service
-assert_true($mini->has('test.singleton'));
-echo "✓ has() returns true for registered service\n";
+    public function testSingletonReturnsSameInstance(): void
+    {
+        $singleton1 = Mini::$mini->get('test.singleton');
+        $singleton2 = Mini::$mini->get('test.singleton');
+        $this->assertTrue($singleton1 === $singleton2, 'Singleton should return same instance');
+    }
 
-// Test: has() returns false for unregistered service
-assert_false($mini->has('nonexistent.service'));
-echo "✓ has() returns false for unregistered service\n";
+    public function testTransientReturnsNewInstanceEachTime(): void
+    {
+        $transient1 = Mini::$mini->get('test.transient');
+        $transient2 = Mini::$mini->get('test.transient');
+        $this->assertFalse($transient1 === $transient2, 'Transient should return different instances');
+    }
 
-// Test: get() throws NotFoundException for unregistered service
-assert_throws(
-    fn() => $mini->get('nonexistent.service'),
-    Psr\Container\NotFoundExceptionInterface::class
-);
-echo "✓ get() throws NotFoundException for unregistered service\n";
+    public function testScopedReturnsSameInstanceWithinRequest(): void
+    {
+        $scoped1 = Mini::$mini->get('test.scoped');
+        $scoped2 = Mini::$mini->get('test.scoped');
+        $this->assertTrue($scoped1 === $scoped2, 'Scoped should return same instance in same request');
+    }
 
-// Test: Factory can access Mini instance
-$result = $mini->get('test.with-mini');
-assert_true($result === Mini::$mini);
-echo "✓ Factory closure can access Mini::\$mini\n";
+    public function testHasReturnsTrueForRegisteredService(): void
+    {
+        $this->assertTrue(Mini::$mini->has('test.singleton'));
+    }
 
-echo "\n✅ All container tests passed!\n";
+    public function testHasReturnsFalseForUnregisteredService(): void
+    {
+        $this->assertFalse(Mini::$mini->has('nonexistent.service'));
+    }
+
+    public function testGetThrowsNotFoundExceptionForUnregisteredService(): void
+    {
+        $this->assertThrows(
+            fn() => Mini::$mini->get('nonexistent.service'),
+            \Psr\Container\NotFoundExceptionInterface::class
+        );
+    }
+
+    public function testFactoryClosureCanAccessMiniInstance(): void
+    {
+        $this->assertTrue(Mini::$mini->get('test.with-mini') === Mini::$mini);
+    }
+};
+
+exit($test->run());

@@ -9,6 +9,7 @@ use mini\Table\Contracts\TableInterface;
 use mini\Table\OrderDef;
 use mini\Table\Predicate;
 use mini\Table\Types\IndexType;
+use mini\Table\Types\Operator;
 use Traversable;
 
 /**
@@ -21,10 +22,24 @@ use Traversable;
  */
 class InnerJoinTable extends AbstractTable
 {
-    /** @var string Left column name for join */
+    private Predicate $bindPredicate;
+
+    /** @var string[] Unbound parameters of the bind predicate */
+    private array $bindParams;
+
+    /**
+     * True when the join is a single `left.col = right.col` condition, which
+     * the sort-merge and hash strategies can execute. Anything else (a
+     * non-equality comparison, or several conditions) falls back to a nested
+     * loop driven by the predicate itself — those strategies key on equality
+     * and would silently return equi-join rows for `ON a.x > b.y`.
+     */
+    private bool $equiJoin;
+
+    /** @var string Left column name for join (equi joins only) */
     private string $leftCol;
 
-    /** @var string Right column name for join */
+    /** @var string Right column name for join (equi joins only) */
     private string $rightCol;
 
     public function __construct(
@@ -39,31 +54,52 @@ class InnerJoinTable extends AbstractTable
             );
         }
 
-        // Extract the single equi-join condition
+        $this->bindPredicate = $bindPredicate;
+        $this->bindParams = $bindPredicate->getUnboundParams();
+
         $conditions = $bindPredicate->getConditions();
-        if (count($conditions) !== 1) {
+        if ($conditions === []) {
             throw new \InvalidArgumentException(
-                'INNER JOIN currently only supports single equi-join condition'
+                'INNER JOIN requires at least one join condition'
             );
         }
-
-        $cond = $conditions[0];
-        $this->leftCol = $cond['column'];
-        $this->rightCol = ltrim($cond['value'], ':');
 
         $leftCols = $left->getColumns();
         $rightCols = $right->getColumns();
 
-        // Validate columns exist
-        if (!isset($leftCols[$this->leftCol])) {
-            throw new \InvalidArgumentException(
-                "Left join column '{$this->leftCol}' does not exist"
-            );
-        }
-        if (!isset($rightCols[$this->rightCol])) {
-            throw new \InvalidArgumentException(
-                "Right join column '{$this->rightCol}' does not exist"
-            );
+        $this->equiJoin = count($conditions) === 1
+            && $conditions[0]['operator'] === Operator::Eq;
+
+        if ($this->equiJoin) {
+            $cond = $conditions[0];
+            $this->leftCol = $cond['column'];
+            $this->rightCol = ltrim($cond['value'], ':');
+
+            // Validate columns exist
+            if (!isset($leftCols[$this->leftCol])) {
+                throw new \InvalidArgumentException(
+                    "Left join column '{$this->leftCol}' does not exist"
+                );
+            }
+            if (!isset($rightCols[$this->rightCol])) {
+                throw new \InvalidArgumentException(
+                    "Right join column '{$this->rightCol}' does not exist"
+                );
+            }
+        } else {
+            if ($this->bindParams === []) {
+                throw new \InvalidArgumentException(
+                    'INNER JOIN requires at least one bind parameter (e.g., eqBind)'
+                );
+            }
+            foreach ($this->bindParams as $param) {
+                $colName = ltrim($param, ':');
+                if (!isset($rightCols[$colName])) {
+                    throw new \InvalidArgumentException(
+                        "Bind parameter '$param' references unknown right column: $colName"
+                    );
+                }
+            }
         }
 
         // Validate no column name conflicts
@@ -89,6 +125,11 @@ class InnerJoinTable extends AbstractTable
 
     protected function materialize(string ...$additionalColumns): Traversable
     {
+        if (!$this->equiJoin) {
+            yield from $this->nestedLoopJoin();
+            return;
+        }
+
         $leftCol = $this->leftCol;
         $rightCol = $this->rightCol;
 
@@ -108,6 +149,62 @@ class InnerJoinTable extends AbstractTable
     }
 
     /**
+     * Nested loop join driven by the bind predicate
+     *
+     * Handles join conditions the equality strategies cannot express:
+     * `ON a.x > b.y`, `ON a.x = b.y AND a.z = b.w`, and so on.
+     */
+    private function nestedLoopJoin(): Traversable
+    {
+        $limit = $this->getLimit();
+        $offset = $this->getOffset();
+
+        // LIMIT 0 must emit nothing. The loops below use an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
+        $rowId = 0;
+        $skipped = 0;
+        $emitted = 0;
+
+        foreach ($this->left as $leftRow) {
+            foreach ($this->right as $rightRow) {
+                $bindings = [];
+                $hasNull = false;
+                foreach ($this->bindParams as $param) {
+                    $colName = ltrim($param, ':');
+                    $value = $rightRow->$colName ?? null;
+                    if ($value === null) {
+                        // A comparison with NULL is UNKNOWN, never a match.
+                        $hasNull = true;
+                        break;
+                    }
+                    $bindings[$param] = $value;
+                }
+                if ($hasNull) {
+                    continue;
+                }
+
+                if (!$this->bindPredicate->bind($bindings)->test($leftRow)) {
+                    continue;
+                }
+
+                if ($skipped++ < $offset) {
+                    continue;
+                }
+
+                yield $rowId++ => (object) ((array) $leftRow + (array) $rightRow);
+
+                if ($limit !== null && ++$emitted >= $limit) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
      * Sort-merge join: sort both sides and merge matching runs
      */
     private function sortMergeJoin(): Traversable
@@ -116,6 +213,13 @@ class InnerJoinTable extends AbstractTable
         $rightCol = $this->rightCol;
         $limit = $this->getLimit();
         $offset = $this->getOffset();
+
+        // LIMIT 0 must emit nothing. The loops below use an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
 
         // Get sorted iterators - use order() to let each table sort efficiently
         $sortedLeft = $this->left->order($leftCol);
@@ -142,8 +246,18 @@ class InnerJoinTable extends AbstractTable
             $rightRow = $rightIter->current();
             $rightKey = $rightRow->$rightCol;
 
+            // NULL = NULL is UNKNOWN, not true: a NULL key never joins.
+            if ($rightKey === null) {
+                $rightIter->next();
+                continue;
+            }
+
             // Current right row matches the buffered left run
-            if ($haveBuffer && $currentLeftKey === $rightKey) {
+            // Loose comparison, to stay consistent with the `<`/`>` tests
+            // that advance the two cursors below: with strict `===` an int 1
+            // and a float 1.0 were ordered equal but never matched, so an
+            // int column joined to a float column silently produced no rows.
+            if ($haveBuffer && $currentLeftKey == $rightKey) {
                 foreach ($leftBuffer as $lr) {
                     if ($skipped++ < $offset) {
                         continue;
@@ -165,6 +279,15 @@ class InnerJoinTable extends AbstractTable
 
             $leftKey = $leftIter->current()->$leftCol;
 
+            // NULL sorts first; skip it, it can never match.
+            if ($leftKey === null) {
+                $leftIter->next();
+                $leftBuffer = [];
+                $currentLeftKey = null;
+                $haveBuffer = false;
+                continue;
+            }
+
             if ($leftKey < $rightKey) {
                 // Left is behind, advance it
                 $leftIter->next();
@@ -182,7 +305,7 @@ class InnerJoinTable extends AbstractTable
                 $haveBuffer = true;
                 while ($leftIter->valid()) {
                     $lr = $leftIter->current();
-                    if ($lr->$leftCol !== $leftKey) {
+                    if ($lr->$leftCol != $leftKey) {
                         break;
                     }
                     $leftBuffer[] = $lr;
@@ -205,6 +328,13 @@ class InnerJoinTable extends AbstractTable
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
+        // LIMIT 0 must emit nothing. The loops below use an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
+
         // TODO: Tune chunk size - can probably be 1000 or so
         $chunkSize = 64;
         $rowId = 0;
@@ -218,7 +348,12 @@ class InnerJoinTable extends AbstractTable
 
         foreach ($leftIter as $leftRow) {
             $key = $leftRow->$leftCol;
-            $hashTable[$key][] = $leftRow;
+            // NULL = NULL is UNKNOWN, not true: a NULL key never joins.
+            // (It would also collapse onto the '' array key.)
+            if ($key === null) {
+                continue;
+            }
+            $hashTable[self::hashKey($key)][] = $leftRow;
             $chunkCount++;
 
             // When chunk is full, scan right side
@@ -226,6 +361,10 @@ class InnerJoinTable extends AbstractTable
                 // Full scan of right, probe hash table
                 foreach ($this->right as $rightRow) {
                     $key = $rightRow->$rightCol;
+                    if ($key === null) {
+                        continue;
+                    }
+                    $key = self::hashKey($key);
                     if (!isset($hashTable[$key])) {
                         continue;
                     }
@@ -251,6 +390,10 @@ class InnerJoinTable extends AbstractTable
         if ($chunkCount > 0) {
             foreach ($this->right as $rightRow) {
                 $key = $rightRow->$rightCol;
+                if ($key === null) {
+                    continue;
+                }
+                $key = self::hashKey($key);
                 if (!isset($hashTable[$key])) {
                     continue;
                 }
@@ -347,9 +490,7 @@ class InnerJoinTable extends AbstractTable
      */
     private function withFilteredSources(TableInterface $left, TableInterface $right): TableInterface
     {
-        // Recreate the bind predicate
-        $predicate = (new Predicate())->eqBind($this->leftCol, ':' . $this->rightCol);
-        $leftWithBind = $left->withProperty('__bind__', $predicate);
+        $leftWithBind = $left->withProperty('__bind__', $this->bindPredicate);
 
         $new = new self($leftWithBind, $right);
         if ($this->getLimit() !== null) {
@@ -359,5 +500,24 @@ class InnerJoinTable extends AbstractTable
             $new = $new->offset($this->getOffset());
         }
         return $new;
+    }
+
+    /**
+     * Array-key-safe join key.
+     *
+     * PHP truncates float array keys to int, so a raw hash table matched
+     * 1.5 against 1.9 (both key 1) and emitted "not representable as an int"
+     * warnings for very large floats. Integral floats keep the integer key so
+     * 1 and 1.0 still join, as SQL requires.
+     */
+    private static function hashKey(mixed $value): int|string
+    {
+        if (!is_float($value)) {
+            return $value;
+        }
+        if ($value >= (float) PHP_INT_MIN && $value <= (float) PHP_INT_MAX && (float) (int) $value === $value) {
+            return (int) $value;
+        }
+        return (string) $value;
     }
 }

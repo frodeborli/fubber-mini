@@ -50,6 +50,7 @@ use mini\Table\Wrappers\InnerJoinTable;
 use mini\Table\Wrappers\LeftJoinTable;
 use mini\Table\Wrappers\RightJoinTable;
 use mini\Table\Wrappers\SqlExceptTable;
+use mini\Table\Wrappers\MultisetSetOpTable;
 use mini\Table\Wrappers\SqlIntersectTable;
 
 /**
@@ -91,7 +92,7 @@ class VirtualDatabase implements DatabaseInterface
     /** @var array<string, array{step: callable, final: callable, argCount: int}> */
     private array $aggregates = [];
 
-    private ExpressionEvaluator $evaluator;
+    private PrecomputedEvaluator $evaluator;
 
     private AstOptimizer $optimizer;
 
@@ -119,7 +120,7 @@ class VirtualDatabase implements DatabaseInterface
 
     public function __construct()
     {
-        $this->evaluator = new ExpressionEvaluator();
+        $this->evaluator = new PrecomputedEvaluator();
         $this->evaluator->setSubqueryExecutor(fn($query, $outerRow) => $this->executeSubqueryWithContext($query, $outerRow));
         $this->optimizer = new AstOptimizer();
         $this->registerBuiltinAggregates();
@@ -302,24 +303,9 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function expressionHasAggregate(\mini\Parsing\SQL\AST\ASTNode $node): bool
     {
-        if ($node instanceof FunctionCallNode) {
-            if ($this->isAggregate($node->name)) {
-                return true;
-            }
-            // Check arguments for nested aggregates
-            foreach ($node->arguments as $arg) {
-                if ($this->expressionHasAggregate($arg)) {
-                    return true;
-                }
-            }
-        }
-
-        if ($node instanceof BinaryOperation) {
-            return $this->expressionHasAggregate($node->left)
-                || $this->expressionHasAggregate($node->right);
-        }
-
-        return false;
+        $found = [];
+        $this->collectAggregateNodes($node, $found);
+        return $found !== [];
     }
 
     /**
@@ -343,16 +329,7 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function expressionHasWindowFunction(\mini\Parsing\SQL\AST\ASTNode $node): bool
     {
-        if ($node instanceof WindowFunctionNode) {
-            return true;
-        }
-
-        if ($node instanceof BinaryOperation) {
-            return $this->expressionHasWindowFunction($node->left)
-                || $this->expressionHasWindowFunction($node->right);
-        }
-
-        return false;
+        return $this->extractWindowFunctions($node) !== [];
     }
 
     /**
@@ -380,7 +357,7 @@ class VirtualDatabase implements DatabaseInterface
             'SUM',
             function (&$context, $value) {
                 if ($value !== null) {
-                    $context = ($context ?? 0) + $value;
+                    $context = ($context ?? 0) + $this->requireNumericAggregateValue('SUM', $value);
                 }
             },
             function (&$context) {
@@ -394,7 +371,8 @@ class VirtualDatabase implements DatabaseInterface
             'AVG',
             function (&$context, $value) {
                 if ($value !== null) {
-                    $context['sum'] = ($context['sum'] ?? 0) + $value;
+                    $context['sum'] = ($context['sum'] ?? 0)
+                        + $this->requireNumericAggregateValue('AVG', $value);
                     $context['count'] = ($context['count'] ?? 0) + 1;
                 }
             },
@@ -433,6 +411,31 @@ class VirtualDatabase implements DatabaseInterface
                 return $context;
             },
             1
+        );
+    }
+
+    /**
+     * Guard for SUM()/AVG(): reject values PHP cannot add without a TypeError.
+     *
+     * Numeric strings are accepted (a Text-typed column holding "10" is common
+     * in CSV/JSON backed tables) and converted; anything else raises a proper
+     * SQL diagnostic instead of leaking "Unsupported operand types: int + string"
+     * or a "non-numeric value encountered" warning out of the engine.
+     */
+    private function requireNumericAggregateValue(string $function, mixed $value): int|float
+    {
+        if (is_int($value) || is_float($value)) {
+            return $value;
+        }
+        if (is_bool($value)) {
+            return (int)$value;
+        }
+        if (is_string($value) && is_numeric($value)) {
+            return $value + 0;
+        }
+        $shown = is_scalar($value) ? var_export($value, true) : get_debug_type($value);
+        throw new \RuntimeException(
+            "$function() requires numeric values, got " . get_debug_type($value) . " $shown"
         );
     }
 
@@ -1118,18 +1121,35 @@ class VirtualDatabase implements DatabaseInterface
         $left = $this->executeUnionBranchAsTable($ast->left);
         $right = $this->executeUnionBranchAsTable($ast->right);
 
-        return match ($ast->operator) {
+        $table = match ($ast->operator) {
             'UNION' => $ast->all
                 ? new ConcatTable($left, $right)
                 : (new ConcatTable($left, $right))->distinct(),
+            // The ALL forms are multiset operations (min/max of multiplicities),
+            // not membership tests, so they cannot reuse the semi-/anti-join
+            // wrappers that back the DISTINCT forms.
             'INTERSECT' => $ast->all
-                ? $this->intersectTables($left, $right)
+                ? new MultisetSetOpTable($left, $right, true)
                 : $this->intersectTables($left, $right)->distinct(),
             'EXCEPT' => $ast->all
-                ? $this->exceptTables($left, $right)
+                ? new MultisetSetOpTable($left, $right, false)
                 : $this->exceptTables($left, $right)->distinct(),
             default => throw new \RuntimeException("Unknown set operator: {$ast->operator}"),
         };
+
+        // Trailing ORDER BY / LIMIT / OFFSET apply to the whole set result,
+        // not to the last branch (the parser lifts them onto the UnionNode).
+        if ($ast->orderBy) {
+            $table = $this->applyOrderBy($table, $ast->orderBy);
+        }
+        if ($ast->offset !== null) {
+            $table = $table->offset((int) $this->evaluator->evaluate($ast->offset, null));
+        }
+        if ($ast->limit !== null) {
+            $table = $table->limit((int) $this->evaluator->evaluate($ast->limit, null));
+        }
+
+        return $table;
     }
 
     /**
@@ -1161,9 +1181,127 @@ class VirtualDatabase implements DatabaseInterface
             return $this->executeUnionAsTable($ast);
         }
         if ($ast instanceof SelectStatement) {
+            // executeSelectAsTable() is a projection-only executor: it maps
+            // SELECT columns onto source-table columns. It cannot evaluate
+            // aggregates, GROUP BY/HAVING, expressions or column aliases, and
+            // silently falls back to the unprojected source rows instead of
+            // failing. Set operands routinely use those, so any branch it
+            // cannot express goes through the full SELECT executor and is
+            // materialised.
+            if ($this->branchNeedsFullExecutor($ast)) {
+                return $this->materializeSelect($ast);
+            }
             return $this->executeSelectAsTable($ast);
         }
+        if ($ast instanceof WithStatement) {
+            // Reached from EXISTS (WITH … SELECT …): a <query expression> body.
+            return $this->rowsToTable(iterator_to_array($this->executeWithStatement($ast)));
+        }
         throw new \RuntimeException("Unexpected UNION branch type: " . get_class($ast));
+    }
+
+    /**
+     * Can executeSelectAsTable() express this set-operation branch faithfully?
+     */
+    private function branchNeedsFullExecutor(SelectStatement $ast): bool
+    {
+        if ($ast->from === null) {
+            return false; // SELECT without FROM → buildScalarTable(), which does evaluate
+        }
+        if ($ast->groupBy !== null || $ast->having !== null) {
+            return true;
+        }
+        if ($this->hasAggregates($ast->columns) || $this->hasWindowFunctions($ast->columns)) {
+            return true;
+        }
+
+        foreach ($ast->columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                continue;
+            }
+            if ($col->expression instanceof IdentifierNode && $col->expression->isWildcard()) {
+                continue;
+            }
+            // An alias renames the result column; projection-only cannot do that.
+            if ($col->alias !== null) {
+                return true;
+            }
+            // Any non-identifier expression must be evaluated.
+            if (!$col->expression instanceof IdentifierNode) {
+                return true;
+            }
+            // `SELECT u.id FROM users u` — executeSelectAsTable() only applies
+            // withAlias() when the query has JOINs, so the qualified name would
+            // not resolve.
+            if ($ast->fromAlias !== null && $col->expression->isQualified() && empty($ast->joins)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Run a SELECT through the full executor and freeze the result as a table.
+     *
+     * Used for set-operation branches that the projection-only executor cannot
+     * express. Materialising loses laziness and predicate pushdown, which is
+     * the price of a correct answer.
+     */
+    private function materializeSelect(SelectStatement $ast): TableInterface
+    {
+        $rows = [];
+        foreach ($this->executeSelect($ast) as $row) {
+            $rows[] = $row;
+        }
+
+        if ($rows !== []) {
+            $names = array_keys((array) $rows[0]);
+        } else {
+            $names = [];
+            foreach ($ast->columns as $col) {
+                if (!$col instanceof ColumnNode) {
+                    continue;
+                }
+                if ($col->expression instanceof IdentifierNode && $col->expression->isWildcard()) {
+                    continue;
+                }
+                $names[] = $col->alias ?? $this->expressionToColumnName($col->expression);
+            }
+            if ($names === []) {
+                throw new \RuntimeException(
+                    'Cannot determine result columns of an empty set-operation branch; ' .
+                    'name the selected columns explicitly instead of using *'
+                );
+            }
+        }
+
+        $defs = [];
+        foreach ($names as $name) {
+            $type = ColumnType::Text;
+            foreach ($rows as $row) {
+                $value = ((array) $row)[$name] ?? null;
+                if ($value === null) {
+                    continue;
+                }
+                $type = match (true) {
+                    is_int($value) => ColumnType::Int,
+                    is_float($value) => ColumnType::Float,
+                    default => ColumnType::Text,
+                };
+                break;
+            }
+            $defs[] = new ColumnDef($name, $type);
+        }
+
+        return new \mini\Table\GeneratorTable(
+            static function () use ($rows): \Generator {
+                foreach ($rows as $i => $row) {
+                    yield $i + 1 => $row;
+                }
+            },
+            ...$defs
+        );
     }
 
     /**
@@ -1174,8 +1312,13 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function executeWithStatement(WithStatement $ast): ResultSetInterface
     {
-        // Track which CTEs we register so we can clean them up
+        // Track which CTEs we register so we can clean them up. A CTE may
+        // shadow a registered table of the same name for the duration of the
+        // statement (SQL:2003), so the shadowed table is saved and restored -
+        // unsetting unconditionally would destroy it for the life of the
+        // VirtualDatabase.
         $registeredCtes = [];
+        $shadowedTables = [];
 
         try {
             // Process each CTE definition
@@ -1198,7 +1341,10 @@ class VirtualDatabase implements DatabaseInterface
                     }
                 }
 
-                // Register as a temporary table
+                // Register as a temporary table, preserving any table it shadows
+                if (isset($this->tables[$cteName]) && !array_key_exists($cteName, $shadowedTables)) {
+                    $shadowedTables[$cteName] = $this->tables[$cteName];
+                }
                 $this->tables[$cteName] = $table;
                 $registeredCtes[] = $cteName;
             }
@@ -1215,9 +1361,13 @@ class VirtualDatabase implements DatabaseInterface
 
             return new ResultSet($table);
         } finally {
-            // Clean up CTE tables (optional - they'd be overwritten anyway)
+            // Remove CTE tables, restoring any registered table they shadowed
             foreach ($registeredCtes as $cteName) {
-                unset($this->tables[$cteName]);
+                if (array_key_exists($cteName, $shadowedTables)) {
+                    $this->tables[$cteName] = $shadowedTables[$cteName];
+                } else {
+                    unset($this->tables[$cteName]);
+                }
             }
         }
     }
@@ -1281,10 +1431,45 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("Recursive CTE must use UNION");
         }
 
+        // A CTE shadows a registered table of the same name only for the
+        // duration of the statement - preserve it across the fixpoint loop.
+        $shadowedTable = $this->tables[$cteName] ?? null;
+
         // Find the anchor (non-recursive) and recursive parts
         // For simplicity, assume left is anchor, right is recursive
         $anchorAst = $union->left;
         $recursiveAst = $union->right;
+
+        // SQL:2003: a declared column list renames the CTE's output columns.
+        // Push those names onto both branches as SELECT aliases *before*
+        // executing them. Rows are name-keyed objects, so a positional list
+        // like `SELECT 1, 0, 1` would otherwise collapse its two `1` columns
+        // into one and the arity check below would reject a valid query.
+        if ($cte['columns'] !== null) {
+            $anchorAst = $this->aliasCteBranchColumns($anchorAst, $cte['columns']);
+            $recursiveAst = $this->aliasCteBranchColumns($recursiveAst, $cte['columns']);
+        }
+
+        // A trailing ORDER BY / LIMIT / OFFSET on the recursive body binds to the
+        // whole set operation (parseSelectOrUnion() lifts it there). LIMIT is
+        // honoured below by stopping the fixpoint early; ORDER BY and OFFSET
+        // cannot be - the rows are produced iteratively and there is no complete
+        // result to sort or skip into until the loop has already run. Say so
+        // rather than dropping the clause and returning a different answer.
+        if ($union->orderBy !== null || $union->offset !== null) {
+            throw new \RuntimeException(
+                'Unsupported: ORDER BY / OFFSET on the body of a recursive CTE. ' .
+                'Apply them to the query that selects from the CTE instead.'
+            );
+        }
+
+        $recursionLimit = null;
+        if ($union->limit !== null) {
+            $recursionLimit = (int) $this->evaluator->evaluate($union->limit, null);
+            if ($recursionLimit <= 0) {
+                return $this->rowsToTable([]);
+            }
+        }
 
         // Execute anchor query (this is the base case)
         $anchorTable = $this->executeCteQuery($anchorAst);
@@ -1313,6 +1498,19 @@ class VirtualDatabase implements DatabaseInterface
         $resultRows = $anchorRows;
         $workingRows = $anchorRows;
 
+        // Rows already emitted, for UNION (as opposed to UNION ALL) dedup
+        $seen = [];
+        if (!$union->all) {
+            foreach ($anchorRows as $row) {
+                $seen[serialize(get_object_vars($row))] = true;
+            }
+        }
+
+        if ($recursionLimit !== null && count($resultRows) >= $recursionLimit) {
+            unset($this->tables[$cteName]);
+            return $this->rowsToTable(array_slice($resultRows, 0, $recursionLimit));
+        }
+
         // Iteration limit to prevent infinite loops
         $maxIterations = 10000;
         $iteration = 0;
@@ -1336,16 +1534,90 @@ class VirtualDatabase implements DatabaseInterface
             // This is required because the recursive SELECT may generate different column names
             $newRows = $this->renameRowColumns($newRows, $anchorColumnNames);
 
-            // For UNION (not UNION ALL), we should deduplicate
-            // For now, just handle UNION ALL
+            // UNION (without ALL) removes duplicates, and the fixpoint is
+            // reached once an iteration produces nothing that was not already
+            // in the result - otherwise a cyclic recursive term never
+            // terminates and silently returns $maxIterations rows.
+            if (!$union->all) {
+                $fresh = [];
+                foreach ($newRows as $row) {
+                    $key = serialize(get_object_vars($row));
+                    if (isset($seen[$key])) {
+                        continue;
+                    }
+                    $seen[$key] = true;
+                    $fresh[] = $row;
+                }
+                $newRows = $fresh;
+
+                if (empty($newRows)) {
+                    break;
+                }
+            }
+
             $resultRows = array_merge($resultRows, $newRows);
             $workingRows = $newRows;
+
+            // A LIMIT on the recursive body stops the fixpoint as soon as it is
+            // satisfied - that is what makes `SELECT 1 UNION ALL SELECT n+1 FROM c
+            // LIMIT 5` a terminating query despite having no WHERE guard.
+            if ($recursionLimit !== null && count($resultRows) >= $recursionLimit) {
+                $resultRows = array_slice($resultRows, 0, $recursionLimit);
+                $workingRows = [];
+                break;
+            }
         }
 
-        // Remove temporary CTE table
-        unset($this->tables[$cteName]);
+        // Remove the working table, restoring any registered table it shadowed.
+        // executeWithStatement() saves the shadowed binding only around its own
+        // registration, which happens after this method returns.
+        if ($shadowedTable !== null) {
+            $this->tables[$cteName] = $shadowedTable;
+        } else {
+            unset($this->tables[$cteName]);
+        }
+
+        // Hitting the cap means the recursion had not reached its fixpoint. The
+        // rows collected so far are an arbitrary prefix of an unbounded result,
+        // so returning them would be a silently wrong answer.
+        if (!empty($workingRows) && $iteration >= $maxIterations) {
+            throw new \RuntimeException(
+                "Recursive CTE '$cteName' did not terminate within $maxIterations iterations. " .
+                'Add a terminating condition to the recursive term, or a LIMIT on it.'
+            );
+        }
 
         return $this->rowsToTable($resultRows);
+    }
+
+    /**
+     * Apply a CTE's declared column list as SELECT aliases on one UNION branch.
+     *
+     * Returns a rewritten clone when the branch is a plain SELECT with a
+     * matching, wildcard-free column count; otherwise the branch unchanged
+     * (the caller's positional rename still applies).
+     */
+    private function aliasCteBranchColumns(mixed $branch, array $columnNames): mixed
+    {
+        if (!$branch instanceof SelectStatement || count($branch->columns) !== count($columnNames)) {
+            return $branch;
+        }
+
+        foreach ($branch->columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                return $branch;
+            }
+            if ($col->expression instanceof IdentifierNode && $col->expression->isWildcard()) {
+                return $branch;
+            }
+        }
+
+        $clone = $branch->deepClone();
+        foreach (array_values($clone->columns) as $i => $col) {
+            $col->alias = $columnNames[$i];
+        }
+
+        return $clone;
     }
 
     /**
@@ -1396,6 +1668,12 @@ class VirtualDatabase implements DatabaseInterface
             $rows = iterator_to_array($this->executeSelect($query));
             return $this->rowsToTable($rows);
         }
+        if ($query instanceof WithStatement) {
+            // Nested WITH: `WITH a AS (WITH b AS (...) SELECT * FROM b) ...`.
+            // SQL:2003 allows a <with clause> on any <query expression>, so a
+            // CTE body is itself a full query expression.
+            return $this->rowsToTable(iterator_to_array($this->executeWithStatement($query)));
+        }
         throw new \RuntimeException("Unexpected CTE query type: " . get_class($query));
     }
 
@@ -1445,11 +1723,25 @@ class VirtualDatabase implements DatabaseInterface
         // guaranteed to yield 0-based integer keys, and this code indexes $rows[0].
         $rows = iterator_to_array($table, false);
 
+        // SQL:2003 - a declared column list RENAMES the columns; it does not
+        // retype them. Defaulting to Text makes InMemoryTable coerce ints and
+        // floats to strings, and the strict comparisons behind JOIN and
+        // NOT EXISTS then never match ("1" is not 1) - a silently empty join
+        // and a silently unfiltered NOT EXISTS. Carry the source types over.
+        $sourceTypes = [];
+        foreach ($table->getColumns() as $sourceName => $sourceDef) {
+            $sourceTypes[$sourceName] = $sourceDef->type;
+        }
+
         if (empty($rows)) {
             // Create table with renamed columns
+            $sourceNames = array_keys($sourceTypes);
             $columns = [];
-            foreach ($columnNames as $name) {
-                $columns[] = new \mini\Table\ColumnDef($name, \mini\Table\Types\ColumnType::Text);
+            foreach (array_values($columnNames) as $i => $name) {
+                $columns[] = new \mini\Table\ColumnDef(
+                    $name,
+                    $sourceTypes[$sourceNames[$i] ?? ''] ?? \mini\Table\Types\ColumnType::Text
+                );
             }
             return new \mini\Table\InMemoryTable(...$columns);
         }
@@ -1467,10 +1759,13 @@ class VirtualDatabase implements DatabaseInterface
 
         $nameMap = array_combine($oldNames, $columnNames);
 
-        // Create new columns with renamed names
+        // Create new columns with renamed names, keeping each source column's type
         $columns = [];
-        foreach ($columnNames as $name) {
-            $columns[] = new \mini\Table\ColumnDef($name, \mini\Table\Types\ColumnType::Text);
+        foreach (array_values($columnNames) as $i => $name) {
+            $columns[] = new \mini\Table\ColumnDef(
+                $name,
+                $sourceTypes[$oldNames[$i]] ?? \mini\Table\Types\ColumnType::Text
+            );
         }
 
         $newTable = new \mini\Table\InMemoryTable(...$columns);
@@ -1563,14 +1858,28 @@ class VirtualDatabase implements DatabaseInterface
             }
         }
 
-        // Check for window functions - requires materializing rows first
+        // Check for window functions - requires materializing rows first.
+        // Window functions are evaluated AFTER GROUP BY/HAVING and BEFORE
+        // DISTINCT/ORDER BY/LIMIT, so a query that also groups has to compute
+        // the groups first and run the windows over the *grouped* rows -
+        // otherwise the GROUP BY and HAVING would be silently ignored.
         if ($this->hasWindowFunctions($ast->columns)) {
-            yield from $this->executeWindowSelect($ast, $table);
+            if (!empty($ast->groupBy) || $ast->having !== null || $this->hasAggregates($ast->columns)) {
+                yield from $this->executeGroupedWindowSelect($ast, $table);
+            } else {
+                yield from $this->executeWindowSelect($ast, $table);
+            }
             return;
         }
 
-        // Check for aggregate functions - requires different execution path
-        if ($this->hasAggregates($ast->columns)) {
+        // Check for aggregate functions - requires different execution path.
+        // GROUP BY / HAVING also force the grouping path even when the SELECT
+        // list has no aggregate at all (`SELECT role FROM users GROUP BY role`),
+        // otherwise the grouping would be silently ignored.
+        if ($this->hasAggregates($ast->columns)
+            || !empty($ast->groupBy)
+            || $ast->having !== null
+        ) {
             yield from $this->executeAggregateSelect($ast, $table);
             return;
         }
@@ -1625,37 +1934,54 @@ class VirtualDatabase implements DatabaseInterface
      * Window functions are computed over the entire result set (or partitions),
      * producing a value for each row while maintaining the row granularity.
      */
-    private function executeWindowSelect(SelectStatement $ast, TableInterface $table): iterable
+    private function executeWindowSelect(SelectStatement $ast, iterable $source): iterable
     {
         // 1. Materialize all rows - window functions need the full dataset
         $rows = [];
-        foreach ($table as $row) {
+        foreach ($source as $row) {
             $rows[] = $row;
         }
 
         // 2. Collect window function info from columns
         $windowFuncs = $this->collectWindowFunctions($ast->columns);
 
-        // 3. Compute window function values for each row
-        // windowValues[rowIndex][windowFuncAlias] = value
+        // 3. Compute window function values for each row.
+        // windowValues[rowIndex] is an identity-keyed WindowFunctionNode => value
+        // map, so several window functions in one SELECT stay distinct.
         $windowValues = [];
         foreach ($rows as $idx => $row) {
-            $windowValues[$idx] = [];
+            $windowValues[$idx] = new \SplObjectStorage();
         }
 
-        foreach ($windowFuncs as $alias => $wfn) {
+        foreach ($windowFuncs as $wfn) {
             $values = $this->computeWindowFunction($wfn, $rows);
             foreach ($values as $idx => $val) {
-                $windowValues[$idx][$alias] = $val;
+                $windowValues[$idx][$wfn] = $val;
             }
         }
 
         // 4. Apply ORDER BY if present (on the result rows, not the window ordering)
         if ($ast->orderBy) {
+            // SELECT aliases are visible to ORDER BY, including aliases that
+            // name a window function (`ORDER BY rn`).
+            $aliases = [];
+            foreach ($ast->columns as $col) {
+                if ($col instanceof ColumnNode && $col->alias !== null) {
+                    $aliases[$col->alias] = $col->expression;
+                }
+            }
+
             // Sort the rows maintaining their window values
             $indices = array_keys($rows);
-            usort($indices, function ($a, $b) use ($rows, $ast) {
-                return $this->compareRowsForOrderBy($rows[$a], $rows[$b], $ast->orderBy);
+            usort($indices, function ($a, $b) use ($rows, $windowValues, $ast, $aliases) {
+                return $this->compareRowsForOrderBy(
+                    $rows[$a],
+                    $rows[$b],
+                    $ast->orderBy,
+                    $windowValues[$a],
+                    $windowValues[$b],
+                    $aliases
+                );
             });
             $sortedRows = [];
             $sortedWindowValues = [];
@@ -1677,24 +2003,182 @@ class VirtualDatabase implements DatabaseInterface
             $limit = (int)$this->evaluator->evaluate($ast->limit, null);
         }
 
-        $count = 0;
+        // 6. Project, then apply DISTINCT. SQL evaluates SELECT DISTINCT after
+        // the window functions, so duplicates are removed from the *projected*
+        // rows (window values included) - not from the input rows.
+        $projected = [];
+        $seen = [];
         foreach ($rows as $idx => $row) {
+            $out = $this->projectRowWithWindowValues($row, $ast->columns, $windowValues[$idx]);
+            if ($ast->distinct) {
+                $key = serialize($out);
+                if (isset($seen[$key])) {
+                    continue;
+                }
+                $seen[$key] = true;
+            }
+            $projected[] = $out;
+        }
+
+        // 7. Apply OFFSET/LIMIT last
+        $count = 0;
+        foreach ($projected as $idx => $out) {
             if ($idx < $offset) {
                 continue;
             }
             if ($limit !== null && $count >= $limit) {
                 break;
             }
-
-            // 6. Project the row with window function values
-            yield $this->projectRowWithWindowValues($row, $ast->columns, $windowValues[$idx]);
+            yield $out;
             $count++;
         }
     }
 
     /**
+     * Execute a SELECT that has both window functions and grouping.
+     *
+     * SQL evaluates GROUP BY/HAVING before window functions, so the query is
+     * split in two: an inner grouped SELECT that produces one row per group,
+     * and an outer window pass over those rows. Aggregates referenced from
+     * inside an OVER clause (`RANK() OVER (ORDER BY COUNT(*))`) are projected
+     * by the inner query under a synthetic name and rewritten to reference it.
+     */
+    private function executeGroupedWindowSelect(SelectStatement $ast, TableInterface $table): iterable
+    {
+        $innerColumns = [];
+        $outerColumns = [];
+        $synthetic = 0;
+
+        foreach ($ast->columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                continue;
+            }
+            $outName = $col->alias;
+            if ($outName === null && $col->expression instanceof IdentifierNode) {
+                $outName = $col->expression->getName();
+            }
+            $outName ??= 'col_' . spl_object_id($col);
+
+            if ($this->expressionHasWindowFunction($col->expression)) {
+                $outerColumns[] = new ColumnNode(
+                    $this->rewriteWindowAggregates($col->expression, $innerColumns, $synthetic),
+                    $outName
+                );
+                continue;
+            }
+
+            if ($col->expression instanceof IdentifierNode && $col->expression->isWildcard()) {
+                throw new \RuntimeException(
+                    'VDB limitation: SELECT * cannot be combined with window functions and ' .
+                    'GROUP BY - list the grouped columns explicitly.'
+                );
+            }
+
+            // Non-window column: computed by the inner grouped query, then
+            // referenced by name from the outer window pass.
+            $innerColumns[] = new ColumnNode($col->expression, $outName);
+            $outerColumns[] = new ColumnNode(new IdentifierNode($outName), $outName);
+        }
+
+        // ORDER BY may reference an aggregate too (`ORDER BY COUNT(*)`).
+        $outerOrderBy = null;
+        if ($ast->orderBy) {
+            $outerOrderBy = [];
+            foreach ($ast->orderBy as $item) {
+                if (isset($item['column']) && $item['column'] instanceof ASTNode) {
+                    $item['column'] = $this->aggregateToInnerColumn($item['column'], $innerColumns, $synthetic);
+                }
+                $outerOrderBy[] = $item;
+            }
+        }
+
+        // Inner query: same FROM/WHERE (already applied to $table) plus the
+        // grouping. Shallow clone so the shared parse cache is never mutated.
+        $inner = clone $ast;
+        $inner->columns = $innerColumns;
+        $inner->distinct = false;
+        $inner->orderBy = null;
+        $inner->limit = null;
+        $inner->offset = null;
+
+        $groupedRows = iterator_to_array($this->executeAggregateSelect($inner, $table), false);
+
+        $outer = new SelectStatement();
+        $outer->columns = $outerColumns;
+        $outer->distinct = $ast->distinct;
+        $outer->orderBy = $outerOrderBy;
+        $outer->limit = $ast->limit;
+        $outer->offset = $ast->offset;
+
+        yield from $this->executeWindowSelect($outer, $groupedRows);
+    }
+
+    /**
+     * Deep-copy a SELECT column expression, replacing aggregates inside its
+     * OVER clauses with references to synthetic inner-query columns.
+     *
+     * Returns the original expression untouched when no rewrite is needed, so
+     * the cached AST is only ever copied when it actually has to change.
+     */
+    private function rewriteWindowAggregates(ASTNode $expr, array &$innerColumns, int &$synthetic): ASTNode
+    {
+        $needsRewrite = false;
+        foreach ($this->extractWindowFunctions($expr) as $wfn) {
+            foreach ($wfn->partitionBy as $part) {
+                if ($this->expressionHasAggregate($part)) {
+                    $needsRewrite = true;
+                }
+            }
+            foreach ($wfn->orderBy as $spec) {
+                if (isset($spec['expr']) && $this->expressionHasAggregate($spec['expr'])) {
+                    $needsRewrite = true;
+                }
+            }
+        }
+        if (!$needsRewrite) {
+            return $expr;
+        }
+
+        // Deep copy before mutating - the AST comes from the shared parse cache.
+        $copy = unserialize(serialize($expr));
+        foreach ($this->extractWindowFunctions($copy) as $wfn) {
+            foreach ($wfn->partitionBy as $i => $part) {
+                $wfn->partitionBy[$i] = $this->aggregateToInnerColumn($part, $innerColumns, $synthetic);
+            }
+            foreach ($wfn->orderBy as $i => $spec) {
+                if (isset($spec['expr'])) {
+                    $wfn->orderBy[$i]['expr'] =
+                        $this->aggregateToInnerColumn($spec['expr'], $innerColumns, $synthetic);
+                }
+            }
+        }
+        return $copy;
+    }
+
+    /**
+     * Move an aggregate expression into the inner grouped query and return an
+     * identifier referencing it. Expressions without aggregates pass through.
+     */
+    private function aggregateToInnerColumn(ASTNode $expr, array &$innerColumns, int &$synthetic): ASTNode
+    {
+        if (!$this->expressionHasAggregate($expr)) {
+            return $expr;
+        }
+        if (!($expr instanceof FunctionCallNode && isset($this->aggregates[strtoupper($expr->name)]))) {
+            throw new \RuntimeException(
+                'VDB limitation: an aggregate nested inside a larger expression is not supported ' .
+                'in this position when the query also uses window functions.'
+            );
+        }
+        $name = '__agg' . $synthetic++;
+        $innerColumns[] = new ColumnNode($expr, $name);
+        return new IdentifierNode($name);
+    }
+
+    /**
      * Collect window functions from SELECT columns
-     * Returns: [alias => WindowFunctionNode, ...]
+     *
+     * @return array<int, WindowFunctionNode> Keyed by spl_object_id
      */
     private function collectWindowFunctions(array $columns): array
     {
@@ -1703,11 +2187,8 @@ class VirtualDatabase implements DatabaseInterface
             if (!$col instanceof ColumnNode) {
                 continue;
             }
-            $wfns = $this->extractWindowFunctions($col->expression);
-            foreach ($wfns as $wfn) {
-                // Use alias if available, otherwise generate one
-                $alias = $col->alias ?? $this->generateWindowFuncAlias($wfn);
-                $result[$alias] = $wfn;
+            foreach ($this->extractWindowFunctions($col->expression) as $wfn) {
+                $result[spl_object_id($wfn)] = $wfn;
             }
         }
         return $result;
@@ -1721,22 +2202,34 @@ class VirtualDatabase implements DatabaseInterface
         if ($node instanceof WindowFunctionNode) {
             return [$node];
         }
-        if ($node instanceof BinaryOperation) {
-            return array_merge(
-                $this->extractWindowFunctions($node->left),
-                $this->extractWindowFunctions($node->right)
-            );
+        if ($node instanceof SubqueryNode || $node instanceof SelectStatement) {
+            return [];
         }
-        return [];
+
+        $found = [];
+        foreach (get_object_vars($node) as $value) {
+            $found = array_merge($found, $this->extractWindowFunctionsFrom($value));
+        }
+        return $found;
     }
 
     /**
-     * Generate a unique alias for a window function
+     * Walk an AST node property (node, array, or nested array) collecting
+     * window function calls.
      */
-    private function generateWindowFuncAlias(WindowFunctionNode $wfn): string
+    private function extractWindowFunctionsFrom(mixed $value): array
     {
-        static $counter = 0;
-        return '__wfn_' . $wfn->function->name . '_' . (++$counter);
+        if ($value instanceof ASTNode) {
+            return $this->extractWindowFunctions($value);
+        }
+        if (is_array($value)) {
+            $found = [];
+            foreach ($value as $item) {
+                $found = array_merge($found, $this->extractWindowFunctionsFrom($item));
+            }
+            return $found;
+        }
+        return [];
     }
 
     /**
@@ -1865,7 +2358,7 @@ class VirtualDatabase implements DatabaseInterface
     /**
      * Project a row with window function values
      */
-    private function projectRowWithWindowValues(object $row, array $columns, array $windowValues): object
+    private function projectRowWithWindowValues(object $row, array $columns, \SplObjectStorage $windowValues): object
     {
         $result = new \stdClass();
 
@@ -1896,37 +2389,65 @@ class VirtualDatabase implements DatabaseInterface
     private function evaluateExpressionWithWindowValues(
         \mini\Parsing\SQL\AST\ASTNode $expr,
         object $row,
-        array $windowValues
+        \SplObjectStorage $windowValues
     ): mixed {
-        if ($expr instanceof WindowFunctionNode) {
-            // Find the matching window value by alias or generate alias
-            $alias = $this->generateWindowFuncAlias($expr);
-            // Search for matching value in windowValues
-            foreach ($windowValues as $key => $val) {
-                // For now, return the first window value found (single window function per column)
-                return $val;
-            }
-            return null;
+        // Window values are keyed by node identity, so each window function in
+        // the SELECT list resolves to its own value even when several appear.
+        $this->evaluator->pushValues($windowValues);
+        try {
+            return $this->evaluator->evaluate($expr, $row);
+        } finally {
+            $this->evaluator->popValues();
         }
-
-        // For non-window expressions, use the standard evaluator
-        return $this->evaluator->evaluate($expr, $row);
     }
 
     /**
      * Compare two rows for ORDER BY (for result sorting)
      */
-    private function compareRowsForOrderBy(object $a, object $b, array $orderBy): int
-    {
+    private function compareRowsForOrderBy(
+        object $a,
+        object $b,
+        array $orderBy,
+        ?\SplObjectStorage $windowValuesA = null,
+        ?\SplObjectStorage $windowValuesB = null,
+        array $aliases = []
+    ): int {
         foreach ($orderBy as $spec) {
-            $valA = $this->evaluator->evaluate($spec->expression, $a);
-            $valB = $this->evaluator->evaluate($spec->expression, $b);
+            // SelectStatement::$orderBy items are ['column' => ASTNode, 'direction' => string]
+            $expr = $spec['column'];
+            $direction = strtoupper($spec['direction'] ?? 'ASC');
+
+            // ORDER BY may name a SELECT alias rather than a source column
+            if ($expr instanceof IdentifierNode && isset($aliases[$expr->getName()])) {
+                $expr = $aliases[$expr->getName()];
+            }
+
+            $valA = $this->evaluateOrderKey($expr, $a, $windowValuesA);
+            $valB = $this->evaluateOrderKey($expr, $b, $windowValuesB);
+
             $cmp = $valA <=> $valB;
             if ($cmp !== 0) {
-                return strtoupper($spec->direction) === 'DESC' ? -$cmp : $cmp;
+                return $direction === 'DESC' ? -$cmp : $cmp;
             }
         }
         return 0;
+    }
+
+    /**
+     * Evaluate a single ORDER BY key against a source row, with window function
+     * values in scope when the query has any.
+     */
+    private function evaluateOrderKey(ASTNode $expr, object $row, ?\SplObjectStorage $windowValues): mixed
+    {
+        if ($windowValues === null) {
+            return $this->evaluator->evaluate($expr, $row);
+        }
+        $this->evaluator->pushValues($windowValues);
+        try {
+            return $this->evaluator->evaluate($expr, $row);
+        } finally {
+            $this->evaluator->popValues();
+        }
     }
 
     /**
@@ -1937,8 +2458,10 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function executeAggregateSelect(SelectStatement $ast, TableInterface $table): iterable
     {
-        // Collect aggregate function info
-        $aggregateInfos = $this->collectAggregateInfos($ast->columns);
+        // Collect aggregate function info. Aggregates are collected from the
+        // SELECT list, HAVING and ORDER BY so that `HAVING SUM(stock) > 200`
+        // or `ORDER BY COUNT(*)` work even when the aggregate is not projected.
+        $aggregateInfos = $this->collectAggregateInfos($ast->columns, $ast->having, $ast->orderBy);
 
         // Collect non-aggregate columns (group key columns or expressions on them)
         $nonAggregateColumns = $this->collectNonAggregateColumns($ast->columns);
@@ -1961,16 +2484,85 @@ class VirtualDatabase implements DatabaseInterface
         array $aggregateInfos,
         array $nonAggregateColumns
     ): iterable {
+        // Bare (non-aggregated) columns need a representative row. See
+        // extremeAggregateInfo(): with a lone MIN()/MAX() that is the extreme
+        // row, otherwise the first row of the input.
+        $extreme = $this->extremeAggregateInfo($aggregateInfos);
+        $repRow = null;
+        $repValue = null;
+
         // Step phase: iterate through all rows
-        $lastRow = null;
         foreach ($table as $row) {
-            $lastRow = $row;
+            if ($repRow === null) {
+                $repRow = $row;
+            }
+            if ($extreme !== null) {
+                $value = $this->evaluator->evaluate($extreme['arg'], $row);
+                if ($value !== null
+                    && ($repValue === null
+                        || ($extreme['isMax'] ? $value > $repValue : $value < $repValue))
+                ) {
+                    $repValue = $value;
+                    $repRow = $row;
+                }
+            }
             $this->stepAggregates($aggregateInfos, $row);
         }
 
         // Final phase: build result row
-        $result = $this->buildAggregateResultRow($aggregateInfos, $nonAggregateColumns, $lastRow);
+        $values = $this->finalizeAggregates($aggregateInfos);
+        $result = $this->buildAggregateResultRow($aggregateInfos, $nonAggregateColumns, $repRow, $values);
+
+        // HAVING applies to the single implicit group as well
+        if ($ast->having !== null && !$this->evaluateHaving($ast->having, $result, $repRow, $values)) {
+            return;
+        }
+
+        // The implicit group produces exactly one row, but LIMIT/OFFSET still
+        // apply to it: `LIMIT 0` and any positive OFFSET yield nothing.
+        if ($ast->offset !== null && (int)$this->evaluator->evaluate($ast->offset, null) > 0) {
+            return;
+        }
+        if ($ast->limit !== null && (int)$this->evaluator->evaluate($ast->limit, null) < 1) {
+            return;
+        }
+
         yield $result;
+    }
+
+    /**
+     * Which row supplies the values for bare (non-aggregated) columns?
+     *
+     * SQL:2003 makes `SELECT MAX(price), name FROM products` illegal - `name`
+     * is neither grouped nor aggregated. VDB follows the SQLite/MySQL
+     * extension and returns a representative row instead of erroring, and
+     * therefore has to follow SQLite's *rule* for picking it: when the query
+     * contains exactly one aggregate and it is a single-argument MIN() or
+     * MAX(), the bare columns come from the row that produced the extreme
+     * value. With any other aggregate set the representative row is arbitrary
+     * (VDB uses the first row of the group).
+     *
+     * @param array $aggregateInfos As built by collectAggregateInfos()
+     * @return array{arg: ASTNode, isMax: bool}|null
+     */
+    private function extremeAggregateInfo(array $aggregateInfos): ?array
+    {
+        if (count($aggregateInfos) !== 1) {
+            return null;
+        }
+        $info = $aggregateInfos[array_key_first($aggregateInfos)];
+        $name = strtoupper($info['node']->name);
+        if ($name !== 'MIN' && $name !== 'MAX') {
+            return null;
+        }
+        if (count($info['args']) !== 1) {
+            return null;
+        }
+        $arg = $info['args'][0];
+        if ($arg instanceof IdentifierNode && $arg->isWildcard()) {
+            return null;
+        }
+        return ['arg' => $arg, 'isMax' => $name === 'MAX'];
     }
 
     /**
@@ -1982,14 +2574,21 @@ class VirtualDatabase implements DatabaseInterface
         array $aggregateInfos,
         array $nonAggregateColumns
     ): iterable {
+        $groupBy = $this->resolveGroupByOrdinals($ast->groupBy, $ast->columns, $table);
         // Groups: key => ['aggregates' => [...], 'sampleRow' => object]
         $groups = [];
+
+        // Bare (non-aggregated) columns take their values from the group's
+        // representative row - the MIN()/MAX() row when the query has exactly
+        // one such aggregate, otherwise the group's first row.
+        // See extremeAggregateInfo().
+        $extreme = $this->extremeAggregateInfo($aggregateInfos);
 
         // Step phase: iterate through all rows, grouping by key
         foreach ($table as $row) {
             // Compute group key from GROUP BY expressions
             $keyParts = [];
-            foreach ($ast->groupBy as $groupExpr) {
+            foreach ($groupBy as $groupExpr) {
                 $keyParts[] = $this->evaluator->evaluate($groupExpr, $row);
             }
             $groupKey = serialize($keyParts);
@@ -1999,8 +2598,23 @@ class VirtualDatabase implements DatabaseInterface
                 $groups[$groupKey] = [
                     'keyValues' => $keyParts,
                     'sampleRow' => $row,
+                    'extremeValue' => null,
                     'aggregates' => $this->cloneAggregateInfos($aggregateInfos),
                 ];
+            }
+
+            // Track the group's MIN()/MAX() row as its representative row
+            if ($extreme !== null) {
+                $value = $this->evaluator->evaluate($extreme['arg'], $row);
+                if ($value !== null
+                    && ($groups[$groupKey]['extremeValue'] === null
+                        || ($extreme['isMax']
+                            ? $value > $groups[$groupKey]['extremeValue']
+                            : $value < $groups[$groupKey]['extremeValue']))
+                ) {
+                    $groups[$groupKey]['extremeValue'] = $value;
+                    $groups[$groupKey]['sampleRow'] = $row;
+                }
             }
 
             // Step aggregates for this group
@@ -2009,27 +2623,48 @@ class VirtualDatabase implements DatabaseInterface
 
         // Final phase: build result rows
         $results = [];
+        $resultValues = [];
         foreach ($groups as $group) {
+            $values = $this->finalizeAggregates($group['aggregates']);
             $result = $this->buildAggregateResultRow(
                 $group['aggregates'],
                 $nonAggregateColumns,
-                $group['sampleRow']
+                $group['sampleRow'],
+                $values
             );
 
             // Apply HAVING filter
-            if ($ast->having !== null) {
-                $passes = $this->evaluator->evaluate($ast->having, $result);
-                if (!$passes) {
-                    continue;
-                }
+            if ($ast->having !== null
+                && !$this->evaluateHaving($ast->having, $result, $group['sampleRow'], $values)
+            ) {
+                continue;
             }
 
             $results[] = $result;
+            $resultValues[] = $values;
+        }
+
+        // SELECT DISTINCT applies after HAVING and before ORDER BY
+        if ($ast->distinct) {
+            $seen = [];
+            $unique = [];
+            $uniqueValues = [];
+            foreach ($results as $i => $row) {
+                $key = serialize($row);
+                if (isset($seen[$key])) {
+                    continue;
+                }
+                $seen[$key] = true;
+                $unique[] = $row;
+                $uniqueValues[] = $resultValues[$i];
+            }
+            $results = $unique;
+            $resultValues = $uniqueValues;
         }
 
         // Apply ORDER BY if present
         if ($ast->orderBy) {
-            $results = $this->sortResults($results, $ast->orderBy);
+            $results = $this->sortAggregateResults($results, $resultValues, $ast->orderBy);
         }
 
         // Apply OFFSET
@@ -2067,6 +2702,8 @@ class VirtualDatabase implements DatabaseInterface
         foreach ($aggregateInfos as $info) {
             $cloned[] = [
                 'name' => $info['name'],
+                'position' => $info['position'],
+                'node' => $info['node'],
                 'step' => $info['step'],
                 'final' => $info['final'],
                 'args' => $info['args'],
@@ -2110,31 +2747,260 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Resolve `GROUP BY <ordinal>` to the corresponding SELECT list expression.
+     *
+     * `GROUP BY 1` means "group by the first select column", not "group by the
+     * constant 1" - evaluating it as a constant silently collapses every row
+     * into a single group.
+     *
+     * @param ASTNode[] $groupBy
+     * @param ColumnNode[] $columns
+     * @return ASTNode[]
+     */
+    private function resolveGroupByOrdinals(array $groupBy, array $columns, ?TableInterface $table = null): array
+    {
+        $selectExprs = [];
+        $aliases = [];
+        foreach ($columns as $col) {
+            if ($col instanceof ColumnNode) {
+                $selectExprs[] = $col->expression;
+                if ($col->alias !== null) {
+                    $aliases[$col->alias] = $col->expression;
+                }
+            }
+        }
+
+        // A real column always wins over a SELECT alias of the same name.
+        $tableColumns = $table !== null ? $table->getColumns() : [];
+
+        $resolved = [];
+        foreach ($groupBy as $expr) {
+            if ($expr instanceof LiteralNode
+                && $expr->valueType === 'number'
+                && (float)(int)$expr->value === (float)$expr->value
+            ) {
+                $idx = (int)$expr->value - 1;
+                if (!isset($selectExprs[$idx])) {
+                    throw new \RuntimeException(
+                        "GROUP BY position " . (int)$expr->value . " is not in the select list"
+                    );
+                }
+                $resolved[] = $selectExprs[$idx];
+                continue;
+            }
+
+            // GROUP BY <select alias> - accepted by SQLite/MySQL/PostgreSQL.
+            // Only an unqualified name that is not an actual column resolves,
+            // so `GROUP BY category` never picks up `... AS category`.
+            if ($expr instanceof IdentifierNode
+                && !$expr->isQualified()
+                && !$expr->isWildcard()
+                && isset($aliases[$expr->getName()])
+                && !isset($tableColumns[$expr->getName()])
+            ) {
+                $resolved[] = $aliases[$expr->getName()];
+                continue;
+            }
+
+            $resolved[] = $expr;
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * Finalize every aggregate and return an identity-keyed node => value map.
+     *
+     * @return \SplObjectStorage<ASTNode, mixed>
+     */
+    private function finalizeAggregates(array $aggregateInfos): \SplObjectStorage
+    {
+        $values = new \SplObjectStorage();
+        foreach ($aggregateInfos as $info) {
+            $final = $info['final'];
+            $values[$info['node']] = $final($info['context']);
+        }
+        return $values;
+    }
+
+    /**
+     * Evaluate HAVING for one group.
+     *
+     * The condition sees the projected result row, the group's representative
+     * source row (so `HAVING category = 'tools'` works when `category` is not
+     * projected) and the pre-computed aggregate values (so `HAVING COUNT(*) > 1`
+     * works without the aggregate being projected).
+     *
+     * @param \SplObjectStorage<ASTNode, mixed> $values
+     */
+    private function evaluateHaving(
+        ASTNode $having,
+        \stdClass $result,
+        ?object $sampleRow,
+        \SplObjectStorage $values
+    ): bool {
+        $row = new \stdClass();
+        if ($sampleRow !== null) {
+            foreach (get_object_vars($sampleRow) as $k => $v) {
+                $row->$k = $v;
+            }
+        }
+        foreach (get_object_vars($result) as $k => $v) {
+            $row->$k = $v;
+        }
+
+        $this->evaluator->pushValues($values);
+        try {
+            return (bool)$this->evaluator->evaluate($having, $row);
+        } finally {
+            $this->evaluator->popValues();
+        }
+    }
+
+    /**
+     * Sort aggregate result rows, keeping each row paired with its aggregate
+     * values so that `ORDER BY COUNT(*)` can be evaluated per row.
+     *
+     * @param \stdClass[] $results
+     * @param \SplObjectStorage[] $resultValues
+     * @return \stdClass[]
+     */
+    private function sortAggregateResults(array $results, array $resultValues, array $orderBy): array
+    {
+        if (count($results) < 2) {
+            return $results;
+        }
+
+        $needsValues = false;
+        foreach ($orderBy as $item) {
+            if ($this->expressionHasAggregate($item['column'])) {
+                $needsValues = true;
+                break;
+            }
+        }
+
+        if (!$needsValues) {
+            return $this->sortResults($results, $orderBy);
+        }
+
+        $indices = array_keys($results);
+        usort($indices, function ($a, $b) use ($results, $resultValues, $orderBy) {
+            foreach ($orderBy as $item) {
+                $expr = $item['column'];
+                $direction = strtoupper($item['direction'] ?? 'ASC');
+
+                $this->evaluator->pushValues($resultValues[$a]);
+                try {
+                    $aVal = $this->evaluator->evaluate($expr, $results[$a]);
+                } finally {
+                    $this->evaluator->popValues();
+                }
+                $this->evaluator->pushValues($resultValues[$b]);
+                try {
+                    $bVal = $this->evaluator->evaluate($expr, $results[$b]);
+                } finally {
+                    $this->evaluator->popValues();
+                }
+
+                if ($aVal === $bVal) {
+                    continue;
+                }
+                $cmp = $aVal <=> $bVal;
+                return $direction === 'DESC' ? -$cmp : $cmp;
+            }
+            return 0;
+        });
+
+        $sorted = [];
+        foreach ($indices as $i) {
+            $sorted[] = $results[$i];
+        }
+        return $sorted;
+    }
+
+    /**
      * Build result row from finalized aggregates and non-aggregate columns
+     *
+     * @param \SplObjectStorage<ASTNode, mixed>|null $values Pre-finalized aggregate values
      */
     private function buildAggregateResultRow(
         array $aggregateInfos,
         array $nonAggregateColumns,
-        ?object $sampleRow
+        ?object $sampleRow,
+        ?\SplObjectStorage $values = null
     ): \stdClass {
+        $values ??= $this->finalizeAggregates($aggregateInfos);
         $result = new \stdClass();
 
-        // Add non-aggregate columns (evaluated from sample row)
-        foreach ($nonAggregateColumns as $colInfo) {
-            $value = $sampleRow !== null
-                ? $this->evaluator->evaluate($colInfo['expression'], $sampleRow)
-                : null;
-            $result->{$colInfo['name']} = $value;
+        // Add non-aggregate columns (evaluated from sample row). The aggregate
+        // values are in scope so that expressions such as `SUM(price) * 2` or
+        // `ROUND(AVG(price), 2)` evaluate correctly.
+        $projected = [];
+
+        $this->evaluator->pushValues($values);
+        try {
+            foreach ($nonAggregateColumns as $colInfo) {
+                if (isset($colInfo['wildcard'])) {
+                    if ($sampleRow !== null) {
+                        foreach ($this->expandWildcard($colInfo['wildcard'], $sampleRow) as $k => $v) {
+                            $projected[] = [$colInfo['position'], $k, $v];
+                        }
+                    }
+                    continue;
+                }
+                if ($sampleRow !== null) {
+                    $value = $this->evaluator->evaluate($colInfo['expression'], $sampleRow);
+                } elseif ($this->expressionHasAggregate($colInfo['expression'])) {
+                    // Empty input set: aggregate-only expressions still have a value
+                    $value = $this->evaluator->evaluate($colInfo['expression'], new \stdClass());
+                } else {
+                    $value = null;
+                }
+                $projected[] = [$colInfo['position'] ?? count($projected), $colInfo['name'], $value];
+            }
+        } finally {
+            $this->evaluator->popValues();
         }
 
-        // Add aggregate results
-        for ($i = 0; $i < count($aggregateInfos); $i++) {
-            $final = $aggregateInfos[$i]['final'];
-            $value = $final($aggregateInfos[$i]['context']);
-            $result->{$aggregateInfos[$i]['name']} = $value;
+        // Add aggregate results that are projected as whole columns
+        foreach ($aggregateInfos as $info) {
+            if ($info['name'] === null) {
+                continue; // nested inside an expression - already projected above
+            }
+            $projected[] = [$info['position'] ?? count($projected), $info['name'], $values[$info['node']]];
+        }
+
+        // Emit in SELECT list order
+        usort($projected, fn($a, $b) => $a[0] <=> $b[0]);
+        foreach ($projected as [, $name, $value]) {
+            $result->$name = $value;
         }
 
         return $result;
+    }
+
+    /**
+     * Expand a `*` or `alias.*` select item against a representative row.
+     *
+     * @return array<string, mixed>
+     */
+    private function expandWildcard(IdentifierNode $wildcard, object $row): array
+    {
+        $vars = get_object_vars($row);
+
+        if (!$wildcard->isQualified()) {
+            return $vars;
+        }
+
+        $prefix = $wildcard->parts[count($wildcard->parts) - 2] . '.';
+        $filtered = [];
+        foreach ($vars as $name => $value) {
+            if (str_starts_with($name, $prefix)) {
+                $filtered[$name] = $value;
+            }
+        }
+
+        return $filtered !== [] ? $filtered : $vars;
     }
 
     /**
@@ -2146,7 +3012,7 @@ class VirtualDatabase implements DatabaseInterface
     {
         $nonAggregates = [];
 
-        foreach ($columns as $col) {
+        foreach ($columns as $position => $col) {
             if (!$col instanceof ColumnNode) {
                 continue;
             }
@@ -2159,8 +3025,16 @@ class VirtualDatabase implements DatabaseInterface
                 }
             }
 
-            // Skip wildcards
+            // Wildcards expand from the group's representative row. SQL:2003
+            // forbids a bare `*` alongside GROUP BY, but dropping it silently
+            // would produce a result with no columns at all.
             if ($col->expression instanceof IdentifierNode && $col->expression->isWildcard()) {
+                $nonAggregates[] = [
+                    'name' => null,
+                    'expression' => $col->expression,
+                    'position' => $position,
+                    'wildcard' => $col->expression,
+                ];
                 continue;
             }
 
@@ -2176,6 +3050,7 @@ class VirtualDatabase implements DatabaseInterface
             $nonAggregates[] = [
                 'name' => $name,
                 'expression' => $col->expression,
+                'position' => $position,
             ];
         }
 
@@ -2314,46 +3189,49 @@ class VirtualDatabase implements DatabaseInterface
      * - args: argument AST nodes
      * - context: initial null context (to be mutated)
      */
-    private function collectAggregateInfos(array $columns): array
+    private function collectAggregateInfos(array $columns, ?ASTNode $having = null, ?array $orderBy = null): array
     {
-        $infos = [];
+        // Aggregates that are a whole SELECT column get an output column name;
+        // everything else (nested in an expression, or only in HAVING/ORDER BY)
+        // is computed but not projected.
+        $named = [];
+        $nodes = [];
 
-        foreach ($columns as $col) {
+        foreach ($columns as $position => $col) {
             if (!$col instanceof ColumnNode) {
                 continue;
             }
 
-            if (!$col->expression instanceof FunctionCallNode) {
-                continue;
+            if ($col->expression instanceof FunctionCallNode
+                && isset($this->aggregates[strtoupper($col->expression->name)])
+            ) {
+                $funcNode = $col->expression;
+                $named[spl_object_id($funcNode)] = [
+                    'name' => $col->alias ?? $this->defaultAggregateName($funcNode),
+                    'position' => $position,
+                ];
             }
 
-            $funcNode = $col->expression;
-            $funcName = strtoupper($funcNode->name);
+            $this->collectAggregateNodes($col->expression, $nodes);
+        }
 
-            if (!isset($this->aggregates[$funcName])) {
-                continue;
+        if ($having !== null) {
+            $this->collectAggregateNodes($having, $nodes);
+        }
+
+        foreach ($orderBy ?? [] as $item) {
+            if (isset($item['column']) && $item['column'] instanceof ASTNode) {
+                $this->collectAggregateNodes($item['column'], $nodes);
             }
+        }
 
-            $aggregate = $this->aggregates[$funcName];
-
-            // Determine output column name
-            $outputName = $col->alias;
-            if ($outputName === null) {
-                // Default: function call as name like "COUNT(*)" or "SUM(price)"
-                $outputName = $funcNode->name . '(';
-                $argNames = [];
-                foreach ($funcNode->arguments as $arg) {
-                    if ($arg instanceof IdentifierNode) {
-                        $argNames[] = $arg->isWildcard() ? '*' : $arg->getName();
-                    } else {
-                        $argNames[] = '?';
-                    }
-                }
-                $outputName .= implode(', ', $argNames) . ')';
-            }
-
+        $infos = [];
+        foreach ($nodes as $id => $funcNode) {
+            $aggregate = $this->aggregates[strtoupper($funcNode->name)];
             $infos[] = [
-                'name' => $outputName,
+                'name' => $named[$id]['name'] ?? null,
+                'position' => $named[$id]['position'] ?? null,
+                'node' => $funcNode,
                 'step' => $aggregate['step'],
                 'final' => $aggregate['final'],
                 'args' => $funcNode->arguments,
@@ -2367,6 +3245,67 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Default output column name for an unaliased aggregate, e.g. "COUNT(*)".
+     */
+    private function defaultAggregateName(FunctionCallNode $funcNode): string
+    {
+        $argNames = [];
+        foreach ($funcNode->arguments as $arg) {
+            if ($arg instanceof IdentifierNode) {
+                $argNames[] = $arg->isWildcard() ? '*' : $arg->getName();
+            } else {
+                $argNames[] = '?';
+            }
+        }
+        return $funcNode->name . '(' . implode(', ', $argNames) . ')';
+    }
+
+    /**
+     * Recursively collect aggregate function calls from an expression.
+     *
+     * Does not descend into subqueries - aggregates there belong to the
+     * subquery - nor into window functions, which the window path handles.
+     *
+     * @param array<int, FunctionCallNode> $out Keyed by spl_object_id
+     */
+    private function collectAggregateNodes(ASTNode $node, array &$out): void
+    {
+        if ($node instanceof SubqueryNode
+            || $node instanceof SelectStatement
+            || $node instanceof ExistsOperation
+            || $node instanceof WindowFunctionNode
+        ) {
+            return;
+        }
+
+        if ($node instanceof FunctionCallNode && isset($this->aggregates[strtoupper($node->name)])) {
+            $out[spl_object_id($node)] = $node;
+            return; // SQL forbids nesting an aggregate inside an aggregate
+        }
+
+        foreach (get_object_vars($node) as $value) {
+            $this->collectAggregateNodesFrom($value, $out);
+        }
+    }
+
+    /**
+     * Walk an AST node property (node, array, or nested array such as
+     * CaseWhenNode::$whenClauses) collecting aggregate calls.
+     *
+     * @param array<int, FunctionCallNode> $out
+     */
+    private function collectAggregateNodesFrom(mixed $value, array &$out): void
+    {
+        if ($value instanceof ASTNode) {
+            $this->collectAggregateNodes($value, $out);
+        } elseif (is_array($value)) {
+            foreach ($value as $item) {
+                $this->collectAggregateNodesFrom($item, $out);
+            }
+        }
+    }
+
+    /**
      * Execute a SELECT and return as TableInterface (for subqueries)
      *
      * Used for IN subqueries where we need to pass the result as a SetInterface
@@ -2377,6 +3316,15 @@ class VirtualDatabase implements DatabaseInterface
         if ($ast->from === null) {
             // SELECT without FROM - build SingleRowTable from expressions
             return $this->buildScalarTable($ast);
+        }
+
+        // GROUP BY / HAVING cannot be expressed as a TableInterface pipeline -
+        // this method would drop them and return the ungrouped rows. Materialise
+        // the grouped result instead (affects IN- and EXISTS-subqueries).
+        // A derived table in FROM is materialised for the same reason: the
+        // pipeline below expects a named table it can look up.
+        if (!empty($ast->groupBy) || $ast->having !== null || $ast->from instanceof SubqueryNode) {
+            return $this->rowsToTable(iterator_to_array($this->executeSelect($ast), false));
         }
 
         $tableName = $ast->from->getFullName();
@@ -2460,6 +3408,24 @@ class VirtualDatabase implements DatabaseInterface
         // Project to requested columns
         $columnNames = $this->extractColumnNames($ast->columns);
         if ($columnNames !== null) {
+            // Without JOINs the base table is never wrapped in an AliasTable, so
+            // its columns are unqualified. A qualified reference to the single
+            // FROM table ("SELECT o.user_id FROM orders o") must be stripped
+            // down to the bare column name or the projection fails.
+            if (empty($ast->joins)) {
+                $prefixes = [strtolower($tableName) . '.'];
+                if ($ast->fromAlias !== null) {
+                    $prefixes[] = strtolower($ast->fromAlias) . '.';
+                }
+                $columnNames = array_map(function (string $name) use ($prefixes): string {
+                    foreach ($prefixes as $prefix) {
+                        if (str_starts_with(strtolower($name), $prefix)) {
+                            return substr($name, strlen($prefix));
+                        }
+                    }
+                    return $name;
+                }, $columnNames);
+            }
             $table = $table->columns(...$columnNames);
         }
 
@@ -2838,7 +3804,38 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function executeSubqueryAsSet(SubqueryNode $subquery, string $expectedColumn): SetInterface
     {
-        $table = $this->executeSelectAsTable($subquery->query);
+        // A projection that is not a bare column - an aggregate, an arithmetic
+        // expression, a function call - cannot be expressed as a table-level
+        // column selection. executeSelectAsTable() silently skips the projection
+        // in that case and the set would end up carrying the *source* table's
+        // first column instead of the computed value. Materialise the rows.
+        $query = $subquery->query;
+        if ($query instanceof SelectStatement && $this->selectListIsComputed($query)) {
+            $values = [];
+            foreach ($this->executeSelect($query) as $row) {
+                $props = get_object_vars($row);
+                $value = reset($props);
+                // Set keys members by string, so a NULL would become an empty
+                // string and wrongly match rows holding ''. A NULL in an IN list
+                // can only make the predicate UNKNOWN, never TRUE, so dropping
+                // it is exact for the (non-negated) membership test this feeds.
+                if ($value !== null) {
+                    $values[] = $value;
+                }
+            }
+            return new \mini\Table\Utility\Set($expectedColumn, $values);
+        }
+
+        // `IN (SELECT … UNION SELECT …)` — the subquery is a set operation,
+        // not a plain SELECT. `IN (WITH c AS (…) SELECT … FROM c)` — it is a
+        // WITH statement. Both are legal <query expression>s under SQL:2003.
+        $table = match (true) {
+            $query instanceof UnionNode => $this->executeUnionAsTable($query),
+            $query instanceof WithStatement => $this->rowsToTable(
+                iterator_to_array($this->executeWithStatement($query))
+            ),
+            default => $this->executeSelectAsTable($query),
+        };
 
         // Get the subquery's column name(s)
         $subqueryColumns = array_keys($table->getColumns());
@@ -2857,6 +3854,62 @@ class VirtualDatabase implements DatabaseInterface
 
         // Column names differ - wrap with mapping
         return new ColumnMappedSet($table, $subqueryColumn, $expectedColumn);
+    }
+
+    /**
+     * Materialise a non-correlated subquery's first projected column as a plain
+     * value list, preserving NULLs.
+     *
+     * executeSubqueryAsSet() returns a SetInterface, and Set keys its members by
+     * string, so a NULL in the result becomes an empty string. NOT IN needs to
+     * know whether a NULL is present - it makes the whole predicate UNKNOWN -
+     * so it reads the values through here instead.
+     *
+     * @return list<mixed>
+     */
+    private function subqueryScalarValues(SubqueryNode $subquery): array
+    {
+        $query = $subquery->query;
+        $values = [];
+
+        // A computed projection (function call, arithmetic, aggregate) cannot be
+        // expressed as a table-level column selection - execute it row by row.
+        if ($query instanceof SelectStatement && $this->selectListIsComputed($query)) {
+            foreach ($this->executeSelect($query) as $row) {
+                $props = get_object_vars($row);
+                $values[] = reset($props);
+            }
+            return $values;
+        }
+
+        $table = $query instanceof UnionNode
+            ? $this->executeUnionAsTable($query)
+            : $this->executeSelectAsTable($query);
+
+        $columns = array_keys($table->getColumns());
+        if ($columns === []) {
+            throw new \RuntimeException("Subquery must select at least one column");
+        }
+        $column = $columns[0];
+
+        foreach ($table as $row) {
+            $values[] = $row->$column ?? null;
+        }
+
+        return $values;
+    }
+
+    /**
+     * Does this SELECT project a computed value rather than a bare column?
+     *
+     * Only the first column matters: IN-subqueries and scalar subqueries read
+     * the first column of each row.
+     */
+    private function selectListIsComputed(SelectStatement $ast): bool
+    {
+        $first = $ast->columns[0] ?? null;
+
+        return $first instanceof ColumnNode && !$first->expression instanceof IdentifierNode;
     }
 
     /**
@@ -2927,16 +3980,57 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Execute any query body that may appear in a subquery position.
+     *
+     * SQL:2003 puts a <query expression> - not merely a <query specification> -
+     * everywhere a subquery is allowed, so IN, EXISTS, a scalar subquery and a
+     * derived table must all accept a set operation and a WITH clause, not just
+     * a plain SELECT.
+     */
+    private function executeSubqueryBody(\mini\Parsing\SQL\AST\ASTNode $ast): iterable
+    {
+        if ($ast instanceof SelectStatement) {
+            yield from $this->executeSelect($ast);
+            return;
+        }
+        if ($ast instanceof UnionNode) {
+            yield from $this->executeUnionAsTable($ast);
+            return;
+        }
+        if ($ast instanceof WithStatement) {
+            yield from $this->executeWithStatement($ast);
+            return;
+        }
+        throw new \RuntimeException("Unexpected subquery body: " . get_class($ast));
+    }
+
+    /**
      * Execute a subquery with outer row context for correlated subqueries
      *
      * Used by ExpressionEvaluator when evaluating scalar subqueries in SELECT or WHERE.
      *
-     * @param SelectStatement $query The subquery to execute
+     * @param \mini\Parsing\SQL\AST\ASTNode $query The subquery body: a SELECT, a
+     *        set operation (UNION/INTERSECT/EXCEPT), or a WITH statement
      * @param object|null $outerRow The outer row for correlated subquery references
      * @return iterable Result rows
      */
-    private function executeSubqueryWithContext(SelectStatement $query, ?object $outerRow): iterable
+    private function executeSubqueryWithContext(\mini\Parsing\SQL\AST\ASTNode $query, ?object $outerRow): iterable
     {
+        // Only a plain SELECT has the specialised paths below. A set operation
+        // or a WITH body (SQL:2003 allows a <with clause> on any <query
+        // expression>) is executed generically, with the outer row substituted
+        // in first when it is correlated.
+        if (!$query instanceof SelectStatement) {
+            if ($outerRow !== null && $this->selectIsCorrelated($query)) {
+                $resolved = $query->deepClone();
+                $this->substituteOuterReferences($resolved, [], $outerRow);
+                yield from $this->executeSubqueryBody($resolved);
+                return;
+            }
+            yield from $this->executeSubqueryBody($query);
+            return;
+        }
+
         // For non-correlated subqueries (no outer row), use standard execution
         if ($outerRow === null) {
             yield from $this->executeSelect($query);
@@ -2951,6 +4045,44 @@ class VirtualDatabase implements DatabaseInterface
             return;
         }
 
+        if (!$this->selectIsCorrelated($query)) {
+            yield from $this->executeSelect($query);
+            return;
+        }
+
+        // Fast path: filter the single source table in place, resolving outer
+        // references from a context map. It only covers a narrow shape - see
+        // contextEvaluatorCanExpress() - because everything it does not
+        // recognise it silently treats as TRUE, and it has no notion of JOIN,
+        // GROUP BY, HAVING, DISTINCT, ORDER BY, LIMIT or OFFSET.
+        //
+        // The projection is just as restricted: projectRow()/executeAggregateOnRows()
+        // evaluate the SELECT list against *inner* rows with no outer context map,
+        // so an outer reference there would silently resolve against the inner
+        // table (SELECT u.id FROM orders o -> reads o.id) or fail to resolve at
+        // all. The select list must therefore be outer-free too.
+        $innerScope = $this->innerScopeOf($query);
+        $fastPath = $query->from instanceof IdentifierNode
+            && empty($query->joins)
+            && empty($query->groupBy)
+            && $query->having === null
+            && !$query->distinct
+            && empty($query->orderBy)
+            && $query->limit === null
+            && $query->offset === null
+            && $this->contextEvaluatorCanExpress($query->where, $innerScope)
+            && $this->nodeIsOuterFree($query->columns, $innerScope);
+
+        if (!$fastPath) {
+            // General path: substitute the outer row's values into a private
+            // clone and run it through the normal executor, so every clause
+            // behaves as it would in a standalone query.
+            $resolved = $query->deepClone();
+            $this->substituteOuterReferences($resolved, [], $outerRow);
+            yield from $this->executeSelect($resolved);
+            return;
+        }
+
         $tableName = $query->from->getFullName();
         $tableAlias = $query->fromAlias ?? $tableName;
         $table = $this->getTable($tableName);
@@ -2959,24 +4091,15 @@ class VirtualDatabase implements DatabaseInterface
             throw new \RuntimeException("Table not found: $tableName");
         }
 
-        // Find outer references in the subquery
         $outerRefs = $query->where !== null
             ? $this->findOuterReferences($query, $tableName, $tableAlias)
             : [];
 
-        if (empty($outerRefs)) {
-            // No outer references - execute normally
-            yield from $this->executeSelect($query);
-            return;
-        }
-
-        // Correlated subquery - evaluate WHERE with outer context
         // Build outer context map from outer row
         $outerContext = [];
         foreach ($outerRefs as $ref) {
-            $key = $ref['table'] . '.' . $ref['column'];
             $qualifiedCol = $ref['table'] . '.' . $ref['column'];
-            $outerContext[$key] = $outerRow->$qualifiedCol ?? $outerRow->{$ref['column']} ?? null;
+            $outerContext[$qualifiedCol] = $outerRow->$qualifiedCol ?? $outerRow->{$ref['column']} ?? null;
         }
 
         // Filter rows manually with outer context
@@ -2989,7 +4112,6 @@ class VirtualDatabase implements DatabaseInterface
 
         // Check for aggregates
         if ($this->hasAggregates($query->columns)) {
-            // Execute aggregate over filtered rows
             yield from $this->executeAggregateOnRows($query, $filteredRows);
             return;
         }
@@ -2998,6 +4120,189 @@ class VirtualDatabase implements DatabaseInterface
         foreach ($filteredRows as $row) {
             yield $this->projectRow($row, $query->columns);
         }
+    }
+
+    /**
+     * Lowercased table names/aliases introduced by this SELECT's own FROM/JOINs.
+     *
+     * @return array<int,string>
+     */
+    private function innerScopeOf(SelectStatement $query): array
+    {
+        $scope = [];
+
+        if ($query->fromAlias !== null) {
+            $scope[] = strtolower($query->fromAlias);
+        } elseif ($query->from instanceof IdentifierNode) {
+            $scope[] = strtolower($query->from->getFullName());
+        }
+
+        foreach ($query->joins as $join) {
+            if ($join->alias !== null) {
+                $scope[] = strtolower($join->alias);
+            } elseif ($join->table instanceof IdentifierNode) {
+                $scope[] = strtolower($join->table->getFullName());
+            }
+        }
+
+        return $scope;
+    }
+
+    /**
+     * Can evaluateWhereWithContext() faithfully evaluate this WHERE clause?
+     *
+     * That evaluator understands AND/OR over comparison operators whose operands
+     * are literals, identifiers, or expressions free of outer references - and
+     * returns TRUE for anything else, quietly deleting the predicate. Callers
+     * must check before using it.
+     *
+     * @param array<int,string> $innerScope Table names/aliases local to the subquery
+     */
+    private function contextEvaluatorCanExpress(?\mini\Parsing\SQL\AST\ASTNode $node, array $innerScope): bool
+    {
+        if ($node === null) {
+            return true;
+        }
+
+        if (!$node instanceof BinaryOperation) {
+            return false;
+        }
+
+        $op = strtoupper($node->operator);
+
+        if ($op === 'AND' || $op === 'OR') {
+            return $this->contextEvaluatorCanExpress($node->left, $innerScope)
+                && $this->contextEvaluatorCanExpress($node->right, $innerScope);
+        }
+
+        if (!in_array($op, ['=', '!=', '<>', '<', '<=', '>', '>='], true)) {
+            return false;
+        }
+
+        return $this->contextOperandIsEvaluable($node->left, $innerScope)
+            && $this->contextOperandIsEvaluable($node->right, $innerScope);
+    }
+
+    /**
+     * @param array<int,string> $innerScope Table names/aliases local to the subquery
+     */
+    private function contextOperandIsEvaluable(\mini\Parsing\SQL\AST\ASTNode $node, array $innerScope): bool
+    {
+        if ($node instanceof LiteralNode || $node instanceof IdentifierNode) {
+            return true;
+        }
+
+        // Any richer expression is handed to the plain evaluator, which knows
+        // nothing about the outer row - safe only if it references no outer table
+        return $this->nodeIsOuterFree($node, $innerScope);
+    }
+
+    /**
+     * Is every qualified column reference under $node resolvable inside the
+     * subquery's own scope?
+     *
+     * Anything evaluated without an outer-row context map - the fast path's
+     * SELECT-list projection, a plain expression operand - is only safe when
+     * this returns true. An outer reference in such a position resolves against
+     * the inner table instead, producing a silently wrong value.
+     *
+     * @param mixed $node ASTNode, or an array of them (e.g. a SELECT list)
+     * @param array<int,string> $innerScope Table names/aliases local to the subquery
+     */
+    private function nodeIsOuterFree(mixed $node, array $innerScope): bool
+    {
+        $scope = [];
+        $qualifiers = [];
+        $this->collectScopeAndQualifiers($node, $scope, $qualifiers);
+
+        foreach ($qualifiers as $qualifier) {
+            if (!in_array($qualifier, $innerScope, true) && !in_array($qualifier, $scope, true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Replace every outer (correlated) column reference in an AST with the
+     * corresponding value from the outer row, turning a correlated subquery
+     * into a plain one that the standard executor can run.
+     *
+     * The AST must already be a private clone - nodes are rewritten in place.
+     *
+     * @param array<int,string> $scope Lowercased table names/aliases in scope here
+     */
+    private function substituteOuterReferences(mixed $node, array $scope, object $outerRow): mixed
+    {
+        if (is_array($node)) {
+            foreach ($node as $key => $child) {
+                $node[$key] = $this->substituteOuterReferences($child, $scope, $outerRow);
+            }
+            return $node;
+        }
+
+        if (!$node instanceof \mini\Parsing\SQL\AST\ASTNode) {
+            return $node;
+        }
+
+        if ($node instanceof IdentifierNode) {
+            if (!$node->isQualified() || $node->isWildcard()) {
+                return $node;
+            }
+            $qualifier = strtolower($node->getQualifier()[0] ?? '');
+            if ($qualifier === '' || in_array($qualifier, $scope, true)) {
+                return $node;
+            }
+            $full = $node->getFullName();
+            $bare = $node->getName();
+            $value = $outerRow->$full ?? $outerRow->$bare ?? null;
+            return match (true) {
+                $value === null => new LiteralNode(null, 'null'),
+                is_bool($value) => new LiteralNode($value, 'boolean'),
+                is_int($value), is_float($value) => new LiteralNode($value, 'number'),
+                default => new LiteralNode((string) $value, 'string'),
+            };
+        }
+
+        $childScope = $scope;
+        if ($node instanceof SelectStatement) {
+            if ($node->fromAlias !== null) {
+                $childScope[] = strtolower($node->fromAlias);
+            } elseif ($node->from instanceof IdentifierNode) {
+                $childScope[] = strtolower($node->from->getFullName());
+            }
+            foreach ($node->joins as $join) {
+                if ($join->alias !== null) {
+                    $childScope[] = strtolower($join->alias);
+                } elseif ($join->table instanceof IdentifierNode) {
+                    $childScope[] = strtolower($join->table->getFullName());
+                }
+            }
+        } elseif ($node instanceof WithStatement) {
+            // A CTE name is in scope for the whole WITH, so `c.x` is a local
+            // reference here - not an outer one to be substituted away.
+            foreach ($node->ctes as $cte) {
+                $childScope[] = strtolower($cte['name']);
+            }
+        }
+
+        foreach (get_object_vars($node) as $name => $value) {
+            // A table position holding an IdentifierNode names a table, not a
+            // column - skip it. Holding a SubqueryNode it is a derived table,
+            // a whole query whose own column references still need resolving.
+            if ($node instanceof SelectStatement && $name === 'from'
+                && !$value instanceof SubqueryNode) {
+                continue;
+            }
+            if ($node instanceof \mini\Parsing\SQL\AST\JoinNode && $name === 'table'
+                && !$value instanceof SubqueryNode) {
+                continue;
+            }
+            $node->$name = $this->substituteOuterReferences($value, $childScope, $outerRow);
+        }
+
+        return $node;
     }
 
     /**
@@ -3074,6 +4379,35 @@ class VirtualDatabase implements DatabaseInterface
     private function applyExistsToTable(TableInterface $table, ExistsOperation $node): TableInterface
     {
         $subqueryAst = $node->subquery->query;
+
+        if (!$this->subqueryIsCorrelated($node->subquery)) {
+            // Non-correlated: evaluate once, then keep every row or none.
+            // Checked before touching $subqueryAst->from, which may be a
+            // derived table and has no name to look up. executeUnionBranchAsTable()
+            // also accepts a UNION/INTERSECT/EXCEPT body.
+            $exists = $this->executeUnionBranchAsTable($subqueryAst)->exists();
+
+            if ($node->negated) {
+                $exists = !$exists;
+            }
+
+            return $exists ? $table : EmptyTable::from($table);
+        }
+
+        // The specialised correlated-EXISTS strategies below all assume a single
+        // FROM table and a flat WHERE: they drop JOIN/GROUP BY/HAVING/LIMIT and
+        // mistake a joined table's alias for an outer reference. Anything richer
+        // goes through the generic per-row executor. A set operation or a WITH
+        // body has no `from`/`where` at all, so it must be routed off before
+        // existsNeedsGenericEvaluation() is asked about it.
+        if (!$subqueryAst instanceof SelectStatement) {
+            return $this->applyCorrelatedExistsGeneric($table, $node, $subqueryAst);
+        }
+
+        if ($this->existsNeedsGenericEvaluation($subqueryAst)) {
+            return $this->applyCorrelatedExistsGeneric($table, $node, $subqueryAst);
+        }
+
         $subqueryTableName = $subqueryAst->from->getFullName();
         $subqueryTableAlias = $subqueryAst->fromAlias ?? $subqueryTableName;
 
@@ -3081,16 +4415,11 @@ class VirtualDatabase implements DatabaseInterface
         $outerRefs = $this->findOuterReferences($subqueryAst, $subqueryTableName, $subqueryTableAlias);
 
         if (empty($outerRefs)) {
-            // Non-correlated: evaluate once
-            $subqueryTable = $this->executeSelectAsTable($subqueryAst);
-            $exists = $subqueryTable->exists();
-
-            if ($node->negated) {
-                $exists = !$exists;
-            }
-
-            // If EXISTS true: return all rows. If false: return empty
-            return $exists ? $table : $table->except($table);
+            // subqueryIsCorrelated() already proved there IS a correlation, so an
+            // empty result means the reference sits in a node shape
+            // collectOuterReferences() does not walk (NOT, CASE, a function call).
+            // Treating it as non-correlated would drop the predicate entirely.
+            return $this->applyCorrelatedExistsGeneric($table, $node, $subqueryAst);
         }
 
         // Try to use ExistsTable for equi-join correlations (much faster)
@@ -3099,12 +4428,21 @@ class VirtualDatabase implements DatabaseInterface
             return $existsTableResult;
         }
 
-        // Check if WHERE contains OR with outer references
-        // If so, use row-by-row evaluation instead of template approach
-        $useRowByRowEval = $this->hasOrWithOuterReferences($subqueryAst->where, $outerRefs);
+        // A correlated OR cannot be expressed as a conjunction of binds. Use the
+        // row-by-row context evaluator when it can express the predicate, and
+        // the general executor otherwise.
+        if ($this->hasOrWithOuterReferences($subqueryAst->where, $outerRefs)) {
+            return $this->contextEvaluatorCanExpress($subqueryAst->where, $this->innerScopeOf($subqueryAst))
+                ? $this->applyCorrelatedExistsRowByRow($table, $node, $subqueryAst, $outerRefs)
+                : $this->applyCorrelatedExistsGeneric($table, $node, $subqueryAst);
+        }
 
-        if ($useRowByRowEval) {
-            return $this->applyCorrelatedExistsRowByRow($table, $node, $subqueryAst, $outerRefs);
+        // The template strategy can only express a handful of predicate shapes and
+        // silently DROPS everything else (NOT, <>, IN, function calls, reversed
+        // operands), which turns a filtered EXISTS into an unfiltered one. Only
+        // use it when every predicate survives the translation.
+        if (!$this->correlatedTemplateCanExpress($subqueryAst, $outerRefs)) {
+            return $this->applyCorrelatedExistsGeneric($table, $node, $subqueryAst);
         }
 
         // Build template and evaluate per row (more efficient for AND-only cases)
@@ -3166,6 +4504,250 @@ class VirtualDatabase implements DatabaseInterface
                 $result->insert((array) $row);
             }
             return $result;
+        }
+    }
+
+    /**
+     * Can every predicate of this correlated subquery be translated into the
+     * bind-based template built by {@see buildCorrelatedTemplate()}?
+     *
+     * The translator only understands `innerCol OP outerRef` and
+     * `innerCol OP literal` joined by AND. Anything else it drops on the floor,
+     * so the caller must fall back to a general evaluator instead.
+     */
+    private function correlatedTemplateCanExpress(SelectStatement $ast, array $outerRefs): bool
+    {
+        if ($ast->where === null) {
+            return false;
+        }
+
+        $predicates = [];
+        $this->flattenAndPredicates($ast->where, $predicates);
+
+        foreach ($predicates as $pred) {
+            if (!$pred instanceof BinaryOperation
+                || !in_array($pred->operator, ['=', '<', '<=', '>', '>='], true)
+                || !$pred->left instanceof IdentifierNode
+            ) {
+                return false;
+            }
+
+            if ($pred->right instanceof LiteralNode) {
+                continue;
+            }
+
+            if (!$pred->right instanceof IdentifierNode) {
+                return false;
+            }
+
+            $qualifier = $pred->right->getQualifier()[0] ?? null;
+            $matched = false;
+            foreach ($outerRefs as $ref) {
+                if ($qualifier !== null
+                    && strtolower($qualifier) === strtolower($ref['table'])
+                    && $pred->right->getName() === $ref['column']
+                ) {
+                    $matched = true;
+                    break;
+                }
+            }
+
+            if (!$matched) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Does this correlated EXISTS subquery need the generic per-row executor?
+     *
+     * True whenever the subquery uses a clause the specialised strategies drop
+     * (JOIN, GROUP BY, HAVING, DISTINCT, LIMIT, OFFSET, derived FROM) or nests
+     * another subquery, whose aliases their outer-reference detection misreads
+     * as correlations.
+     */
+    private function existsNeedsGenericEvaluation(SelectStatement $ast): bool
+    {
+        return !empty($ast->joins)
+            || !empty($ast->groupBy)
+            || $ast->having !== null
+            || $ast->distinct
+            || $ast->limit !== null
+            || $ast->offset !== null
+            || $ast->from instanceof SubqueryNode
+            || ($ast->where !== null && $this->astContainsSubquery($ast->where));
+    }
+
+    /**
+     * Does this AST fragment contain a nested subquery or EXISTS?
+     */
+    private function astContainsSubquery(mixed $node): bool
+    {
+        if (is_array($node)) {
+            foreach ($node as $child) {
+                if ($this->astContainsSubquery($child)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if (!$node instanceof \mini\Parsing\SQL\AST\ASTNode) {
+            return false;
+        }
+
+        if ($node instanceof SubqueryNode || $node instanceof ExistsOperation) {
+            return true;
+        }
+
+        foreach (get_object_vars($node) as $value) {
+            if ($this->astContainsSubquery($value)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Evaluate a correlated EXISTS one outer row at a time.
+     *
+     * Substitutes the outer row's values into a clone of the subquery and runs
+     * it through the normal executor, so every SQL clause behaves exactly as it
+     * would in a standalone query. Slower than the specialised strategies, but
+     * correct for the shapes they cannot express.
+     */
+    private function applyCorrelatedExistsGeneric(
+        TableInterface $table,
+        ExistsOperation $node,
+        \mini\Parsing\SQL\AST\ASTNode $subqueryAst
+    ): TableInterface {
+        $result = new \mini\Table\InMemoryTable(...array_values($table->getColumns()));
+
+        foreach ($table as $row) {
+            $resolved = $subqueryAst->deepClone();
+            $this->substituteOuterReferences($resolved, [], $row);
+
+            $exists = false;
+            foreach ($this->executeSubqueryBody($resolved) as $_) {
+                $exists = true;
+                break;
+            }
+
+            if ($node->negated) {
+                $exists = !$exists;
+            }
+
+            if ($exists) {
+                $result->insert((array) $row);
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Is this subquery correlated with an enclosing query?
+     *
+     * A subquery is correlated when it references a table (or alias) that it
+     * does not itself introduce. Correlated subqueries MUST be evaluated once
+     * per outer row; they can never be hoisted out and evaluated a single time.
+     *
+     * The check is deliberately conservative: any qualified identifier whose
+     * qualifier is not in scope anywhere inside the subquery counts as a
+     * correlation. Over-reporting only costs a slower execution path;
+     * under-reporting produces silently wrong results.
+     */
+    private function subqueryIsCorrelated(SubqueryNode $subquery): bool
+    {
+        return $this->selectIsCorrelated($subquery->query);
+    }
+
+    /**
+     * Does this query reference a table it does not itself introduce?
+     *
+     * @see subqueryIsCorrelated()
+     */
+    private function selectIsCorrelated(\mini\Parsing\SQL\AST\ASTNode $query): bool
+    {
+        $scope = [];
+        $qualifiers = [];
+        $this->collectScopeAndQualifiers($query, $scope, $qualifiers);
+
+        foreach ($qualifiers as $qualifier) {
+            if (!in_array($qualifier, $scope, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Walk an AST collecting table scopes (FROM/JOIN names and aliases) and
+     * the qualifiers used by every qualified column reference.
+     *
+     * @param array<int,string> $scope      Lowercased table names/aliases in scope
+     * @param array<int,string> $qualifiers Lowercased qualifiers seen on column refs
+     */
+    private function collectScopeAndQualifiers(mixed $node, array &$scope, array &$qualifiers): void
+    {
+        if (is_array($node)) {
+            foreach ($node as $child) {
+                $this->collectScopeAndQualifiers($child, $scope, $qualifiers);
+            }
+            return;
+        }
+
+        if (!$node instanceof \mini\Parsing\SQL\AST\ASTNode) {
+            return;
+        }
+
+        if ($node instanceof SelectStatement) {
+            // SQL:2003 - once a table is aliased, only the alias is in scope.
+            if ($node->fromAlias !== null) {
+                $scope[] = strtolower($node->fromAlias);
+            } elseif ($node->from instanceof IdentifierNode) {
+                $scope[] = strtolower($node->from->getFullName());
+            }
+            foreach ($node->joins as $join) {
+                if ($join->alias !== null) {
+                    $scope[] = strtolower($join->alias);
+                } elseif ($join->table instanceof IdentifierNode) {
+                    $scope[] = strtolower($join->table->getFullName());
+                }
+            }
+        } elseif ($node instanceof WithStatement) {
+            foreach ($node->ctes as $cte) {
+                $scope[] = strtolower($cte['name']);
+            }
+        } elseif ($node instanceof IdentifierNode) {
+            if ($node->isQualified()) {
+                $qualifier = $node->getQualifier()[0] ?? null;
+                if ($qualifier !== null) {
+                    $qualifiers[] = strtolower($qualifier);
+                }
+            }
+            return;
+        }
+
+        foreach (get_object_vars($node) as $name => $value) {
+            // Skip a table position only when it names a table. A derived table
+            // (SubqueryNode) must be walked: `(SELECT COUNT(*) FROM (SELECT *
+            // FROM orders o WHERE o.user_id = u.id) d)` hides its only
+            // correlation there, and skipping it reports the subquery as
+            // uncorrelated - evaluated once, same answer for every outer row.
+            if ($node instanceof SelectStatement && $name === 'from'
+                && !$value instanceof SubqueryNode) {
+                continue;
+            }
+            if ($node instanceof \mini\Parsing\SQL\AST\JoinNode && $name === 'table'
+                && !$value instanceof SubqueryNode) {
+                continue;
+            }
+            $this->collectScopeAndQualifiers($value, $scope, $qualifiers);
         }
     }
 
@@ -4306,8 +5888,13 @@ class VirtualDatabase implements DatabaseInterface
                 $value = $node->left->value;
                 $flippedOp = $this->flipComparisonOp($op);
 
+                // Every comparison against NULL is UNKNOWN, not just `= NULL`.
+                if ($value === null) {
+                    return EmptyTable::from($table);
+                }
+
                 return match ($flippedOp) {
-                    '=' => $value === null ? EmptyTable::from($table) : $table->eq($column, $value),
+                    '=' => $table->eq($column, $value),
                     '<' => $table->lt($column, $value),
                     '<=' => $table->lte($column, $value),
                     '>' => $table->gt($column, $value),
@@ -4318,10 +5905,14 @@ class VirtualDatabase implements DatabaseInterface
             }
 
             // Check if we can push to table (column = value pattern)
-            // Value can be literal, bound placeholder, or subquery
+            // Value can be literal, bound placeholder, or an UNCORRELATED subquery.
+            // A correlated subquery yields a different value for every outer row,
+            // so hoisting it out and evaluating it once silently answers a
+            // different question ("WHERE total > (global avg)" instead of
+            // "WHERE total > (avg for this row's user)").
             $isValueNode = fn($n) => $n instanceof LiteralNode
                 || ($n instanceof PlaceholderNode && $n->isBound)
-                || $n instanceof SubqueryNode;
+                || ($n instanceof SubqueryNode && !$this->subqueryIsCorrelated($n));
 
             $canPushToTable = $node->left instanceof IdentifierNode && $isValueNode($node->right);
 
@@ -4330,10 +5921,17 @@ class VirtualDatabase implements DatabaseInterface
                 // Evaluate right side - this handles both literals and subqueries
                 $value = $this->evaluator->evaluate($node->right, null);
 
-                // SQL standard: col = NULL always returns no rows (NULL = NULL is UNKNOWN, not TRUE)
+                // SQL standard: *any* comparison against NULL is UNKNOWN, so no
+                // rows match. This covers `col = NULL` and also a scalar
+                // subquery that came back NULL - `col < (SELECT ...)` used to
+                // reach Predicate::lt() and leak a PHP TypeError.
                 // For IS NULL semantics, use the IsNullOperation branch instead
+                if ($value === null) {
+                    return EmptyTable::from($table);
+                }
+
                 return match ($op) {
-                    '=' => $value === null ? EmptyTable::from($table) : $table->eq($column, $value),
+                    '=' => $table->eq($column, $value),
                     '<' => $table->lt($column, $value),
                     '<=' => $table->lte($column, $value),
                     '>' => $table->gt($column, $value),
@@ -4368,19 +5966,40 @@ class VirtualDatabase implements DatabaseInterface
 
         // LIKE operation
         if ($node instanceof \mini\Parsing\SQL\AST\LikeOperation) {
+            // Only a bare column can be pushed down to the table; an expression
+            // on the left (UPPER(email) LIKE ..., a || b LIKE ...) is evaluated
+            // row by row, the same way IN handles a non-column left side.
             if (!$node->left instanceof IdentifierNode) {
-                throw new \RuntimeException("Left side of LIKE must be a column");
+                return $this->filterByExpression($table, $node);
+            }
+            // The pattern is hoisted out of the row loop, so it has to be
+            // row-independent. `col LIKE other_col` is evaluated row by row.
+            if (!$this->expressionIsConstant($node->pattern)) {
+                return $this->filterByExpression($table, $node);
             }
             $column = $this->resolveColumnForTable($this->buildQualifiedColumnName($node->left), $table);
             $pattern = $this->evaluator->evaluate($node->pattern, null);
-            $result = $table->like($column, $pattern);
-            return $node->negated ? $table->except($result) : $result;
+            // NULL pattern makes both LIKE and NOT LIKE UNKNOWN for every row
+            if ($pattern === null) {
+                return EmptyTable::from($table);
+            }
+            if (!$node->negated) {
+                return $table->like($column, $pattern);
+            }
+            // NOT LIKE is UNKNOWN - not TRUE - when the column is NULL, so the
+            // NULL rows belong to neither LIKE nor NOT LIKE. Excluding the
+            // matches from the table would keep them, so evaluate row by row.
+            return $this->filterByExpression($table, $node);
         }
 
         // IS NULL operation
         if ($node instanceof \mini\Parsing\SQL\AST\IsNullOperation) {
+            // IS NULL applies to any expression, not just a column. Only a bare
+            // column can be pushed down to the table; anything else
+            // (COALESCE(a, b) IS NULL, (a || b) IS NOT NULL, ...) is evaluated
+            // row by row.
             if (!$node->expression instanceof IdentifierNode) {
-                throw new \RuntimeException("IS NULL expression must be a column");
+                return $this->filterByExpression($table, $node);
             }
             $column = $this->resolveColumnForTable($this->buildQualifiedColumnName($node->expression), $table);
             $nullRows = $table->eq($column, null);
@@ -4393,22 +6012,89 @@ class VirtualDatabase implements DatabaseInterface
             if (!$node->left instanceof IdentifierNode) {
                 return $this->filterByExpression($table, $node);
             }
+            // A correlated IN-subquery produces a different set per outer row and
+            // cannot be materialised once - evaluate it row by row instead.
+            if ($node->isSubquery() && $this->subqueryIsCorrelated($node->values)) {
+                return $this->filterByExpression($table, $node);
+            }
+            // A literal list is hoisted out of the row loop, so every element has
+            // to be row-independent. `col IN (other_col, 1)` is done row by row.
+            if (!$node->isSubquery()) {
+                foreach ($node->values as $valueNode) {
+                    if (!$this->expressionIsConstant($valueNode)) {
+                        return $this->filterByExpression($table, $node);
+                    }
+                }
+            }
             $column = $this->resolveColumnForTable($this->buildQualifiedColumnName($node->left), $table);
 
-            if ($node->isSubquery()) {
-                // Subquery: execute and pass as SetInterface
-                $set = $this->executeSubqueryAsSet($node->values, $column);
-            } else {
-                // Literal list: build in-memory Set
-                $values = [];
-                foreach ($node->values as $valueNode) {
-                    $values[] = $this->evaluator->evaluate($valueNode, null);
+            if (!$node->negated) {
+                if ($node->isSubquery()) {
+                    $set = $this->executeSubqueryAsSet($node->values, $column);
+                } else {
+                    // NULLs are dropped: they can only make IN UNKNOWN, never
+                    // TRUE, and Set would turn them into empty strings.
+                    $values = [];
+                    foreach ($node->values as $valueNode) {
+                        $value = $this->evaluator->evaluate($valueNode, null);
+                        if ($value !== null) {
+                            $values[] = $value;
+                        }
+                    }
+                    $set = new \mini\Table\Utility\Set($column, $values);
                 }
-                $set = new \mini\Table\Utility\Set($column, $values);
+
+                return $this->applyInWithIndexAwareness($table, $column, $set);
             }
 
-            $result = $this->applyInWithIndexAwareness($table, $column, $set);
-            return $node->negated ? $table->except($result) : $result;
+            // NOT IN follows three-valued logic: it is UNKNOWN - not TRUE - when
+            // the left operand is NULL, and UNKNOWN for every non-matching row
+            // when the value list contains a NULL. Those rows belong to neither
+            // IN nor NOT IN, but $table->except($matches) would keep them.
+            //
+            // The values are read directly rather than through Set, because Set
+            // stores members as string array keys and so cannot represent NULL
+            // at all - it would silently turn one into an empty string.
+            $values = $node->isSubquery()
+                ? $this->subqueryScalarValues($node->values)
+                : array_map(fn($v) => $this->evaluator->evaluate($v, null), $node->values);
+
+            $listValues = [];
+            $listHasNull = false;
+            foreach ($values as $value) {
+                if ($value === null) {
+                    $listHasNull = true;
+                } else {
+                    $listValues[] = $value;
+                }
+            }
+
+            // Empty list: NOT IN () is TRUE for every row, NULL ones included.
+            if ($listValues === [] && !$listHasNull) {
+                return $table;
+            }
+
+            // A NULL anywhere in the list makes every non-matching row UNKNOWN,
+            // and matching rows are FALSE - so nothing can be TRUE.
+            if ($listHasNull) {
+                return EmptyTable::from($table);
+            }
+
+            $result = new \mini\Table\InMemoryTable(...array_values($table->getColumns()));
+            foreach ($table as $row) {
+                $left = $row->$column ?? null;
+                if ($left === null) {
+                    continue; // UNKNOWN
+                }
+                foreach ($listValues as $value) {
+                    if (ExpressionEvaluator::valuesEqual($left, $value)) {
+                        continue 2; // FALSE
+                    }
+                }
+                $result->insert((array)$row);
+            }
+
+            return $result;
         }
 
         // EXISTS operation
@@ -4427,6 +6113,10 @@ class VirtualDatabase implements DatabaseInterface
                 $column = $this->buildQualifiedColumnName($node->expression);
                 $low = $this->evaluator->evaluate($node->low, null);
                 $high = $this->evaluator->evaluate($node->high, null);
+                // A NULL bound makes BETWEEN UNKNOWN for every row
+                if ($low === null || $high === null) {
+                    return EmptyTable::from($table);
+                }
                 return $table->gte($column, $low)->lte($column, $high);
             }
             // Fall back to row-by-row evaluation
@@ -4918,6 +6608,45 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Can this expression be evaluated once, without a row?
+     *
+     * Pushdown paths that hoist a sub-expression out of the row loop (the LIKE
+     * pattern, an IN value list) evaluate it with a null row. A column reference
+     * there throws "Cannot evaluate column reference without row context", so
+     * those callers use this to fall back to row-by-row evaluation instead.
+     */
+    private function expressionIsConstant(\mini\Parsing\SQL\AST\ASTNode $node): bool
+    {
+        if ($node instanceof LiteralNode) {
+            return true;
+        }
+
+        if ($node instanceof PlaceholderNode) {
+            return $node->isBound;
+        }
+
+        if ($node instanceof BinaryOperation) {
+            return $this->expressionIsConstant($node->left)
+                && $this->expressionIsConstant($node->right);
+        }
+
+        if ($node instanceof UnaryOperation) {
+            return $this->expressionIsConstant($node->expression);
+        }
+
+        if ($node instanceof \mini\Parsing\SQL\AST\FunctionCallNode) {
+            foreach ($node->arguments as $argument) {
+                if (!$this->expressionIsConstant($argument)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
      * Build a Predicate from an AST node (for OR clauses)
      */
     private function buildPredicateFromAst(\mini\Parsing\SQL\AST\ASTNode $node): \mini\Table\Predicate
@@ -4943,9 +6672,18 @@ class VirtualDatabase implements DatabaseInterface
             $column = $this->buildQualifiedColumnName($node->left);
             $value = $this->evaluator->evaluate($node->right, null);
 
-            // SQL standard: col = NULL always evaluates to UNKNOWN (no matches)
-            if ($value === null && $op === '=') {
-                return \mini\Table\Predicate::never();
+            // SQL standard: *any* comparison against NULL evaluates to UNKNOWN,
+            // not just `col = NULL`. Without this, `col < NULL` reached
+            // Predicate::lt() and leaked a PHP TypeError.
+            //
+            // Decline the pushdown rather than returning Predicate::never():
+            // never() only short-circuits Predicate::test(), and TableInterface
+            // ::or() consults the condition list instead, so a never() that then
+            // gets a condition chained onto it (`col = NULL AND col > 1`) loses
+            // its "matches nothing" flag and silently widens the result. The
+            // caller catches this and evaluates the OR row by row.
+            if ($value === null) {
+                throw new \RuntimeException("Comparison against NULL cannot be expressed as a predicate");
             }
 
             $p = new \mini\Table\Predicate();
@@ -5013,10 +6751,10 @@ class VirtualDatabase implements DatabaseInterface
             $column = $this->buildQualifiedColumnName($node->left);
             $value = $this->evaluator->evaluate($node->right, null);
 
-            // SQL standard: col = NULL always evaluates to UNKNOWN (no matches)
-            // Return Predicate::never() to indicate this branch can't match
-            if ($value === null && $op === '=') {
-                return \mini\Table\Predicate::never();
+            // Any comparison against NULL is UNKNOWN. Decline the pushdown - see
+            // buildPredicateFromAst() for why never() is not usable here.
+            if ($value === null) {
+                throw new \RuntimeException("Comparison against NULL cannot be expressed as a predicate");
             }
 
             return match ($op) {
@@ -5063,6 +6801,14 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function applyOrderBy(TableInterface $table, array $orderBy): TableInterface
     {
+        // Column set used to validate the ORDER BY references. A PartialQuery
+        // resolves its schema by executing a query against its own database,
+        // which for a PartialQuery registered as a table in that same database
+        // recurses (a pre-existing defect, also reachable through WHERE), so
+        // skip validation rather than force the schema fetch. An empty column
+        // set means "schema not known", which is also not validatable.
+        $available = $table instanceof PartialQuery ? null : ($table->getColumns() ?: null);
+
         $parts = [];
         foreach ($orderBy as $item) {
             $colExpr = $item['column'];
@@ -5072,7 +6818,28 @@ class VirtualDatabase implements DatabaseInterface
                 throw new \RuntimeException("ORDER BY expression must be a column");
             }
 
-            $parts[] = $this->buildQualifiedColumnName($colExpr) . ' ' . $direction;
+            $name = $this->buildQualifiedColumnName($colExpr);
+
+            if ($available === null) {
+                $parts[] = $name . ' ' . $direction;
+                continue;
+            }
+
+            $resolved = $this->resolveColumnForTable($name, $table);
+
+            // Fail fast: an ORDER BY naming a column the table does not expose
+            // used to be handed to order() anyway, where it silently no-opped
+            // (or, over a set operation, partially pushed into one branch and
+            // scrambled the output). Sorting by something that does not exist
+            // is always a bug in the query.
+            if (!isset($available[$resolved])) {
+                throw new \RuntimeException(
+                    "ORDER BY references unknown column: {$name} (available: "
+                    . implode(', ', array_keys($available)) . ")"
+                );
+            }
+
+            $parts[] = $resolved . ' ' . $direction;
         }
 
         return $table->order(implode(', ', $parts));
@@ -5456,11 +7223,23 @@ class VirtualDatabase implements DatabaseInterface
             }
         }
 
-        // If colName is unqualified, look for qualified match (e.g., "id" matches "t1.id")
+        // If colName is unqualified, look for qualified matches (e.g., "id" matches "t1.id").
+        // More than one match means the reference is ambiguous across the joined
+        // tables. Silently picking the first one made the answer depend on the
+        // order of tables in FROM, so reject it instead of guessing.
+        $matches = [];
         foreach ($columns as $name => $_) {
             if (str_ends_with($name, '.' . $colName)) {
-                return $name;
+                $matches[] = $name;
             }
+        }
+        if (count($matches) > 1) {
+            throw new \RuntimeException(
+                "Ambiguous column name: {$colName} (matches " . implode(', ', $matches) . ")"
+            );
+        }
+        if (count($matches) === 1) {
+            return $matches[0];
         }
 
         // No match found - return original (will likely cause an error downstream)

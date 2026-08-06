@@ -73,6 +73,13 @@ class ExceptTable extends AbstractTableWrapper
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
+        // LIMIT 0 must emit nothing. The loops below use an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
+
         foreach (parent::materialize(...$allAdditional) as $id => $row) {
             // Build member object from excluded set's columns
             $member = new stdClass();

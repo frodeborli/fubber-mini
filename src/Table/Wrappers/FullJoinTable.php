@@ -8,6 +8,7 @@ use mini\Table\Contracts\SetInterface;
 use mini\Table\Contracts\TableInterface;
 use mini\Table\OrderDef;
 use mini\Table\Types\IndexType;
+use mini\Table\Types\Operator;
 use mini\Table\Predicate;
 use Traversable;
 
@@ -100,6 +101,13 @@ class FullJoinTable extends AbstractTable
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
+        // LIMIT 0 must emit nothing. The loops below use an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
+
         // Track which right rows have been matched
         $matchedRightIds = [];
 
@@ -110,6 +118,12 @@ class FullJoinTable extends AbstractTable
             foreach ($this->right as $rightId => $rightRow) {
                 // Bind right values and test against left row
                 $bindings = $this->extractBindings($rightRow);
+
+                // A comparison with NULL is UNKNOWN, never a match.
+                if (in_array(null, $bindings, true)) {
+                    continue;
+                }
+
                 $boundPredicate = $this->bindPredicate->bind($bindings);
 
                 if ($boundPredicate->test($leftRow)) {
@@ -233,37 +247,37 @@ class FullJoinTable extends AbstractTable
 
     public function eq(string $column, mixed $value): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->eq($column, $value));
+        return new FilteredTable($this, $column, Operator::Eq, $value);
     }
 
     public function lt(string $column, mixed $value): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->lt($column, $value));
+        return new FilteredTable($this, $column, Operator::Lt, $value);
     }
 
     public function lte(string $column, mixed $value): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->lte($column, $value));
+        return new FilteredTable($this, $column, Operator::Lte, $value);
     }
 
     public function gt(string $column, mixed $value): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->gt($column, $value));
+        return new FilteredTable($this, $column, Operator::Gt, $value);
     }
 
     public function gte(string $column, mixed $value): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->gte($column, $value));
+        return new FilteredTable($this, $column, Operator::Gte, $value);
     }
 
     public function in(string $column, SetInterface $values): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->in($column, $values));
+        return new FilteredTable($this, $column, Operator::In, $values);
     }
 
     public function like(string $column, string $pattern): TableInterface
     {
-        return new FilteredTable($this, (new Predicate())->like($column, $pattern));
+        return new FilteredTable($this, $column, Operator::Like, $pattern);
     }
 
     public function count(): int

@@ -1349,14 +1349,28 @@ $test = new class extends Test {
     {
         $vdb = $this->createExpressionTestVdb();
 
-        // NULL = NULL is true in VDB (matches PHP behavior)
-        // Note: Standard SQL says NULL = NULL is UNKNOWN, but VDB follows PHP
+        // SQL three-valued logic: any comparison with a NULL operand is
+        // UNKNOWN (NULL), including NULL = NULL. Use IS NULL to test for NULL.
         $result = $this->queryOne($vdb, 'SELECT NULL = NULL AS result FROM users LIMIT 1');
+        $this->assertNull($result);
+
+        $result = $this->queryOne($vdb, 'SELECT NULL != 5 AS result FROM users LIMIT 1');
+        $this->assertNull($result);
+
+        // <> and != are synonyms and must agree
+        $result = $this->queryOne($vdb, 'SELECT NULL <> 5 AS result FROM users LIMIT 1');
+        $this->assertNull($result);
+
+        $result = $this->queryOne($vdb, 'SELECT NULL != NULL AS result FROM users LIMIT 1');
+        $this->assertNull($result);
+
+        // IS NULL is the way to test for NULL, and it is never UNKNOWN
+        $result = $this->queryOne($vdb, 'SELECT NULL IS NULL AS result FROM users LIMIT 1');
         $this->assertSame(true, $result);
 
-        // NULL != value
-        $result = $this->queryOne($vdb, 'SELECT NULL != 5 AS result FROM users LIMIT 1');
-        $this->assertSame(true, $result);
+        // Ordering comparisons with NULL are UNKNOWN too
+        $result = $this->queryOne($vdb, 'SELECT NULL < 5 AS result FROM users LIMIT 1');
+        $this->assertNull($result);
     }
 
     public function testIsNull(): void

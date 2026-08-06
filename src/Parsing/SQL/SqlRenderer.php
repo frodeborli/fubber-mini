@@ -465,7 +465,24 @@ class SqlRenderer
         // when a real use case for those emerges, render them via a
         // SELECT * FROM ( … ) wrapper instead of `( … )` so SQLite
         // still parses the output.
-        return "$left $op $right";
+        $sql = "$left $op $right";
+
+        // Trailing ORDER BY / LIMIT / OFFSET belong to the whole set result.
+        if (!empty($node->orderBy)) {
+            $orderParts = [];
+            foreach ($node->orderBy as $order) {
+                $part = $this->render($order['column']);
+                if (isset($order['direction']) && strtoupper($order['direction']) === 'DESC') {
+                    $part .= ' DESC';
+                }
+                $orderParts[] = $part;
+            }
+            $sql .= ' ORDER BY ' . implode(', ', $orderParts);
+        }
+
+        $sql .= $this->renderLimitOffset($node->limit, $node->offset);
+
+        return $sql;
     }
 
     private function renderSubquery(SubqueryNode $node): string
@@ -744,12 +761,7 @@ class SqlRenderer
         return match (true) {
             $node instanceof WithStatement => $this->renameInWith($node, $oldName, $newName),
             $node instanceof SelectStatement => $this->renameInSelect($node, $oldName, $newName),
-            $node instanceof UnionNode => new UnionNode(
-                $this->renameIdentifier($node->left, $oldName, $newName),
-                $this->renameIdentifier($node->right, $oldName, $newName),
-                $node->all,
-                $node->operator
-            ),
+            $node instanceof UnionNode => $this->renameInUnion($node, $oldName, $newName),
             $node instanceof SubqueryNode => new SubqueryNode(
                 $this->renameIdentifier($node->query, $oldName, $newName)
             ),
@@ -822,6 +834,28 @@ class SqlRenderer
             $node->recursive,
             $this->renameIdentifier($node->query, $oldName, $newName)
         );
+    }
+
+    private function renameInUnion(UnionNode $node, string $oldName, string $newName): UnionNode
+    {
+        $new = new UnionNode(
+            $this->renameIdentifier($node->left, $oldName, $newName),
+            $this->renameIdentifier($node->right, $oldName, $newName),
+            $node->all,
+            $node->operator
+        );
+
+        if ($node->orderBy !== null) {
+            $new->orderBy = array_map(fn($o) => [
+                'column' => $this->renameIdentifier($o['column'], $oldName, $newName),
+                'direction' => $o['direction'] ?? 'ASC',
+            ], $node->orderBy);
+        }
+
+        $new->limit = $node->limit;
+        $new->offset = $node->offset;
+
+        return $new;
     }
 
     private function renameInSelect(SelectStatement $node, string $oldName, string $newName): SelectStatement

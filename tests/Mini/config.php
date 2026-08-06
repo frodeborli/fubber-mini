@@ -6,47 +6,48 @@
  */
 
 require __DIR__ . '/../../ensure-autoloader.php';
-require_once __DIR__ . '/../assert.php';
 
 use mini\Mini;
+use mini\Test;
 
-$mini = Mini::$mini;
+$test = new class extends Test {
 
-// Bootstrap needed for some operations
-\mini\bootstrap();
+    public function testLoadConfigReturnsDefaultForMissingFile(): void
+    {
+        $this->assertSame('default-value', Mini::$mini->loadConfig('nonexistent-file.php', 'default-value'));
+    }
 
-// Test: loadConfig() with default value for missing file
-$result = $mini->loadConfig('nonexistent-file.php', 'default-value');
-assert_eq('default-value', $result);
-echo "✓ loadConfig() returns default for missing file\n";
+    public function testLoadConfigReturnsNullDefaultForMissingFile(): void
+    {
+        $this->assertNull(Mini::$mini->loadConfig('nonexistent-file.php', null));
+    }
 
-// Test: loadConfig() with null default
-$result = $mini->loadConfig('nonexistent-file.php', null);
-assert_null($result);
-echo "✓ loadConfig() returns null default for missing file\n";
+    public function testLoadConfigThrowsForMissingFileWithoutDefault(): void
+    {
+        $this->assertThrows(
+            fn() => Mini::$mini->loadConfig('nonexistent-file.php'),
+            \Exception::class
+        );
+    }
 
-// Test: loadConfig() throws without default for missing file
-assert_throws(
-    fn() => $mini->loadConfig('nonexistent-file.php'),
-    Exception::class
-);
-echo "✓ loadConfig() throws for missing file without default\n";
+    public function testLoadServiceConfigReturnsDefaultForMissingServiceConfig(): void
+    {
+        $this->assertSame('default', Mini::$mini->loadServiceConfig('NonExistent\\Service\\Class', 'default'));
+    }
 
-// Test: loadServiceConfig() converts class name to path
-$result = $mini->loadServiceConfig('NonExistent\\Service\\Class', 'default');
-assert_eq('default', $result);
-echo "✓ loadServiceConfig() returns default for missing service config\n";
+    public function testLoadServiceConfigThrowsForMissingConfigWithoutDefault(): void
+    {
+        $this->assertThrows(
+            fn() => Mini::$mini->loadServiceConfig('NonExistent\\Service\\Class'),
+            \Exception::class
+        );
+    }
 
-// Test: loadServiceConfig() throws without default
-assert_throws(
-    fn() => $mini->loadServiceConfig('NonExistent\\Service\\Class'),
-    Exception::class
-);
-echo "✓ loadServiceConfig() throws for missing config without default\n";
+    public function testPathsRegistryIsAccessible(): void
+    {
+        $this->assertNotNull(Mini::$mini->paths);
+        $this->assertNotNull(Mini::$mini->paths->config);
+    }
+};
 
-// Test: paths registry is accessible
-assert_not_null($mini->paths);
-assert_not_null($mini->paths->config);
-echo "✓ paths registry is accessible\n";
-
-echo "\n✅ All config tests passed!\n";
+exit($test->run());

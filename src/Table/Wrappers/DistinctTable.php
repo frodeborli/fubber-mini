@@ -79,6 +79,13 @@ class DistinctTable extends AbstractTableWrapper
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
+        // LIMIT 0 must emit nothing. The loop below uses an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
+
         foreach (parent::materialize(...$additionalColumns) as $id => $row) {
             // Build key from visible columns only
             $key = $this->rowKey($row, $visibleCols);

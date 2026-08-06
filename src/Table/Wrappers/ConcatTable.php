@@ -66,6 +66,13 @@ class ConcatTable extends AbstractTable
         $limit = $this->getLimit();
         $offset = $this->getOffset();
 
+        // LIMIT 0 must emit nothing. The loops below use an emit-then-test
+        // pattern, which would otherwise always yield one row before the
+        // limit is first consulted.
+        if ($limit !== null && $limit <= 0) {
+            return;
+        }
+
         // Yield from first table
         // If column info unavailable, iterate directly (SELECT * semantics)
         $aIterator = empty($aCols) ? $this->a : $this->a->columns(...$aCols);

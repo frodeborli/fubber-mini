@@ -6,48 +6,77 @@
  */
 
 require __DIR__ . '/../../ensure-autoloader.php';
-require_once __DIR__ . '/../assert.php';
 
 use mini\Mini;
 use mini\Lifetime;
+use mini\Test;
 
-$mini = Mini::$mini;
+$test = new class extends Test {
 
-// Register a scoped service before bootstrap
-$mini->addService('test.scoped', Lifetime::Scoped, fn() => new stdClass());
+    /** Exception from resolving a Scoped service while still in the Bootstrap phase */
+    private ?\Throwable $scopedBeforeBootstrapError = null;
 
-// Test: Accessing scoped service before bootstrap throws
-assert_throws(
-    fn() => $mini->get('test.scoped'),
-    LogicException::class
-);
-echo "✓ Scoped service access throws before bootstrap\n";
+    /** Exception from getRequestScope() while still in the Bootstrap phase (not in fiber) */
+    private ?\Throwable $requestScopeBeforeBootstrapError = null;
 
-// Test: getRequestScope() throws before bootstrap (not in fiber)
-assert_throws(
-    fn() => $mini->getRequestScope(),
-    LogicException::class
-);
-echo "✓ getRequestScope() throws before bootstrap\n";
+    protected function setUp(): void
+    {
+        $mini = Mini::$mini;
 
-// Bootstrap
-\mini\bootstrap();
+        // Register a scoped service before bootstrap
+        $mini->addService('test.scoped', Lifetime::Scoped, fn() => new \stdClass());
 
-// Test: getRequestScope() works after bootstrap
-$scope = $mini->getRequestScope();
-assert_not_null($scope);
-assert_true(is_object($scope));
-echo "✓ getRequestScope() returns object after bootstrap\n";
+        // These two must be exercised before bootstrap(); the harness bootstraps
+        // after setUp() so the outcome is captured here and asserted below.
+        try {
+            $mini->get('test.scoped');
+        } catch (\Throwable $e) {
+            $this->scopedBeforeBootstrapError = $e;
+        }
 
-// Test: Scoped service works after bootstrap
-$scoped = $mini->get('test.scoped');
-assert_not_null($scoped);
-echo "✓ Scoped service accessible after bootstrap\n";
+        try {
+            $mini->getRequestScope();
+        } catch (\Throwable $e) {
+            $this->requestScopeBeforeBootstrapError = $e;
+        }
+    }
 
-// Test: Same scope object returned within request
-$scope1 = $mini->getRequestScope();
-$scope2 = $mini->getRequestScope();
-assert_true($scope1 === $scope2, 'Should return same scope object');
-echo "✓ getRequestScope() returns same object within request\n";
+    public function testScopedServiceAccessThrowsBeforeBootstrap(): void
+    {
+        $this->assertNotNull(
+            $this->scopedBeforeBootstrapError,
+            'Resolving a Scoped service before bootstrap should throw'
+        );
+        $this->assertInstanceOf(\LogicException::class, $this->scopedBeforeBootstrapError);
+    }
 
-echo "\n✅ All scoped lifecycle tests passed!\n";
+    public function testGetRequestScopeThrowsBeforeBootstrap(): void
+    {
+        $this->assertNotNull(
+            $this->requestScopeBeforeBootstrapError,
+            'getRequestScope() before bootstrap should throw'
+        );
+        $this->assertInstanceOf(\LogicException::class, $this->requestScopeBeforeBootstrapError);
+    }
+
+    public function testGetRequestScopeReturnsObjectAfterBootstrap(): void
+    {
+        $scope = Mini::$mini->getRequestScope();
+        $this->assertNotNull($scope);
+        $this->assertTrue(is_object($scope));
+    }
+
+    public function testScopedServiceAccessibleAfterBootstrap(): void
+    {
+        $this->assertNotNull(Mini::$mini->get('test.scoped'));
+    }
+
+    public function testGetRequestScopeReturnsSameObjectWithinRequest(): void
+    {
+        $scope1 = Mini::$mini->getRequestScope();
+        $scope2 = Mini::$mini->getRequestScope();
+        $this->assertTrue($scope1 === $scope2, 'Should return same scope object');
+    }
+};
+
+exit($test->run());
