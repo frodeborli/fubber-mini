@@ -18,8 +18,12 @@ use mini\Parsing\SQL\AST\{
     SubqueryNode,
     NiladicFunctionNode,
     CastNode,
+    ExtractNode,
+    DistinctFromOperation,
+    RowValueNode,
     ExistsOperation
 };
+use mini\Parsing\SQL\DatetimeText;
 
 /**
  * Evaluates SQL AST expressions against a row context
@@ -130,6 +134,11 @@ class ExpressionEvaluator
             return $this->evaluateCast($node, $row, $context);
         }
 
+        // EXTRACT(field FROM source) - likewise a FunctionCallNode subclass
+        if ($node instanceof ExtractNode) {
+            return $this->evaluateExtract($node, $row, $context);
+        }
+
         // Function calls
         if ($node instanceof FunctionCallNode) {
             return $this->evaluateFunction($node, $row, $context);
@@ -143,6 +152,23 @@ class ExpressionEvaluator
         // IS NULL / IS NOT NULL
         if ($node instanceof IsNullOperation) {
             return $this->evaluateIsNull($node, $row, $context);
+        }
+
+        // a IS [NOT] DISTINCT FROM b - NULL-safe comparison, never UNKNOWN
+        if ($node instanceof DistinctFromOperation) {
+            $distinct = $this->valuesAreDistinct(
+                $this->evaluate($node->left, $row, $context),
+                $this->evaluate($node->right, $row, $context),
+            );
+            return ($node->negated ? !$distinct : $distinct) ? 1 : 0;
+        }
+
+        // A row value is not a scalar - it only means something to the operators
+        // that take row operands, and those intercept it before recursing here.
+        if ($node instanceof RowValueNode) {
+            throw new \RuntimeException(
+                'A row value constructor is only allowed as an operand of a comparison or IN'
+            );
         }
 
         // LIKE operation
@@ -308,6 +334,11 @@ class ExpressionEvaluator
             return ($left === null || $right === null) ? null : false;
         }
 
+        // Row value constructors: (a, b) = (1, 2), (a, b) < (1, 2), ...
+        if ($node->left instanceof RowValueNode || $node->right instanceof RowValueNode) {
+            return $this->compareRowValues($node, $row, $context);
+        }
+
         // Evaluate both sides
         $left = $this->evaluate($node->left, $row, $context);
         $right = $this->evaluate($node->right, $row, $context);
@@ -378,6 +409,99 @@ class ExpressionEvaluator
         return $a <=> $b;
     }
 
+    /**
+     * Are two values distinct? (`IS DISTINCT FROM`)
+     *
+     * NULL is treated as a value that equals only itself, so the answer is
+     * always TRUE or FALSE - never UNKNOWN.
+     */
+    private function valuesAreDistinct(mixed $a, mixed $b): bool
+    {
+        if ($a === null || $b === null) {
+            return !($a === null && $b === null);
+        }
+
+        return !self::valuesEqual($a, $b);
+    }
+
+    /**
+     * SQL:2003 comparison of two row values: `(a, b) = (1, 2)`, `(a, b) < (1, 2)`
+     *
+     * `=` / `<>` compare element-wise: equal when every pair is equal, unequal
+     * as soon as one pair is definitely unequal, UNKNOWN (NULL) otherwise - so
+     * `(1, NULL) = (1, 2)` is UNKNOWN but `(1, NULL) = (9, 2)` is FALSE.
+     *
+     * The ordering operators compare lexicographically: the first pair that
+     * differs decides, and a NULL reached before that makes the whole
+     * comparison UNKNOWN.
+     *
+     * @return bool|null TRUE / FALSE / UNKNOWN
+     */
+    private function compareRowValues(BinaryOperation $node, ?object $row, array $context): ?bool
+    {
+        $op = strtoupper($node->operator);
+
+        if (!$node->left instanceof RowValueNode || !$node->right instanceof RowValueNode) {
+            throw new \RuntimeException(
+                "Row value constructor compared against a scalar with '$op'; both operands must be row values"
+            );
+        }
+
+        $left = $node->left->values;
+        $right = $node->right->values;
+
+        if (count($left) !== count($right)) {
+            throw new \RuntimeException(
+                'Row values in a comparison must have the same number of elements ('
+                . count($left) . ' vs ' . count($right) . ')'
+            );
+        }
+
+        if (!in_array($op, ['=', '!=', '<>', '<', '<=', '>', '>='], true)) {
+            throw new \RuntimeException("Operator '$op' does not accept row value operands");
+        }
+
+        if ($op === '=' || $op === '!=' || $op === '<>') {
+            $unknown = false;
+            foreach ($left as $i => $expr) {
+                $a = $this->evaluate($expr, $row, $context);
+                $b = $this->evaluate($right[$i], $row, $context);
+                if ($a === null || $b === null) {
+                    $unknown = true;
+                    continue;
+                }
+                if (!self::valuesEqual($a, $b)) {
+                    // Definitely unequal: `=` is FALSE, `<>` is TRUE, whatever
+                    // the other elements say.
+                    return $op !== '=';
+                }
+            }
+            if ($unknown) {
+                return null;
+            }
+            return $op === '=';
+        }
+
+        // Lexicographic ordering
+        foreach ($left as $i => $expr) {
+            $a = $this->evaluate($expr, $row, $context);
+            $b = $this->evaluate($right[$i], $row, $context);
+            if ($a === null || $b === null) {
+                return null;
+            }
+            $cmp = self::compareValues($a, $b);
+            if ($cmp !== 0) {
+                return match ($op) {
+                    '<', '<=' => $cmp < 0,
+                    '>', '>=' => $cmp > 0,
+                };
+            }
+        }
+
+        // All elements equal
+        return $op === '<=' || $op === '>=';
+    }
+
     private function evaluateUnaryOp(UnaryOperation $node, ?object $row, array $context): mixed
     {
         $op = strtoupper($node->operator);
@@ -441,6 +565,62 @@ class ExpressionEvaluator
             'NUMERIC' => self::castToNumeric($value),
             default => throw new \RuntimeException("Unsupported CAST type: {$node->castType}"),
         };
+    }
+
+    /**
+     * EXTRACT(field FROM source) - SQL:2003 F052.
+     *
+     * Mini stores datetimes as text, so the source is read as text in the
+     * canonical shapes the engine writes: `Y-m-d`, `H:i:s` and `Y-m-d H:i:s`,
+     * with optional fractional seconds. A date with no time part has an hour,
+     * minute and second of zero - the same answer SQLite gives for
+     * `strftime('%H','2020-05-06')`.
+     *
+     * Validation is {@see DatetimeText}, the same code the parser applies to
+     * `DATE '...'` literals, and for the same reason: the text that reaches
+     * this method comes from CSV, JSON and remote-API tables, which is exactly
+     * where malformed datetimes live. Being strict about a literal the parser
+     * can see while reporting month 13 for '2020-13-45' out of a column would
+     * put the check on the only path that never needed it. Where SQLite
+     * returns NULL (`strftime('%m','2020-13-45')`), Mini throws.
+     *
+     * Everything else fails loudly too. A time has no year, and a string that
+     * is not a datetime at all has no fields, so asking for one is a bug in
+     * the query rather than a value to guess at.
+     *
+     * Fields come back as integers, never as the zero-padded text strftime
+     * would produce. SECOND is an exact numeric and stays a float only when
+     * the source carries a non-zero fraction, so that '07' and '07.0' land in
+     * the same GROUP BY and DISTINCT bucket.
+     */
+    private function evaluateExtract(ExtractNode $node, ?object $row, array $context): mixed
+    {
+        $value = $this->evaluate($node->arguments[0], $row, $context);
+
+        if ($value === null) {
+            return null;
+        }
+
+        if (!is_string($value)) {
+            throw new \RuntimeException(
+                "EXTRACT({$node->field} FROM ...) needs a date, time or timestamp as text, got "
+                    . get_debug_type($value)
+            );
+        }
+
+        try {
+            $parts = DatetimeText::parse($value);
+        } catch (\InvalidArgumentException $e) {
+            throw new \RuntimeException("EXTRACT({$node->field} FROM ...) " . $e->getMessage(), 0, $e);
+        }
+
+        if ($parts[$node->field] === null) {
+            throw new \RuntimeException(
+                "EXTRACT({$node->field} FROM ...) needs a date, but '$value' is a time"
+            );
+        }
+
+        return $parts[$node->field];
     }
 
     private static function castToInt(mixed $value): int
@@ -528,6 +708,10 @@ class ExpressionEvaluator
      */
     private function evaluateIn(InOperation $node, ?object $row, array $context): int|null
     {
+        if ($node->left instanceof RowValueNode) {
+            return $this->evaluateRowIn($node, $row, $context);
+        }
+
         $left = $this->evaluate($node->left, $row, $context);
 
         if ($node->isSubquery()) {
@@ -601,6 +785,85 @@ class ExpressionEvaluator
 
         // No match found, but NULLs in list: result is NULL
         if ($hasNull) {
+            return null;
+        }
+
+        return $node->negated ? 1 : 0;
+    }
+
+    /**
+     * `(a, b) IN ((1, 2), (3, 4))` and `(a, b) IN (SELECT x, y FROM t)`
+     *
+     * Defined by SQL:2003 as the OR of the element-wise row comparisons, under
+     * three-valued logic: TRUE as soon as one candidate row matches, UNKNOWN if
+     * none matched but a NULL could have made one match, FALSE otherwise. An
+     * empty candidate set is FALSE (and NOT IN is TRUE), the same as scalar IN.
+     */
+    private function evaluateRowIn(InOperation $node, ?object $row, array $context): int|null
+    {
+        /** @var RowValueNode $rowValue */
+        $rowValue = $node->left;
+        $degree = $rowValue->degree();
+
+        $left = [];
+        foreach ($rowValue->values as $expr) {
+            $left[] = $this->evaluate($expr, $row, $context);
+        }
+
+        if ($node->isSubquery()) {
+            if ($this->subqueryExecutor === null) {
+                throw new \RuntimeException('Subquery executor not configured for IN clause');
+            }
+            $candidates = [];
+            foreach (($this->subqueryExecutor)($node->values->query, $row) as $resultRow) {
+                $candidates[] = array_values(get_object_vars($resultRow));
+            }
+        } else {
+            $candidates = [];
+            foreach ($node->values as $valueNode) {
+                if (!$valueNode instanceof RowValueNode) {
+                    throw new \RuntimeException(
+                        'A row value on the left of IN requires row values on the right'
+                    );
+                }
+                $candidate = [];
+                foreach ($valueNode->values as $expr) {
+                    $candidate[] = $this->evaluate($expr, $row, $context);
+                }
+                $candidates[] = $candidate;
+            }
+        }
+
+        $unknown = false;
+        foreach ($candidates as $candidate) {
+            if (count($candidate) !== $degree) {
+                throw new \RuntimeException(
+                    'Row values in an IN predicate must have the same number of elements ('
+                    . $degree . ' vs ' . count($candidate) . ')'
+                );
+            }
+
+            $equal = true;
+            foreach ($left as $i => $value) {
+                if ($value === null || $candidate[$i] === null) {
+                    $equal = null;
+                    continue;
+                }
+                if (!self::valuesEqual($value, $candidate[$i])) {
+                    $equal = false;
+                    break;
+                }
+            }
+
+            if ($equal === true) {
+                return $node->negated ? 0 : 1;
+            }
+            if ($equal === null) {
+                $unknown = true;
+            }
+        }
+
+        if ($unknown) {
             return null;
         }
 

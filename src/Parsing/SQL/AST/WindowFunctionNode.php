@@ -17,7 +17,9 @@ class WindowFunctionNode extends ASTNode implements ValueNodeInterface
     /**
      * @param FunctionCallNode $function The window function (ROW_NUMBER, RANK, etc.)
      * @param ASTNode[] $partitionBy PARTITION BY expressions (optional)
-     * @param array $orderBy ORDER BY clauses [{expr: ASTNode, direction: 'ASC'|'DESC'}, ...]
+     * @param array $orderBy ORDER BY clauses, same shape as a statement ORDER BY
+     *        item except that the expression is keyed 'expr' rather than 'column':
+     *        [{expr: ASTNode, direction: 'ASC'|'DESC', nulls?: 'FIRST'|'LAST'}, ...]
      */
     public function __construct(
         public FunctionCallNode $function,

@@ -44,6 +44,8 @@ class SqlLexer
     public const T_OUTER  = 'OUTER';
     public const T_FULL   = 'FULL';
     public const T_CROSS  = 'CROSS';
+    public const T_NATURAL = 'NATURAL';
+    public const T_USING  = 'USING';
     public const T_ON     = 'ON';
     public const T_DISTINCT = 'DISTINCT';
     public const T_GROUP  = 'GROUP';
@@ -122,6 +124,7 @@ class SqlLexer
         'FALSE' => self::T_FALSE, 'LIKE' => self::T_LIKE, 'JOIN' => self::T_JOIN,
         'LEFT' => self::T_LEFT, 'RIGHT' => self::T_RIGHT, 'INNER' => self::T_INNER,
         'OUTER' => self::T_OUTER, 'FULL' => self::T_FULL, 'CROSS' => self::T_CROSS,
+        'NATURAL' => self::T_NATURAL, 'USING' => self::T_USING,
         'ON' => self::T_ON, 'DISTINCT' => self::T_DISTINCT, 'GROUP' => self::T_GROUP,
         'HAVING' => self::T_HAVING, 'BETWEEN' => self::T_BETWEEN, 'EXISTS' => self::T_EXISTS,
         'UNION' => self::T_UNION, 'INTERSECT' => self::T_INTERSECT, 'EXCEPT' => self::T_EXCEPT,

@@ -28,7 +28,10 @@ namespace mini\Database;
 final class Limits
 {
     /**
-     * @param int $maxJoinedTables Tables permitted in a single query. Join
+     * @param int $maxJoinedTables Tables permitted in a single query: the FROM
+     *        table plus every join, counted before a join strategy is chosen, so
+     *        the bound holds for every spelling (INNER, outer, CROSS, NATURAL,
+     *        USING and comma-separated FROM) and inside subqueries. Join
      *        planning cost grows sharply with table count, and a query
      *        federating this many distinct sources is usually a sign the work
      *        belongs in a database rather than in the engine.

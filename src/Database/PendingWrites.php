@@ -23,7 +23,8 @@ use mini\Table\Contracts\MutableTableInterface;
  * federated engine — and only the payloads that must be written are held.
  *
  * Buffering is bounded. A runaway source fails with an actionable error rather
- * than exhausting memory; see `VirtualDatabase::setMaxMaterializedRows()`.
+ * than exhausting memory; the cap is `Limits::$maxBufferedWrites`, also
+ * reachable as `VirtualDatabase::setMaxMaterializedRows()`.
  *
  * Operations are applied in the order they were logged, which is what makes
  * REPLACE (delete-then-insert of the same key) behave correctly.
@@ -91,10 +92,11 @@ final class PendingWrites implements \Countable
 
         if ($this->maxRows !== null && count($this->ops) > $this->maxRows) {
             throw new \RuntimeException(
-                "{$this->context} exceeded the maximum of {$this->maxRows} buffered rows. Writes " .
-                'are buffered because no row may be written while the statement is still reading. ' .
-                'Narrow the source with a WHERE or LIMIT, or raise the cap with ' .
-                'VirtualDatabase::setMaxMaterializedRows().'
+                "{$this->context} exceeded the maxBufferedWrites limit of {$this->maxRows} buffered " .
+                'rows. Writes are buffered because no row may be written while the statement is ' .
+                'still reading. Narrow the source with a WHERE or LIMIT, or raise the cap with ' .
+                'VirtualDatabase::setMaxMaterializedRows() (equivalently, ' .
+                'setLimits(new Limits(maxBufferedWrites: ...))).'
             );
         }
     }

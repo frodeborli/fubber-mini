@@ -26,6 +26,7 @@ use mini\Parsing\SQL\AST\{
     ExistsOperation,
     FunctionCallNode,
     CastNode,
+    ExtractNode,
     CaseWhenNode,
     WindowFunctionNode,
     NiladicFunctionNode,
@@ -219,7 +220,7 @@ class SqlRenderer
     /**
      * Render ORDER BY items to SQL string (without ORDER BY keywords)
      *
-     * @param array<int, array{column: ASTNode, direction: string}> $orderBy
+     * @param array<int, array{column: ASTNode, direction: string, nulls?: string}> $orderBy
      * @return string The rendered ORDER BY clause body
      */
     public function renderOrderByItems(array $orderBy): string
@@ -229,6 +230,11 @@ class SqlRenderer
             $part = $this->doRender($order['column']);
             if (isset($order['direction']) && strtoupper($order['direction']) === 'DESC') {
                 $part .= ' DESC';
+            }
+            // Explicit null ordering is only emitted when the query asked for
+            // it; the default is left to the target engine.
+            if (isset($order['nulls'])) {
+                $part .= ' NULLS ' . strtoupper($order['nulls']);
             }
             $parts[] = $part;
         }
@@ -253,11 +259,17 @@ class SqlRenderer
             $node instanceof UnaryOperation => $this->renderUnary($node),
             $node instanceof InOperation => $this->renderIn($node),
             $node instanceof IsNullOperation => $this->renderIsNull($node),
+            $node instanceof AST\RowValueNode => '('
+                . implode(', ', array_map(fn($v) => $this->doRender($v), $node->values)) . ')',
+            $node instanceof AST\DistinctFromOperation => $this->doRender($node->left)
+                . ($node->negated ? ' IS NOT DISTINCT FROM ' : ' IS DISTINCT FROM ')
+                . $this->doRender($node->right),
             $node instanceof LikeOperation => $this->renderLike($node),
             $node instanceof BetweenOperation => $this->renderBetween($node),
             $node instanceof ExistsOperation => $this->renderExists($node),
-            // CastNode is a FunctionCallNode, so it has to come first
+            // CastNode and ExtractNode are FunctionCallNodes, so they come first
             $node instanceof CastNode => $this->renderCast($node),
+            $node instanceof ExtractNode => $this->renderExtract($node),
             $node instanceof FunctionCallNode => $this->renderFunction($node),
             $node instanceof CaseWhenNode => $this->renderCase($node),
             $node instanceof WindowFunctionNode => $this->renderWindow($node),
@@ -345,15 +357,7 @@ class SqlRenderer
 
         // ORDER BY
         if ($node->orderBy !== null && !empty($node->orderBy)) {
-            $orderParts = [];
-            foreach ($node->orderBy as $order) {
-                $part = $this->render($order['column']);
-                if (isset($order['direction']) && strtoupper($order['direction']) === 'DESC') {
-                    $part .= ' DESC';
-                }
-                $orderParts[] = $part;
-            }
-            $sql .= ' ORDER BY ' . implode(', ', $orderParts);
+            $sql .= ' ORDER BY ' . $this->renderOrderByItems($node->orderBy);
         }
 
         // LIMIT/OFFSET - dialect-specific
@@ -472,15 +476,7 @@ class SqlRenderer
 
         // Trailing ORDER BY / LIMIT / OFFSET belong to the whole set result.
         if (!empty($node->orderBy)) {
-            $orderParts = [];
-            foreach ($node->orderBy as $order) {
-                $part = $this->render($order['column']);
-                if (isset($order['direction']) && strtoupper($order['direction']) === 'DESC') {
-                    $part .= ' DESC';
-                }
-                $orderParts[] = $part;
-            }
-            $sql .= ' ORDER BY ' . implode(', ', $orderParts);
+            $sql .= ' ORDER BY ' . $this->renderOrderByItems($node->orderBy);
         }
 
         $sql .= $this->renderLimitOffset($node->limit, $node->offset);
@@ -504,7 +500,7 @@ class SqlRenderer
 
     private function renderJoin(JoinNode $node): string
     {
-        $sql = $node->joinType . ' JOIN ';
+        $sql = ($node->natural ? 'NATURAL ' : '') . $node->joinType . ' JOIN ';
 
         if ($node->table instanceof SubqueryNode) {
             $sql .= '(' . $this->render($node->table->query) . ')';
@@ -518,6 +514,8 @@ class SqlRenderer
 
         if ($node->condition !== null) {
             $sql .= ' ON ' . $this->render($node->condition);
+        } elseif ($node->using !== null) {
+            $sql .= ' USING (' . implode(', ', array_map($this->quoteName(...), $node->using)) . ')';
         }
 
         return $sql;
@@ -668,6 +666,11 @@ class SqlRenderer
         return 'CAST(' . $this->render($node->arguments[0]) . ' AS ' . $node->castType . ')';
     }
 
+    private function renderExtract(ExtractNode $node): string
+    {
+        return 'EXTRACT(' . $node->field . ' FROM ' . $this->render($node->arguments[0]) . ')';
+    }
+
     private function renderFunction(FunctionCallNode $node): string
     {
         $name = strtoupper($node->name);
@@ -728,6 +731,9 @@ class SqlRenderer
                 $part = $this->render($order['expr']);
                 if (isset($order['direction']) && strtoupper($order['direction']) === 'DESC') {
                     $part .= ' DESC';
+                }
+                if (isset($order['nulls'])) {
+                    $part .= ' NULLS ' . strtoupper($order['nulls']);
                 }
                 $orderParts[] = $part;
             }
@@ -796,6 +802,15 @@ class SqlRenderer
                 $node->operator,
                 $this->renameIdentifier($node->expression, $oldName, $newName)
             ),
+            $node instanceof AST\RowValueNode => new AST\RowValueNode(array_map(
+                fn($v) => $this->renameIdentifier($v, $oldName, $newName),
+                $node->values
+            )),
+            $node instanceof AST\DistinctFromOperation => new AST\DistinctFromOperation(
+                $this->renameIdentifier($node->left, $oldName, $newName),
+                $this->renameIdentifier($node->right, $oldName, $newName),
+                $node->negated
+            ),
             $node instanceof InOperation => $this->renameInIn($node, $oldName, $newName),
             $node instanceof IsNullOperation => new IsNullOperation(
                 $this->renameIdentifier($node->expression, $oldName, $newName),
@@ -817,10 +832,14 @@ class SqlRenderer
                 new SubqueryNode($this->renameIdentifier($node->subquery->query, $oldName, $newName)),
                 $node->negated
             ),
-            // CastNode is a FunctionCallNode, so it has to come first
+            // CastNode and ExtractNode are FunctionCallNodes, so they come first
             $node instanceof CastNode => new CastNode(
                 $this->renameIdentifier($node->arguments[0], $oldName, $newName),
                 $node->castType
+            ),
+            $node instanceof ExtractNode => new ExtractNode(
+                $node->field,
+                $this->renameIdentifier($node->arguments[0], $oldName, $newName)
             ),
             $node instanceof FunctionCallNode => new FunctionCallNode(
                 $node->name,
@@ -867,10 +886,13 @@ class SqlRenderer
         );
 
         if ($node->orderBy !== null) {
-            $new->orderBy = array_map(fn($o) => [
-                'column' => $this->renameIdentifier($o['column'], $oldName, $newName),
-                'direction' => $o['direction'] ?? 'ASC',
-            ], $node->orderBy);
+            // Rebuild the item rather than replacing 'column' in place so that
+            // any other key ('nulls', ...) survives the rename.
+            $new->orderBy = array_map(function ($o) use ($oldName, $newName) {
+                $o['column'] = $this->renameIdentifier($o['column'], $oldName, $newName);
+                $o['direction'] ??= 'ASC';
+                return $o;
+            }, $node->orderBy);
         }
 
         $new->limit = $node->limit;
@@ -915,10 +937,13 @@ class SqlRenderer
             : null;
 
         if ($node->orderBy !== null) {
-            $new->orderBy = array_map(fn($o) => [
-                'column' => $this->renameIdentifier($o['column'], $oldName, $newName),
-                'direction' => $o['direction'] ?? 'ASC',
-            ], $node->orderBy);
+            // Rebuild the item rather than replacing 'column' in place so that
+            // any other key ('nulls', ...) survives the rename.
+            $new->orderBy = array_map(function ($o) use ($oldName, $newName) {
+                $o['column'] = $this->renameIdentifier($o['column'], $oldName, $newName);
+                $o['direction'] ??= 'ASC';
+                return $o;
+            }, $node->orderBy);
         }
 
         // Limit and offset are expressions, rename in case they reference tables (unlikely but safe)
@@ -944,7 +969,9 @@ class SqlRenderer
             $node->condition !== null
                 ? $this->renameIdentifier($node->condition, $oldName, $newName)
                 : null,
-            $node->alias
+            $node->alias,
+            $node->using,
+            $node->natural
         );
     }
 
@@ -981,10 +1008,13 @@ class SqlRenderer
 
     private function renameInWindow(WindowFunctionNode $node, string $oldName, string $newName): WindowFunctionNode
     {
-        $orderBy = array_map(fn($o) => [
-            'expr' => $this->renameIdentifier($o['expr'], $oldName, $newName),
-            'direction' => $o['direction'] ?? 'ASC',
-        ], $node->orderBy);
+        // Rebuild the item rather than replacing 'expr' in place so that any
+        // other key ('nulls', ...) survives the rename.
+        $orderBy = array_map(function ($o) use ($oldName, $newName) {
+            $o['expr'] = $this->renameIdentifier($o['expr'], $oldName, $newName);
+            $o['direction'] ??= 'ASC';
+            return $o;
+        }, $node->orderBy);
 
         return new WindowFunctionNode(
             $this->renameIdentifier($node->function, $oldName, $newName),

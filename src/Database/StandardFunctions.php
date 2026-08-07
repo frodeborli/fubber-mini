@@ -33,6 +33,16 @@ namespace mini\Database;
  */
 final class StandardFunctions
 {
+    /**
+     * Ceiling on a string a single function call may fabricate out of nothing.
+     *
+     * REPEAT and LPAD/RPAD take a length as *data*, so a hostile or mistyped
+     * row can ask for a petabyte. PHP answers that with an uncatchable
+     * out-of-memory fatal, which in a Fiber runtime takes every other
+     * coroutine in the worker with it. An exception is a bug report.
+     */
+    private const MAX_STRING_BYTES = 16 * 1024 * 1024;
+
     /** @var array<string, array{fn: callable, argCount: int}>|null */
     private static ?array $registry = null;
 
@@ -58,8 +68,8 @@ final class StandardFunctions
             'LEN' => [fn(mixed $s) => $s === null ? null : \strlen((string)$s), 1],
             // SQL:2003 spellings. Mini's strings are PHP byte strings, so
             // character length and octet length coincide - all three are LENGTH.
-            'CHAR_LENGTH' => [fn(mixed $s) => $s === null ? null : \strlen((string)$s), 1],
-            'CHARACTER_LENGTH' => [fn(mixed $s) => $s === null ? null : \strlen((string)$s), 1],
+            'CHAR_LENGTH' => [fn(mixed $s) => $s === null ? null : self::charLength((string)$s), 1],
+            'CHARACTER_LENGTH' => [fn(mixed $s) => $s === null ? null : self::charLength((string)$s), 1],
             'OCTET_LENGTH' => [fn(mixed $s) => $s === null ? null : \strlen((string)$s), 1],
 
             'TRIM' => [fn(mixed ...$a) => self::trim('trim', $a), -1],
@@ -95,12 +105,28 @@ final class StandardFunctions
                 2,
             ],
 
+            'REPEAT' => [fn(mixed $s, mixed $n) => self::repeat($s, $n), 2],
+            'REVERSE' => [fn(mixed $s) => $s === null ? null : self::reverse((string)$s), 1],
+            'LPAD' => [fn(mixed ...$a) => self::pad('LPAD', \STR_PAD_LEFT, $a), -1],
+            'RPAD' => [fn(mixed ...$a) => self::pad('RPAD', \STR_PAD_RIGHT, $a), -1],
+
             // --- Numeric functions ------------------------------------------
             'ABS' => [fn(mixed $x) => $x === null ? null : \abs(self::numeric('ABS', $x)), 1],
             'ROUND' => [fn(mixed ...$a) => self::round($a), -1],
             'FLOOR' => [fn(mixed $x) => $x === null ? null : \floor(self::numeric('FLOOR', $x)), 1],
             'CEIL' => [fn(mixed $x) => $x === null ? null : \ceil(self::numeric('CEIL', $x)), 1],
             'CEILING' => [fn(mixed $x) => $x === null ? null : \ceil(self::numeric('CEILING', $x)), 1],
+
+            'MOD' => [fn(mixed $a, mixed $b) => self::mod($a, $b), 2],
+            'SIGN' => [fn(mixed $x) => $x === null ? null : self::numeric('SIGN', $x) <=> 0, 1],
+            'POWER' => [fn(mixed $b, mixed $e) => self::power($b, $e), 2],
+            'POW' => [fn(mixed $b, mixed $e) => self::power($b, $e), 2],
+            'SQRT' => [fn(mixed $x) => self::sqrt($x), 1],
+            'EXP' => [fn(mixed $x) => self::exp($x), 1],
+            'LN' => [fn(mixed $x) => self::ln($x), 1],
+            // No LOG: one-argument LOG is base 10 in SQLite and PostgreSQL but
+            // base e in MySQL, so the spelling has no agreed meaning. Write LN
+            // and get an error, not a silently wrong base.
 
             // --- NULL handling ----------------------------------------------
             'COALESCE' => [fn(mixed ...$a) => self::coalesce($a), -1],
@@ -197,6 +223,272 @@ final class StandardFunctions
         }
         $pos = \strpos((string)$haystack, (string)$needle);
         return $pos === false ? 0 : $pos + 1;
+    }
+
+    /**
+     * REPEAT(X, N) - X concatenated N times; N <= 0 gives the empty string.
+     *
+     * The size guard runs on N *before* it is narrowed to int. Casting an
+     * out-of-range float to int in PHP wraps to an implementation-defined
+     * value, and for the interesting magnitudes it wraps negative -
+     * (int)1.0E+19 is -8446744073709551616 - which would read as "repeat zero
+     * times" and hand back '' for a request that should have been refused.
+     * A silently empty string is a wrong answer the query keeps building on.
+     */
+    private static function repeat(mixed $s, mixed $n): ?string
+    {
+        if ($s === null || $n === null) {
+            return null;
+        }
+
+        $count = self::numeric('REPEAT', $n); // int|float, deliberately unnarrowed
+        if ($count <= 0) {
+            return '';
+        }
+
+        $s = (string)$s;
+        if ($s === '') {
+            return ''; // Any N of nothing is nothing, and costs nothing
+        }
+
+        // strlen($s) >= 1 here, so this product is >= $count: a $count over the
+        // limit always raises, and past this line $count is small enough that
+        // (int) is exact.
+        self::checkWidth('REPEAT', $count * \strlen($s));
+        return \str_repeat($s, (int)$count);
+    }
+
+    /**
+     * LPAD/RPAD(X, LEN[, PAD]) - pad X to LEN with PAD (default a space).
+     *
+     * The pad string is repeated and clipped to fill exactly, so
+     * LPAD('hi', 5, 'xy') is 'xyxhi'. A string already at least LEN long is
+     * *truncated* to LEN, keeping its leading characters - the result is
+     * always exactly LEN bytes. This is what MySQL, PostgreSQL and Oracle all
+     * do; SQLite has no LPAD.
+     *
+     * As in {@see repeat()}, LEN is size-checked before it is narrowed to int -
+     * an out-of-range float wraps negative under (int) and would look like a
+     * non-positive length, returning '' instead of refusing the request.
+     */
+    private static function pad(string $name, int $mode, array $args): ?string
+    {
+        $argc = \count($args);
+        if ($argc < 2 || $argc > 3) {
+            throw new \RuntimeException("$name() expects 2 or 3 arguments, $argc given");
+        }
+        if ($args[0] === null || $args[1] === null) {
+            return null;
+        }
+        if ($argc === 3 && $args[2] === null) {
+            return null;
+        }
+
+        $str = (string)$args[0];
+        $length = self::numeric($name, $args[1]); // int|float, deliberately unnarrowed
+
+        if ($length <= 0) {
+            return '';
+        }
+
+        // Before any narrowing: the result is exactly $length bytes wide, so
+        // this is the real cost of the call whatever the pad string turns out
+        // to be. Past this line $length is small enough that (int) is exact.
+        self::checkWidth($name, $length);
+        $length = (int)$length;
+
+        // Pad by CHARACTERS, not bytes. str_pad()/substr() would slice a
+        // multibyte sequence in half and emit invalid UTF-8, which the
+        // framework's own JSON encoder then refuses to serialize.
+        $chars = self::chars($str);
+        if ($chars === null) {
+            // Not valid UTF-8 - fall back to byte semantics rather than throw
+            return $length <= \strlen($str)
+                ? \substr($str, 0, $length)
+                : \str_pad($str, $length, (string)($args[2] ?? ' ') ?: ' ', $mode);
+        }
+
+        if ($length <= \count($chars)) {
+            return \implode('', \array_slice($chars, 0, $length));
+        }
+
+        $pad = (string)($args[2] ?? ' ');
+        if ($pad === '') {
+            return $str; // Nothing to pad with; the string is all there is
+        }
+
+        $padChars = self::chars($pad) ?? \str_split($pad);
+        $missing = $length - \count($chars);
+        $fill = [];
+        while (\count($fill) < $missing) {
+            foreach ($padChars as $c) {
+                if (\count($fill) >= $missing) {
+                    break;
+                }
+                $fill[] = $c;
+            }
+        }
+        $filler = \implode('', $fill);
+
+        return $mode === \STR_PAD_LEFT ? $filler . $str : $str . $filler;
+    }
+
+    /**
+     * Split a UTF-8 string into characters, or null when it is not valid UTF-8
+     *
+     * PCRE's /u mode is used rather than mbstring: ext-mbstring is not a
+     * declared requirement, and the codebase already guards it elsewhere.
+     * PCRE is always available.
+     *
+     * @return list<string>|null
+     */
+    private static function chars(string $s): ?array
+    {
+        if ($s === '') {
+            return [];
+        }
+        $parts = \preg_split('//u', $s, -1, \PREG_SPLIT_NO_EMPTY);
+        return $parts === false ? null : $parts;
+    }
+
+    /**
+     * CHAR_LENGTH / CHARACTER_LENGTH - length in characters (SQL E021-04)
+     *
+     * Distinct from OCTET_LENGTH (bytes) and from this engine's legacy
+     * byte-based LENGTH, whose contract predates these and is left alone.
+     */
+    private static function charLength(string $s): int
+    {
+        $count = \preg_match_all('/./us', $s);
+        return $count === false ? \strlen($s) : $count;
+    }
+
+    /**
+     * REVERSE - reverses characters, not bytes
+     */
+    private static function reverse(string $s): string
+    {
+        $chars = self::chars($s);
+        return $chars === null ? \strrev($s) : \implode('', \array_reverse($chars));
+    }
+
+    /**
+     * MOD(X, Y) - remainder of truncated division, so the sign follows X:
+     * MOD(-7, 3) is -1, MOD(7, -3) is 1.
+     *
+     * Two integers give an integer (SQL:2003, MySQL, PostgreSQL, Oracle);
+     * sqlite3 answers 1.0 for MOD(7,3) only because its mod() is a thin fmod()
+     * wrapper. A float operand gives a float either way, so MOD(7.5, 2) is 1.5
+     * in both. A zero divisor yields NULL, matching sqlite3 and the engine's
+     * own `%` and `/` operators rather than raising.
+     */
+    private static function mod(mixed $a, mixed $b): int|float|null
+    {
+        if ($a === null || $b === null) {
+            return null;
+        }
+
+        $a = self::numeric('MOD', $a);
+        $b = self::numeric('MOD', $b);
+
+        if ($b == 0) {
+            return null;
+        }
+
+        return (\is_int($a) && \is_int($b)) ? $a % $b : \fmod($a, $b);
+    }
+
+    /**
+     * POWER(X, Y) - always approximate numeric, as in sqlite3.
+     *
+     * A result that is not a real number is NULL: POWER(-8, 0.5) has no real
+     * value and POWER(0, -1) is a division by zero. A result that is real but
+     * too large to represent (POWER(10, 400)) raises instead - INF is not an
+     * answer, it is a lost one.
+     */
+    private static function power(mixed $base, mixed $exponent): ?float
+    {
+        if ($base === null || $exponent === null) {
+            return null;
+        }
+
+        $base = self::numeric('POWER', $base);
+        $exponent = self::numeric('POWER', $exponent);
+
+        if ($base == 0 && $exponent < 0) {
+            return null;
+        }
+
+        $result = (float)($base ** $exponent);
+        return \is_nan($result) ? null : self::finite('POWER', $result);
+    }
+
+    /** SQRT(X) - NULL for a negative X, which has no real square root. */
+    private static function sqrt(mixed $x): ?float
+    {
+        if ($x === null) {
+            return null;
+        }
+
+        $x = self::numeric('SQRT', $x);
+        return $x < 0 ? null : \sqrt((float)$x);
+    }
+
+    /** LN(X) - natural logarithm; NULL outside its domain (X <= 0). */
+    private static function ln(mixed $x): ?float
+    {
+        if ($x === null) {
+            return null;
+        }
+
+        $x = self::numeric('LN', $x);
+        return $x <= 0 ? null : \log((float)$x);
+    }
+
+    /** EXP(X) - e to the X. Overflow raises; underflow is an ordinary 0.0. */
+    private static function exp(mixed $x): ?float
+    {
+        if ($x === null) {
+            return null;
+        }
+
+        return self::finite('EXP', \exp(self::numeric('EXP', $x)));
+    }
+
+    /**
+     * Refuse to hand back INF.
+     *
+     * NULL means "unknown", and an overflowed result is not unknown - it is
+     * known and unrepresentable. Calling it NULL would quietly drop the row
+     * out of a SUM; returning INF would quietly poison one.
+     */
+    private static function finite(string $function, float $value): float
+    {
+        if (\is_infinite($value)) {
+            throw new \RuntimeException(
+                "$function() overflowed: the result is too large to represent"
+            );
+        }
+        return $value;
+    }
+
+    /**
+     * @param int|float $bytes Float when the request arrived as one, or when
+     *                         the multiplication left int range. Never narrow
+     *                         it: the whole point is to reject sizes that int
+     *                         cannot hold.
+     */
+    private static function checkWidth(string $function, int|float $bytes): void
+    {
+        if ($bytes > self::MAX_STRING_BYTES) {
+            // %.0F rather than interpolation: a float would otherwise print as
+            // "1.0E+19", which reads like a typo instead of a size.
+            $size = \is_float($bytes) ? \sprintf('%.0F', $bytes) : (string)$bytes;
+            throw new \RuntimeException(
+                "$function() would build a string of $size bytes, over the "
+                . self::MAX_STRING_BYTES . " byte limit"
+            );
+        }
     }
 
     private static function coalesce(array $args): mixed

@@ -31,6 +31,10 @@ use mini\Parsing\SQL\AST\{
     JoinNode,
     CaseWhenNode,
     CastNode,
+    ExtractNode,
+    DistinctFromOperation,
+    RowValueNode,
+    UnionNode,
     WithStatement
 };
 
@@ -82,6 +86,9 @@ class SqlParser
         $token = $this->current();
         $stmt = match($token['type']) {
             SqlLexer::T_SELECT => $this->parseSelectOrUnion(),
+            // SQL:2003 <table value constructor> as a query of its own:
+            // `VALUES (1, 'a'), (2, 'b')`
+            SqlLexer::T_VALUES => $this->parseSelectOrUnion(),
             SqlLexer::T_INSERT => $this->parseInsertStatement(),
             SqlLexer::T_REPLACE => $this->parseReplaceStatement(),
             SqlLexer::T_UPDATE => $this->parseUpdateStatement(),
@@ -104,6 +111,59 @@ class SqlParser
         }
 
         return $stmt;
+    }
+
+    /**
+     * Build one ORDER BY item, consuming an optional `NULLS FIRST` / `NULLS LAST`
+     *
+     * SQL:2003 leaves the default null ordering implementation-defined; this
+     * engine (like SQLite) sorts NULL as smaller than every value, so the
+     * default is NULLS FIRST for ASC and NULLS LAST for DESC. The explicit
+     * clause overrides that.
+     *
+     * NULLS/FIRST/LAST are not reserved words - a column may legitimately be
+     * called "nulls" or "last" - so they are matched as soft keywords, only in
+     * the one position where they can occur.
+     *
+     * @return array{column: ASTNode, direction: string, nulls?: string}
+     */
+    private function makeOrderByItem(ASTNode $expr, string $direction): array
+    {
+        $item = ['column' => $expr, 'direction' => $direction];
+
+        $nulls = $this->parseNullsOption();
+        if ($nulls !== null) {
+            $item['nulls'] = $nulls;
+        }
+
+        return $item;
+    }
+
+    /**
+     * Consume an optional `NULLS FIRST` / `NULLS LAST` null ordering
+     *
+     * Shared by the statement-level ORDER BY and the ORDER BY of a window
+     * specification, which are built into differently-shaped arrays but take
+     * the same clause.
+     */
+    private function parseNullsOption(): ?string
+    {
+        if (!$this->matchSoftKeyword('NULLS')) {
+            return null;
+        }
+
+        if ($this->match(SqlLexer::T_FIRST)) {
+            return 'FIRST';
+        }
+        if ($this->matchSoftKeyword('LAST')) {
+            return 'LAST';
+        }
+
+        throw new SqlSyntaxException(
+            "Expected FIRST or LAST after NULLS",
+            $this->sql,
+            $this->current()['pos']
+        );
     }
 
     /**
@@ -166,7 +226,7 @@ class SqlParser
             } elseif ($this->match(SqlLexer::T_ASC)) {
                 $direction = 'ASC';
             }
-            $result[] = ['column' => $expr, 'direction' => $direction];
+            $result[] = $this->makeOrderByItem($expr, $direction);
         } while ($this->match(SqlLexer::T_COMMA));
 
         if ($this->current()['type'] !== SqlLexer::T_EOF) {
@@ -298,6 +358,13 @@ class SqlParser
                 } else {
                     throw new \RuntimeException("Derived table requires an alias");
                 }
+
+                // Optional derived column list: (SELECT ...) AS v(x, y)
+                $columnListPos = $this->current()['pos'];
+                $columnList = $this->parseOptionalDerivedColumnList();
+                if ($columnList !== null) {
+                    $this->applyDerivedColumnList($stmt->from, $columnList, $columnListPos);
+                }
             } else {
                 $stmt->from = $this->parseIdentifier();
 
@@ -365,7 +432,7 @@ class SqlParser
                     $direction = 'ASC';
                 }
 
-                $stmt->orderBy[] = ['column' => $expr, 'direction' => $direction];
+                $stmt->orderBy[] = $this->makeOrderByItem($expr, $direction);
             } while ($this->match(SqlLexer::T_COMMA));
         }
 
@@ -446,7 +513,7 @@ class SqlParser
             return $this->parseWithBody();
         }
 
-        $stmt = $this->parseSelectStatement();
+        $stmt = $this->parseQueryTerm();
 
         while (true) {
             $operator = null;
@@ -460,7 +527,7 @@ class SqlParser
                 break;
             }
             $all = $this->match(SqlLexer::T_ALL);
-            $right = $this->parseSelectStatement();
+            $right = $this->parseQueryTerm();
             $stmt = new AST\UnionNode($stmt, $right, $all, $operator);
         }
 
@@ -469,6 +536,161 @@ class SqlParser
         }
 
         return $stmt;
+    }
+
+    /**
+     * A single `<query term>`: either a SELECT or a VALUES table constructor
+     */
+    private function parseQueryTerm(): ASTNode
+    {
+        if ($this->current()['type'] === SqlLexer::T_VALUES) {
+            return $this->parseValuesConstructor();
+        }
+
+        return $this->parseSelectStatement();
+    }
+
+    /**
+     * SQL:2003 `<table value constructor>`: `VALUES (1, 'a'), (2, 'b')`
+     *
+     * Desugared into the equivalent `SELECT ... UNION ALL SELECT ...` chain, so
+     * that every existing execution path (derived tables, CTEs, IN subqueries,
+     * set operations) handles it without new machinery. UNION *ALL* because a
+     * table value constructor keeps duplicate rows.
+     *
+     * The columns are named `column1`, `column2`, ... — the same defaults
+     * SQLite and PostgreSQL use. A derived column list (`AS v(x, y)`) or a CTE
+     * column list renames them.
+     */
+    private function parseValuesConstructor(): ASTNode
+    {
+        $startPos = $this->current()['pos'];
+        $this->expect(SqlLexer::T_VALUES);
+
+        $rows = [];
+        do {
+            $this->expect(SqlLexer::T_LPAREN);
+            $values = [];
+            do {
+                $values[] = $this->parseExpression();
+            } while ($this->match(SqlLexer::T_COMMA));
+            $this->expect(SqlLexer::T_RPAREN);
+            $rows[] = $values;
+        } while ($this->match(SqlLexer::T_COMMA));
+
+        $degree = count($rows[0]);
+
+        $query = null;
+        foreach ($rows as $row) {
+            if (count($row) !== $degree) {
+                throw new SqlSyntaxException(
+                    "All rows of a VALUES constructor must have the same number of columns"
+                    . " (expected {$degree}, got " . count($row) . ")",
+                    $this->sql,
+                    $startPos
+                );
+            }
+
+            $select = new SelectStatement();
+            foreach ($row as $i => $expr) {
+                $select->columns[] = new ColumnNode($expr, 'column' . ($i + 1));
+            }
+
+            $query = $query === null ? $select : new UnionNode($query, $select, true, 'UNION');
+        }
+
+        return $query;
+    }
+
+    /**
+     * Apply a derived column list — `FROM (...) AS v(x, y)` — to a derived table
+     *
+     * SQL:2003 renames the derived table's columns positionally. Implemented by
+     * rewriting the aliases of the underlying select list, which is why the
+     * degree has to match exactly and `SELECT *` cannot be renamed: neither can
+     * be resolved without a schema the parser does not have.
+     *
+     * @param string[] $names
+     */
+    private function applyDerivedColumnList(SubqueryNode $subquery, array $names, int $pos): void
+    {
+        $this->renameSelectList($subquery->query, $names, $pos);
+    }
+
+    /** @param string[] $names */
+    private function renameSelectList(ASTNode $query, array $names, int $pos): void
+    {
+        if ($query instanceof UnionNode) {
+            $this->renameSelectList($query->left, $names, $pos);
+            $this->renameSelectList($query->right, $names, $pos);
+            return;
+        }
+
+        if (!$query instanceof SelectStatement) {
+            throw new SqlSyntaxException(
+                "A derived column list is not supported on this kind of derived table",
+                $this->sql,
+                $pos
+            );
+        }
+
+        if (count($query->columns) !== count($names)) {
+            throw new SqlSyntaxException(
+                "Derived column list has " . count($names) . " name(s) but the derived table has "
+                . count($query->columns) . " column(s)",
+                $this->sql,
+                $pos
+            );
+        }
+
+        foreach ($query->columns as $i => $column) {
+            if ($column->expression instanceof IdentifierNode && $column->expression->isWildcard()) {
+                throw new SqlSyntaxException(
+                    "A derived column list requires an explicit select list, not *",
+                    $this->sql,
+                    $pos
+                );
+            }
+            $column->alias = $names[$i];
+        }
+    }
+
+    /**
+     * Optional derived column list after a derived table alias: `AS v(x, y)`
+     *
+     * @return string[]|null
+     */
+    private function parseOptionalDerivedColumnList(): ?array
+    {
+        if (!$this->match(SqlLexer::T_LPAREN)) {
+            return null;
+        }
+
+        $names = [];
+        $seen = [];
+        do {
+            $token = $this->expect(SqlLexer::T_IDENTIFIER);
+            $name = $token['value'];
+
+            // SQL:2003 requires the column names of a derived table to be
+            // unique. Accepting a duplicate silently loses a column: the later
+            // alias wins at lookup time and the earlier one becomes
+            // unreachable, so fail fast instead.
+            $key = strtolower($name);
+            if (isset($seen[$key])) {
+                throw new SqlSyntaxException(
+                    "Derived column list has a duplicate column name \"$name\"",
+                    $this->sql,
+                    $token['pos']
+                );
+            }
+            $seen[$key] = true;
+
+            $names[] = $name;
+        } while ($this->match(SqlLexer::T_COMMA));
+        $this->expect(SqlLexer::T_RPAREN);
+
+        return $names;
     }
 
     /**
@@ -783,9 +1005,13 @@ class SqlParser
             return new BinaryOperation($left, $op, $right);
         }
 
-        // Handle IS NULL / IS NOT NULL
+        // Handle IS NULL / IS NOT NULL / IS [NOT] DISTINCT FROM
         if ($this->match(SqlLexer::T_IS)) {
             $negated = $this->match(SqlLexer::T_NOT);
+            if ($this->match(SqlLexer::T_DISTINCT)) {
+                $this->expectKeyword('FROM');
+                return new DistinctFromOperation($left, $this->parseAdditive(), $negated);
+            }
             $this->expect(SqlLexer::T_NULL);
             return new IsNullOperation($left, $negated);
         }
@@ -863,10 +1089,12 @@ class SqlParser
 
         $this->expect(SqlLexer::T_LPAREN);
 
-        // Check for Subquery (supports UNION/INTERSECT/EXCEPT and a leading WITH -
-        // SQL:2003 allows a full <query expression> here, not just a SELECT)
+        // Check for Subquery (supports UNION/INTERSECT/EXCEPT, a leading WITH and
+        // a VALUES table constructor - SQL:2003 allows a full <query expression>
+        // here, not just a SELECT)
         if ($this->current()['type'] === SqlLexer::T_SELECT
-            || $this->current()['type'] === SqlLexer::T_WITH) {
+            || $this->current()['type'] === SqlLexer::T_WITH
+            || $this->current()['type'] === SqlLexer::T_VALUES) {
             $subquery = $this->parseSelectOrUnion();
             $this->expect(SqlLexer::T_RPAREN);
             return new InOperation($left, new SubqueryNode($subquery), $negated);
@@ -979,14 +1207,29 @@ class SqlParser
 
         // Handle Parentheses and Scalar Subqueries
         if ($this->match(SqlLexer::T_LPAREN)) {
-            // Check for scalar subquery: (SELECT ...), (SELECT ... UNION ...), (WITH ... SELECT ...)
+            // Check for scalar subquery: (SELECT ...), (SELECT ... UNION ...),
+            // (WITH ... SELECT ...), (VALUES ...)
             $currentType = $this->current()['type'];
-            if ($currentType === SqlLexer::T_SELECT || $currentType === SqlLexer::T_WITH) {
+            if ($currentType === SqlLexer::T_SELECT
+                || $currentType === SqlLexer::T_WITH
+                || $currentType === SqlLexer::T_VALUES) {
                 $subquery = $this->parseSelectOrUnion();
                 $this->expect(SqlLexer::T_RPAREN);
                 return new SubqueryNode($subquery);
             }
             $expr = $this->parseExpression();
+
+            // Row value constructor: (a, b). A single parenthesised expression
+            // stays a plain grouped expression, per SQL:2003.
+            if ($this->current()['type'] === SqlLexer::T_COMMA) {
+                $values = [$expr];
+                while ($this->match(SqlLexer::T_COMMA)) {
+                    $values[] = $this->parseExpression();
+                }
+                $this->expect(SqlLexer::T_RPAREN);
+                return new RowValueNode($values);
+            }
+
             $this->expect(SqlLexer::T_RPAREN);
             return $expr;
         }
@@ -1017,6 +1260,17 @@ class SqlParser
         // Handle Identifiers, Qualified Names (table.column), and Function Calls
         if ($token['type'] === SqlLexer::T_IDENTIFIER) {
             $next = $this->peek();
+
+            // Typed datetime literal: DATE '2020-01-01' and friends. DATE,
+            // TIME and TIMESTAMP stay ordinary identifiers (they are common
+            // column and type names); only a string literal immediately after
+            // one of them can be a typed literal, and nothing else can.
+            if ($next['type'] === SqlLexer::T_STRING
+                && \in_array(strtoupper($token['value']), ['DATE', 'TIME', 'TIMESTAMP'], true)
+            ) {
+                return $this->parseDatetimeLiteral();
+            }
+
             if ($next['type'] === SqlLexer::T_LPAREN) {
                 // Two "functions" whose arguments are separated by a keyword
                 // rather than a comma. They cannot be expressed as an ordinary
@@ -1024,6 +1278,9 @@ class SqlParser
                 $upper = strtoupper($token['value']);
                 if ($upper === 'CAST') {
                     return $this->parseCastExpression();
+                }
+                if ($upper === 'EXTRACT') {
+                    return $this->parseExtractExpression();
                 }
                 if ($upper === 'POSITION') {
                     return $this->parsePositionExpression();
@@ -1265,6 +1522,91 @@ class SqlParser
     }
 
     /**
+     * DATE 'x' / TIME 'x' / TIMESTAMP 'x' - SQL:2003 F051-01/02/03
+     *
+     * Mini has no date *type*: the engine stores datetimes as text in the
+     * canonical `Y-m-d H:i:s` shape, and comparison, ordering and grouping all
+     * work on those strings because the format sorts lexicographically. So a
+     * typed literal is not a conversion - it is an assertion about the format,
+     * checked here and then carried as an ordinary text value.
+     *
+     * The check is deliberately strict: only the standard's own spelling is
+     * accepted (zero-padded fields, a space between date and time), and the
+     * date has to exist on the calendar. `DATE '2020-2-3'` and
+     * `DATE '2020-02-30'` are errors rather than guesses. The rules live in
+     * {@see DatetimeText} because the evaluator has to apply the identical
+     * ones to text arriving from a column - a parser that rejects
+     * `DATE '2020-13-45'` while EXTRACT reports month 13 for the same
+     * characters would be worse than either behaviour alone.
+     *
+     * The value type is kept on the node for introspection, but the literal
+     * renders as a plain quoted string: the engine's reference backend
+     * (SQLite) has no typed literal syntax, and a quoted string means exactly
+     * the same thing everywhere the text form is stored.
+     */
+    private function parseDatetimeLiteral(): LiteralNode
+    {
+        $keyword = strtoupper($this->expect(SqlLexer::T_IDENTIFIER)['value']);
+        $token = $this->expect(SqlLexer::T_STRING);
+        $value = $token['value'];
+
+        try {
+            DatetimeText::parse($value, $keyword);
+        } catch (\InvalidArgumentException $e) {
+            throw new SqlSyntaxException(
+                "$keyword literal " . $e->getMessage(),
+                $this->sql,
+                $token['pos']
+            );
+        }
+
+        return new LiteralNode($value, strtolower($keyword));
+    }
+
+    /**
+     * EXTRACT(field FROM source) - SQL:2003 F052
+     *
+     * The field is a keyword rather than an expression, so this is grammar,
+     * not a registrable function. The source is evaluated normally and the
+     * field is checked here so that `EXTRACT(WEEK FROM x)` fails at parse
+     * time, where the position of the mistake is still known.
+     */
+    private function parseExtractExpression(): ExtractNode
+    {
+        $this->expect(SqlLexer::T_IDENTIFIER); // EXTRACT
+        $this->expect(SqlLexer::T_LPAREN);
+
+        $fieldToken = $this->current();
+        $field = $fieldToken['type'] === SqlLexer::T_IDENTIFIER
+            ? strtoupper($fieldToken['value'])
+            : '';
+
+        if (!\in_array($field, ExtractNode::FIELDS, true)) {
+            throw new SqlSyntaxException(
+                'EXTRACT requires one of ' . implode(', ', ExtractNode::FIELDS)
+                    . ' as its field, in the form EXTRACT(field FROM source)',
+                $this->sql,
+                $fieldToken['pos'] ?? strlen($this->sql)
+            );
+        }
+        $this->pos++;
+
+        if (!$this->match(SqlLexer::T_FROM)) {
+            $curr = $this->current();
+            throw new SqlSyntaxException(
+                'EXTRACT requires the form EXTRACT(field FROM source)',
+                $this->sql,
+                $curr['pos'] ?? strlen($this->sql)
+            );
+        }
+
+        $source = $this->parseExpression();
+        $this->expect(SqlLexer::T_RPAREN);
+
+        return new ExtractNode($field, $source);
+    }
+
+    /**
      * Consume an identifier used as a keyword (FOR, LEADING, ...) if present
      */
     private function matchSoftKeyword(string $keyword): bool
@@ -1344,7 +1686,12 @@ class SqlParser
                 } elseif ($this->match(SqlLexer::T_DESC)) {
                     $direction = 'DESC';
                 }
-                $orderBy[] = ['expr' => $expr, 'direction' => $direction];
+                $item = ['expr' => $expr, 'direction' => $direction];
+                $nulls = $this->parseNullsOption();
+                if ($nulls !== null) {
+                    $item['nulls'] = $nulls;
+                }
+                $orderBy[] = $item;
             } while ($this->match(SqlLexer::T_COMMA));
         }
 
@@ -1437,6 +1784,7 @@ class SqlParser
         SqlLexer::T_INNER,
         SqlLexer::T_FULL,
         SqlLexer::T_CROSS,
+        SqlLexer::T_NATURAL,
     ];
 
     private function isJoinStart(): bool
@@ -1446,7 +1794,19 @@ class SqlParser
 
     private function parseJoin(): JoinNode
     {
+        // NATURAL [INNER|LEFT|RIGHT|FULL [OUTER]] JOIN - the join columns are
+        // the columns the two operands have in common, so the join carries no
+        // ON/USING of its own.
+        $natural = $this->match(SqlLexer::T_NATURAL);
         $joinType = $this->parseJoinType();
+
+        if ($natural && $joinType === 'CROSS') {
+            throw new SqlSyntaxException(
+                "NATURAL CROSS JOIN is not valid SQL",
+                $this->sql,
+                $this->current()['pos']
+            );
+        }
 
         // Check for derived table in JOIN
         if ($this->current()['type'] === SqlLexer::T_LPAREN) {
@@ -1461,6 +1821,13 @@ class SqlParser
                 $this->pos++;
             } else {
                 throw new \RuntimeException("Derived table in JOIN requires an alias");
+            }
+
+            // Optional derived column list: JOIN (VALUES (1)) AS v(x) ON ...
+            $columnListPos = $this->current()['pos'];
+            $columnList = $this->parseOptionalDerivedColumnList();
+            if ($columnList !== null) {
+                $this->applyDerivedColumnList($table, $columnList, $columnListPos);
             }
         } else {
             $table = $this->parseIdentifier();
@@ -1477,19 +1844,84 @@ class SqlParser
             }
         }
 
-        // ON condition (required for all except CROSS JOIN)
+        // Join specification: ON <condition> | USING (col, ...).
+        // Required for every join type except CROSS and NATURAL, which have
+        // an implicit one.
         $condition = null;
-        if ($this->match(SqlLexer::T_ON)) {
-            $condition = $this->parseExpression();
+        $using = null;
+
+        if ($natural) {
+            if ($this->current()['type'] === SqlLexer::T_ON
+                || $this->current()['type'] === SqlLexer::T_USING
+            ) {
+                throw new SqlSyntaxException(
+                    "NATURAL JOIN cannot have an ON or USING clause",
+                    $this->sql,
+                    $this->current()['pos']
+                );
+            }
+        } elseif ($this->current()['type'] === SqlLexer::T_ON
+            || $this->current()['type'] === SqlLexer::T_USING
+        ) {
+            // A CROSS JOIN is a cartesian product by definition and takes no
+            // join specification (SQL:2003 7.7 <cross join>). Accepting one
+            // and then ignoring it - which is what applyJoin() did, since it
+            // builds a CrossJoinTable before ever looking at the condition -
+            // answers a cartesian product to a query that asked for a join.
+            if ($joinType === 'CROSS') {
+                $keyword = $this->current()['type'] === SqlLexer::T_ON ? 'ON' : 'USING';
+                throw new SqlSyntaxException(
+                    "CROSS JOIN cannot have a $keyword clause; write "
+                    . ($keyword === 'ON' ? 'JOIN ... ON' : 'JOIN ... USING') . ' instead',
+                    $this->sql,
+                    $this->current()['pos']
+                );
+            }
+            if ($this->match(SqlLexer::T_ON)) {
+                $condition = $this->parseExpression();
+            } else {
+                $this->expect(SqlLexer::T_USING);
+                $using = $this->parseUsingColumns();
+            }
         } elseif ($joinType !== 'CROSS') {
             throw new SqlSyntaxException(
-                "Expected ON after JOIN",
+                "Expected ON or USING after JOIN",
                 $this->sql,
                 $this->current()['pos']
             );
         }
 
-        return new JoinNode($joinType, $table, $condition, $alias);
+        return new JoinNode($joinType, $table, $condition, $alias, $using, $natural);
+    }
+
+    /**
+     * Parse the parenthesised column list of a USING clause
+     *
+     * SQL:2003 restricts these to unqualified column names - they name a column
+     * of both operands at once, so a qualifier would be meaningless.
+     *
+     * @return list<string>
+     */
+    private function parseUsingColumns(): array
+    {
+        $this->expect(SqlLexer::T_LPAREN);
+
+        $columns = [];
+        do {
+            $token = $this->expect(SqlLexer::T_IDENTIFIER);
+            if ($this->current()['type'] === SqlLexer::T_DOT) {
+                throw new SqlSyntaxException(
+                    "USING column names must be unqualified",
+                    $this->sql,
+                    $this->current()['pos']
+                );
+            }
+            $columns[] = $token['value'];
+        } while ($this->match(SqlLexer::T_COMMA));
+
+        $this->expect(SqlLexer::T_RPAREN);
+
+        return $columns;
     }
 
     private function parseJoinType(): string

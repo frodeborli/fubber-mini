@@ -4,6 +4,35 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## VDB: Core SQL grammar, engine limits, and three silent-wrong-answer fixes (2026-08-07)
+
+**BREAKING CHANGES**
+
+Continues the Core SQL work. The engine now covers the standard scalar surface (minus the datetime/interval family, deliberately) and states its operating boundaries in code.
+
+### Added
+
+- **Typed datetime literals** `DATE '…'`, `TIME '…'`, `TIMESTAMP '…'` (F051-01/02/03). Datetimes are stored as TEXT, so a typed literal asserts the format and evaluates to the string — impossible values are rejected at parse time (`DATE '2020-02-30'` and `TIME '25:00:00'` are errors, not guesses).
+- **`EXTRACT(field FROM source)`** for YEAR, MONTH, DAY, HOUR, MINUTE, SECOND. Evaluated by VirtualDatabase only and rendered verbatim — SQLite and friends reject the standard spelling, so it does not push down.
+- **`NATURAL JOIN` and `JOIN … USING (cols)`**. A merged column appears exactly once and is referenced unqualified; referring to it through either operand's qualifier is an error, as in SQLite.
+- **Row value constructors** (`WHERE (a, b) = (1, 2)`, `IN ((1,2), (3,4))`), **`IS [NOT] DISTINCT FROM`**, **`ORDER BY … NULLS FIRST/LAST`** (statement-level and in a window `ORDER BY`), and **`VALUES` as a table constructor**.
+- **Scalar functions** `MOD`, `POWER`, `SQRT`, `LN`, `EXP`, `SIGN`, `REPEAT`, `REVERSE`, `LPAD`, `RPAD` — registered through the public `createFunction()` API like every other built-in.
+- **`mini\Database\Limits`** and `VirtualDatabase::setLimits()`: `maxJoinedTables` (8), `maxSubqueryDepth` (8), `maxRecursionIterations` (10,000), `maxBufferedWrites` (1,000,000). These state in code what the engine is for — sensible SQL over heterogeneous sources, not an unbounded RDBMS. A query that exceeds one fails immediately naming the limit and how to raise it. `maxSubqueryDepth` is newly enforced; the other three replace hardcoded constants. `setMaxMaterializedRows()` still works and is now a shorthand for `maxBufferedWrites`.
+
+### Fixed — each of these silently returned a wrong answer
+
+- **`ORDER BY` combined with any join discarded the entire sort, direction included.** The in-memory sort read its key by bare property name from rows that carry qualified properties (`a.x`), so every comparison tied. Reachable without any `NULLS` clause, via a mixed `ORDER BY a.x DESC, a.id * 1`. It now reads through the expression evaluator.
+- **`ORDER BY <unknown column> NULLS LAST` returned unsorted rows and no error**, while the same query without the clause threw. The in-memory sort bypassed `applyOrderBy()`'s guard; both paths now share `resolveOrderByColumn()`. The check runs up front, so it fires even on results too short for a comparison to happen.
+- **A reference to a merged-away `USING`/`NATURAL` column slipped past the ban when an operand was aliased** — the ban list was keyed by the qualified spellings the FROM clause introduced, so `SELECT users.name FROM users u JOIN orders o USING (name)` resolved onto the merged column instead of erroring.
+- **`CROSS JOIN b USING (x)` and `CROSS JOIN b ON …` parsed and then silently discarded the clause**, answering a cartesian product to a query that asked for a join. Both are parse errors now, per SQL:2003 7.7 (`<cross join>` takes no join specification). This is a deliberate divergence from SQLite, which treats `CROSS JOIN` as an inner join with a planner hint.
+- **A window `ORDER BY` compared NULL with `<=>`**, casting NULL to `""` and ranking it equal to the empty string. It now uses the same comparator as the statement-level sort.
+- **`CHAR_LENGTH`/`CHARACTER_LENGTH` counted bytes**, making them indistinguishable from `OCTET_LENGTH` and violating the very feature (E021-04) they implement. They count characters now. The legacy byte-based `LENGTH` keeps its existing contract.
+- **`REVERSE`, `LPAD` and `RPAD` sliced multibyte sequences mid-character**, emitting invalid UTF-8 that the framework's own JSON encoder then refused to serialize. All three are character-based now (via PCRE `/u`, not ext-mbstring, which is not a declared dependency).
+
+### Known gaps, reported not fixed
+
+The aggregate/`GROUP BY` sort path has the same unknown-column hole (`GROUP BY n ORDER BY nosuchcol` returns unsorted rows silently). It sorts already-projected rows, so a guard there would wrongly reject `SELECT COUNT(*) FROM t GROUP BY c ORDER BY c`; fixing it means carrying group keys into the sort. Also pre-existing: `ORDER BY <out-of-range ordinal>` is ignored where SQLite errors, and `WHERE nosuchcol = 1` returns zero rows instead of erroring.
+
 ## VDB: pluggable scalar functions, CAST, and Core SQL scalar syntax (2026-08-06)
 
 **BREAKING CHANGES**

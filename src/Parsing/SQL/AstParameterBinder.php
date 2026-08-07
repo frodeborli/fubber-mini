@@ -20,6 +20,8 @@ use mini\Parsing\SQL\AST\{
     UpdateStatement,
     DeleteStatement,
     ColumnNode,
+    DistinctFromOperation,
+    RowValueNode,
     JoinNode
 };
 
@@ -97,6 +99,19 @@ class AstParameterBinder
             return $new;
         }
 
+        if ($node instanceof RowValueNode) {
+            $new = clone $node;
+            $new->values = array_map(fn($v) => $this->bindNode($v), $node->values);
+            return $new;
+        }
+
+        if ($node instanceof DistinctFromOperation) {
+            $new = clone $node;
+            $new->left = $this->bindNode($node->left);
+            $new->right = $this->bindNode($node->right);
+            return $new;
+        }
+
         if ($node instanceof IsNullOperation) {
             $new = clone $node;
             $new->expression = $this->bindNode($node->expression);
@@ -165,10 +180,10 @@ class AstParameterBinder
             // Bind ORDER BY expressions
             if ($node->orderBy) {
                 $new->orderBy = array_map(function ($item) {
-                    return [
-                        'column' => $this->bindNode($item['column']),
-                        'direction' => $item['direction']
-                    ];
+                    // Rebuild the item rather than replacing 'column' in place so
+                    // that any other key (NULLS FIRST/LAST) survives untouched.
+                    $item['column'] = $this->bindNode($item['column']);
+                    return $item;
                 }, $node->orderBy);
             }
 

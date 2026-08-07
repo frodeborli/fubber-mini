@@ -33,6 +33,7 @@ use mini\Parsing\SQL\AST\{
 };
 use mini\Table\Predicate;
 use mini\Table\ColumnDef;
+use mini\Table\GeneratorTable;
 use mini\Table\InMemoryTable;
 use mini\Table\ArrayTable;
 use mini\Table\Types\ColumnType;
@@ -109,8 +110,8 @@ class VirtualDatabase implements DatabaseInterface
     /** Maximum query execution time in seconds (null = no limit) */
     private ?float $queryTimeout = null;
 
-    /** Maximum rows buffered for one mutation; see setMaxMaterializedRows() */
-    private ?int $maxMaterializedRows = 1_000_000;
+    /** Deliberate boundaries on what this engine will attempt; see setLimits() */
+    private Limits $limits;
 
     /** Query start time for timeout tracking */
     private ?float $queryStartTime = null;
@@ -123,6 +124,7 @@ class VirtualDatabase implements DatabaseInterface
 
     public function __construct()
     {
+        $this->limits = new Limits();
         $this->evaluator = new PrecomputedEvaluator();
         $this->evaluator->setSubqueryExecutor(fn($query, $outerRow) => $this->executeSubqueryWithContext($query, $outerRow));
         $this->optimizer = new AstOptimizer();
@@ -258,6 +260,10 @@ class VirtualDatabase implements DatabaseInterface
      * Defaults to 1,000,000 rows. Raise it for legitimate bulk copies, or
      * lower it when accepting untrusted SQL.
      *
+     * This is a shorthand for the `maxBufferedWrites` property of {@see Limits}
+     * - the two are one setting, not two, so setting either is visible through
+     * `getLimits()`.
+     *
      * @param int|null $rows Maximum buffered rows, null to disable the cap
      */
     public function setMaxMaterializedRows(?int $rows): self
@@ -265,8 +271,42 @@ class VirtualDatabase implements DatabaseInterface
         if ($rows !== null && $rows < 1) {
             throw new \InvalidArgumentException('Max materialized rows must be at least 1, or null to disable');
         }
-        $this->maxMaterializedRows = $rows;
+
+        return $this->setLimits(new Limits(
+            maxJoinedTables: $this->limits->maxJoinedTables,
+            maxSubqueryDepth: $this->limits->maxSubqueryDepth,
+            maxRecursionIterations: $this->limits->maxRecursionIterations,
+            maxBufferedWrites: $rows,
+        ));
+    }
+
+    /**
+     * Replace the engine's limits
+     *
+     * The limits state what this engine is for: *sensible* SQL over
+     * heterogeneous sources, not an unbounded RDBMS. A query that exceeds one
+     * fails immediately with an error naming the limit and how to raise it,
+     * rather than consuming the process - which, under a Fiber-based runtime,
+     * would take every other coroutine in the worker down with it.
+     *
+     * ```php
+     * $vdb->setLimits(new Limits(maxJoinedTables: 12));
+     * ```
+     *
+     * {@see Limits} for what each limit bounds and why.
+     */
+    public function setLimits(Limits $limits): self
+    {
+        $this->limits = $limits;
         return $this;
+    }
+
+    /**
+     * The engine's current limits
+     */
+    public function getLimits(): Limits
+    {
+        return $this->limits;
     }
 
     /**
@@ -314,6 +354,7 @@ class VirtualDatabase implements DatabaseInterface
     public function execWithSession(string $sql, array $params, Session $session): int
     {
         $ast = SqlParser::parseWithParams($sql, $params);
+        $this->assertSubqueryDepth($ast);
 
         if ($ast instanceof InsertStatement) {
             return $this->executeInsertWithSession($ast, $session);
@@ -359,6 +400,85 @@ class VirtualDatabase implements DatabaseInterface
                 throw new QueryTimeoutException(
                     sprintf("Query timeout: exceeded %.2f seconds", $this->queryTimeout)
                 );
+            }
+        }
+    }
+
+    /**
+     * Reject a query that joins more tables than {@see Limits::$maxJoinedTables}
+     *
+     * The predicate-pushdown planner enumerates join orders, so its cost grows
+     * sharply with the table count. Failing here is the point: the alternative
+     * is a query that appears to hang.
+     */
+    private function assertJoinedTableLimit(int $tableCount): void
+    {
+        $max = $this->limits->maxJoinedTables;
+
+        if ($tableCount > $max) {
+            throw new \RuntimeException(
+                "Query joins $tableCount tables, exceeding the maxJoinedTables limit of $max. " .
+                "Break it into smaller queries or use subqueries, or raise the limit with " .
+                "VirtualDatabase::setLimits(new Limits(maxJoinedTables: $tableCount))."
+            );
+        }
+    }
+
+    /**
+     * Reject a statement nesting deeper than {@see Limits::$maxSubqueryDepth}
+     *
+     * Checked once per statement, before any work is done, by walking the AST -
+     * so a pathological query is rejected instead of being partially executed.
+     * The outermost query expression is depth 1; every subquery, derived table
+     * and CTE body below it is one level deeper.
+     */
+    private function assertSubqueryDepth(ASTNode $ast): void
+    {
+        $max = $this->limits->maxSubqueryDepth;
+
+        // Explicit stack rather than recursion: a query deep enough to breach
+        // the limit must not be able to exhaust the PHP stack on the way to
+        // being told so.
+        $stack = [[$ast, 1]];
+
+        while ($stack !== []) {
+            [$value, $depth] = array_pop($stack);
+
+            if (is_array($value)) {
+                foreach ($value as $child) {
+                    $stack[] = [$child, $depth];
+                }
+                continue;
+            }
+
+            if (!$value instanceof ASTNode) {
+                continue;
+            }
+
+            if ($value instanceof SubqueryNode) {
+                $depth++;
+            }
+
+            if ($depth > $max) {
+                throw new \RuntimeException(
+                    "Query nests subqueries $depth levels deep, exceeding the maxSubqueryDepth " .
+                    "limit of $max. Flatten the query, or raise the limit with " .
+                    "VirtualDatabase::setLimits(new Limits(maxSubqueryDepth: $depth))."
+                );
+            }
+
+            // A WITH clause nests only its CTE bodies - the main query it
+            // decorates sits at the same level as the WITH itself.
+            if ($value instanceof WithStatement) {
+                $stack[] = [$value->query, $depth];
+                foreach ($value->ctes as $cte) {
+                    $stack[] = [$cte['query'] ?? null, $depth + 1];
+                }
+                continue;
+            }
+
+            foreach (get_object_vars($value) as $child) {
+                $stack[] = [$child, $depth];
             }
         }
     }
@@ -756,6 +876,8 @@ class VirtualDatabase implements DatabaseInterface
                 $ast = self::peekAst($query);
             }
 
+            $this->assertSubqueryDepth($ast);
+
             if ($ast instanceof WithStatement) {
                 return $this->wrapWithTimeout($this->executeWithStatement($ast));
             }
@@ -824,6 +946,8 @@ class VirtualDatabase implements DatabaseInterface
                 if ($ast === null) {
                     $ast = self::peekAst($query);
                 }
+
+                $this->assertSubqueryDepth($ast);
 
                 if ($ast instanceof WithStatement) {
                     yield from $this->wrapWithTimeout($this->executeWithStatement($ast));
@@ -962,6 +1086,7 @@ class VirtualDatabase implements DatabaseInterface
     public function exec(string $sql, array $params = []): int
     {
         $ast = SqlParser::parseWithParams($sql, $params);
+        $this->assertSubqueryDepth($ast);
 
         if ($ast instanceof InsertStatement) {
             return $this->executeInsert($ast);
@@ -1595,7 +1720,7 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         // Iteration limit to prevent infinite loops
-        $maxIterations = 10000;
+        $maxIterations = $this->limits->maxRecursionIterations;
         $iteration = 0;
 
         while (!empty($workingRows) && $iteration < $maxIterations) {
@@ -1610,6 +1735,12 @@ class VirtualDatabase implements DatabaseInterface
             $newRows = array_values(iterator_to_array($recursiveTable));
 
             if (empty($newRows)) {
+                // Fixpoint reached. Clearing the working set is what tells the
+                // post-loop check that this was termination, not exhaustion of
+                // the iteration budget - they are otherwise indistinguishable
+                // when the fixpoint lands exactly on the last permitted
+                // iteration.
+                $workingRows = [];
                 break;
             }
 
@@ -1634,6 +1765,8 @@ class VirtualDatabase implements DatabaseInterface
                 $newRows = $fresh;
 
                 if (empty($newRows)) {
+                    // Fixpoint reached; see the note on the branch above.
+                    $workingRows = [];
                     break;
                 }
             }
@@ -1665,8 +1798,10 @@ class VirtualDatabase implements DatabaseInterface
         // so returning them would be a silently wrong answer.
         if (!empty($workingRows) && $iteration >= $maxIterations) {
             throw new \RuntimeException(
-                "Recursive CTE '$cteName' did not terminate within $maxIterations iterations. " .
-                'Add a terminating condition to the recursive term, or a LIMIT on it.'
+                "Recursive CTE '$cteName' did not terminate within the maxRecursionIterations " .
+                "limit of $maxIterations iterations. Add a terminating condition to the " .
+                'recursive term, or a LIMIT on it, or raise the limit with ' .
+                'VirtualDatabase::setLimits(new Limits(maxRecursionIterations: ...)).'
             );
         }
 
@@ -1896,31 +2031,32 @@ class VirtualDatabase implements DatabaseInterface
             }
         }
 
+        // Cap the table count before choosing a join strategy. Every join path
+        // costs at least one nested loop per table, so the bound has to apply
+        // to all of them - the un-pushed-down path is the slower one.
+        $this->assertJoinedTableLimit(1 + count($ast->joins));
+
         // Use predicate pushdown for multi-table queries with WHERE.
         // This pushes simple predicates (eq/lt/gt/like with constants) to tables
         // before joins. Outer joins are excluded: the pushdown planner rebuilds
         // joins from equi-join predicates with inner semantics, and pushing
         // WHERE into the null-extended side of an outer join is not valid.
+        // NATURAL/USING joins are excluded too: that planner rebuilds the join
+        // tree from predicates and has no place to merge the common columns.
         $hasMultipleTables = !empty($ast->joins);
         $hasWhere = $ast->where !== null;
         $hasOuterJoin = false;
+        $hasCommonColumnJoin = false;
         foreach ($ast->joins as $join) {
             if (in_array(strtoupper($join->joinType), ['LEFT', 'LEFT OUTER', 'RIGHT', 'RIGHT OUTER', 'FULL', 'FULL OUTER'], true)) {
                 $hasOuterJoin = true;
-                break;
+            }
+            if ($join->natural || $join->using !== null) {
+                $hasCommonColumnJoin = true;
             }
         }
 
-        if ($hasMultipleTables && $hasWhere && !$hasOuterJoin) {
-            // Limit tables to avoid exponential explosion
-            $tableCount = 1 + count($ast->joins);
-            if ($tableCount > 8) {
-                throw new \RuntimeException(
-                    "VDB limitation: joins limited to 8 tables (got $tableCount). " .
-                    "Break into smaller queries or use subqueries."
-                );
-            }
-
+        if ($hasMultipleTables && $hasWhere && !$hasOuterJoin && !$hasCommonColumnJoin) {
             // Use optimized path: push predicates to tables first, then join
             $table = $this->executeSelectWithPredicatePushdown($ast);
         } else {
@@ -1929,9 +2065,11 @@ class VirtualDatabase implements DatabaseInterface
                 $baseAlias = $ast->fromAlias ?? $tableName;
                 $table = $table->withAlias($baseAlias);
 
+                $mergedAway = [];
                 foreach ($ast->joins as $join) {
-                    $table = $this->applyJoin($table, $join);
+                    $table = $this->applyJoin($table, $join, $mergedAway);
                 }
+                $this->assertNoMergedColumnReferences($ast, $mergedAway);
             }
 
             // Apply WHERE - delegate to table backend
@@ -2379,9 +2517,13 @@ class VirtualDatabase implements DatabaseInterface
         foreach ($orderBy as $spec) {
             $valA = $this->evaluator->evaluate($spec['expr'], $a);
             $valB = $this->evaluator->evaluate($spec['expr'], $b);
-            $cmp = $valA <=> $valB;
+            // Same comparator as the statement-level ORDER BY, so a window
+            // ORDER BY orders NULLs the same way (and honours NULLS
+            // FIRST/LAST). A bare `<=>` casts NULL to "" and would rank NULL
+            // as *equal* to the empty string.
+            $cmp = $this->compareOrderKeys($valA, $valB, $spec);
             if ($cmp !== 0) {
-                return $spec['direction'] === 'DESC' ? -$cmp : $cmp;
+                return $cmp;
             }
         }
         return 0;
@@ -2485,6 +2627,41 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Compare two ORDER BY key values, honouring direction and null ordering
+     *
+     * SQL:2003 leaves the default position of NULL implementation-defined. This
+     * engine sorts NULL below every value - the same choice SQLite makes, so
+     * `ORDER BY x` puts NULLs first ascending and last descending. `NULLS
+     * FIRST` / `NULLS LAST` override that, and (again per the standard) the
+     * override is absolute: it is not flipped by DESC.
+     *
+     * NULL is compared explicitly rather than left to PHP's `<=>`, which casts
+     * NULL to `""` and would therefore rank NULL as *equal* to an empty string.
+     *
+     * @param array{direction?: string, nulls?: string} $item ORDER BY item
+     */
+    private function compareOrderKeys(mixed $aVal, mixed $bVal, array $item): int
+    {
+        $descending = strtoupper($item['direction'] ?? 'ASC') === 'DESC';
+
+        if ($aVal === null || $bVal === null) {
+            if ($aVal === null && $bVal === null) {
+                return 0;
+            }
+            if (!isset($item['nulls'])) {
+                return $descending
+                    ? ($aVal === null ? 1 : -1)
+                    : ($aVal === null ? -1 : 1);
+            }
+            $nullsFirst = strtoupper($item['nulls']) === 'FIRST';
+            return ($aVal === null) === $nullsFirst ? -1 : 1;
+        }
+
+        $cmp = $aVal <=> $bVal;
+        return $descending ? -$cmp : $cmp;
+    }
+
+    /**
      * Compare two rows for ORDER BY (for result sorting)
      */
     private function compareRowsForOrderBy(
@@ -2496,9 +2673,9 @@ class VirtualDatabase implements DatabaseInterface
         array $aliases = []
     ): int {
         foreach ($orderBy as $spec) {
-            // SelectStatement::$orderBy items are ['column' => ASTNode, 'direction' => string]
+            // SelectStatement::$orderBy items are
+            // ['column' => ASTNode, 'direction' => string, 'nulls' => ?string]
             $expr = $spec['column'];
-            $direction = strtoupper($spec['direction'] ?? 'ASC');
 
             // ORDER BY may name a SELECT alias rather than a source column
             if ($expr instanceof IdentifierNode && isset($aliases[$expr->getName()])) {
@@ -2508,9 +2685,9 @@ class VirtualDatabase implements DatabaseInterface
             $valA = $this->evaluateOrderKey($expr, $a, $windowValuesA);
             $valB = $this->evaluateOrderKey($expr, $b, $windowValuesB);
 
-            $cmp = $valA <=> $valB;
+            $cmp = $this->compareOrderKeys($valA, $valB, $spec);
             if ($cmp !== 0) {
-                return $direction === 'DESC' ? -$cmp : $cmp;
+                return $cmp;
             }
         }
         return 0;
@@ -2970,7 +3147,6 @@ class VirtualDatabase implements DatabaseInterface
         usort($indices, function ($a, $b) use ($results, $resultValues, $orderBy) {
             foreach ($orderBy as $item) {
                 $expr = $item['column'];
-                $direction = strtoupper($item['direction'] ?? 'ASC');
 
                 $this->evaluator->pushValues($resultValues[$a]);
                 try {
@@ -2985,11 +3161,10 @@ class VirtualDatabase implements DatabaseInterface
                     $this->evaluator->popValues();
                 }
 
-                if ($aVal === $bVal) {
-                    continue;
+                $cmp = $this->compareOrderKeys($aVal, $bVal, $item);
+                if ($cmp !== 0) {
+                    return $cmp;
                 }
-                $cmp = $aVal <=> $bVal;
-                return $direction === 'DESC' ? -$cmp : $cmp;
             }
             return 0;
         });
@@ -3155,7 +3330,6 @@ class VirtualDatabase implements DatabaseInterface
         usort($results, function ($a, $b) use ($orderBy, $columnNames) {
             foreach ($orderBy as $item) {
                 $colExpr = $item['column'];
-                $direction = strtoupper($item['direction'] ?? 'ASC');
 
                 // Get column name - could be identifier, numeric index, or expression
                 if ($colExpr instanceof IdentifierNode) {
@@ -3177,16 +3351,10 @@ class VirtualDatabase implements DatabaseInterface
                     $bVal = $this->evaluator->evaluate($colExpr, $b);
                 }
 
-                if ($aVal === $bVal) {
-                    continue;
+                $cmp = $this->compareOrderKeys($aVal, $bVal, $item);
+                if ($cmp !== 0) {
+                    return $cmp;
                 }
-
-                $cmp = $aVal <=> $bVal;
-                if ($direction === 'DESC') {
-                    $cmp = -$cmp;
-                }
-
-                return $cmp;
             }
             return 0;
         });
@@ -3216,7 +3384,6 @@ class VirtualDatabase implements DatabaseInterface
         usort($results, function ($a, $b) use ($orderBy, $aliasToExpr, $columnNames) {
             foreach ($orderBy as $item) {
                 $colExpr = $item['column'];
-                $direction = strtoupper($item['direction'] ?? 'ASC');
 
                 // Determine which row to evaluate against
                 if ($colExpr instanceof IdentifierNode) {
@@ -3226,9 +3393,14 @@ class VirtualDatabase implements DatabaseInterface
                         $aVal = $a['projected']->$name ?? null;
                         $bVal = $b['projected']->$name ?? null;
                     } else {
-                        // Table column - use original row
-                        $aVal = $a['original']->$name ?? null;
-                        $bVal = $b['original']->$name ?? null;
+                        // Table column - use original row. Read it through the
+                        // evaluator rather than as a property: the rows of a
+                        // join carry *qualified* properties (`a.x`, `b.y`), so
+                        // `$row->x ?? null` was null for every row, every
+                        // comparison tied, and the whole ORDER BY - direction
+                        // included - was silently discarded.
+                        $aVal = $this->evaluator->evaluate($colExpr, $a['original']);
+                        $bVal = $this->evaluator->evaluate($colExpr, $b['original']);
                     }
                 } elseif ($colExpr instanceof LiteralNode && is_numeric($colExpr->value)) {
                     // ORDER BY 1, ORDER BY 2, etc. - 1-based column index
@@ -3245,16 +3417,10 @@ class VirtualDatabase implements DatabaseInterface
                     $bVal = $this->evaluator->evaluate($colExpr, $b['original']);
                 }
 
-                if ($aVal === $bVal) {
-                    continue;
+                $cmp = $this->compareOrderKeys($aVal, $bVal, $item);
+                if ($cmp !== 0) {
+                    return $cmp;
                 }
-
-                $cmp = $aVal <=> $bVal;
-                if ($direction === 'DESC') {
-                    $cmp = -$cmp;
-                }
-
-                return $cmp;
             }
             return 0;
         });
@@ -3427,30 +3593,29 @@ class VirtualDatabase implements DatabaseInterface
                 : $readableWhere;
         }
 
+        // Cap the table count before choosing a join strategy; see executeSelect().
+        $this->assertJoinedTableLimit(1 + count($ast->joins));
+
         // Use predicate pushdown for multi-table queries with WHERE.
         // Outer joins are excluded: the pushdown planner rebuilds joins from
         // equi-join predicates with inner semantics, and pushing WHERE into
         // the null-extended side of an outer join is not valid.
+        // NATURAL/USING joins are excluded too: that planner rebuilds the join
+        // tree from predicates and has no place to merge the common columns.
         $hasMultipleTables = !empty($ast->joins);
         $hasWhere = $ast->where !== null;
         $hasOuterJoin = false;
+        $hasCommonColumnJoin = false;
         foreach ($ast->joins as $join) {
             if (in_array(strtoupper($join->joinType), ['LEFT', 'LEFT OUTER', 'RIGHT', 'RIGHT OUTER', 'FULL', 'FULL OUTER'], true)) {
                 $hasOuterJoin = true;
-                break;
+            }
+            if ($join->natural || $join->using !== null) {
+                $hasCommonColumnJoin = true;
             }
         }
 
-        if ($hasMultipleTables && $hasWhere && !$hasOuterJoin) {
-            // Limit tables to avoid exponential explosion
-            $tableCount = 1 + count($ast->joins);
-            if ($tableCount > 8) {
-                throw new \RuntimeException(
-                    "VDB limitation: joins limited to 8 tables (got $tableCount). " .
-                    "Break into smaller queries or use subqueries."
-                );
-            }
-
+        if ($hasMultipleTables && $hasWhere && !$hasOuterJoin && !$hasCommonColumnJoin) {
             // Use optimized path: push predicates to tables first, then join
             $table = $this->executeSelectWithPredicatePushdown($ast);
         } else {
@@ -3459,9 +3624,11 @@ class VirtualDatabase implements DatabaseInterface
                 $baseAlias = $ast->fromAlias ?? $tableName;
                 $table = $table->withAlias($baseAlias);
 
+                $mergedAway = [];
                 foreach ($ast->joins as $join) {
-                    $table = $this->applyJoin($table, $join);
+                    $table = $this->applyJoin($table, $join, $mergedAway);
                 }
+                $this->assertNoMergedColumnReferences($ast, $mergedAway);
             }
 
             // Apply WHERE
@@ -5532,7 +5699,7 @@ class VirtualDatabase implements DatabaseInterface
         // see PendingWrites. Applying during the scan would feed the new rows
         // back into it and `INSERT INTO t SELECT ... FROM t` would never
         // terminate.
-        $writes = new PendingWrites('INSERT ... SELECT', $this->maxMaterializedRows);
+        $writes = new PendingWrites('INSERT ... SELECT', $this->limits->maxBufferedWrites);
         $inserted = 0;
 
         foreach ($this->executeSelect($ast->select) as $row) {
@@ -5692,7 +5859,7 @@ class VirtualDatabase implements DatabaseInterface
 
         // Log every update during the scan and apply them afterwards - writing
         // mid-scan would let an updated row change the rows still to be read.
-        $writes = new PendingWrites('UPDATE', $this->maxMaterializedRows);
+        $writes = new PendingWrites('UPDATE', $this->limits->maxBufferedWrites);
 
         // Rows without a primary key are addressed by rowid, which only the
         // built-in tables expose. Fail before doing any work rather than
@@ -6089,6 +6256,13 @@ class VirtualDatabase implements DatabaseInterface
             $column = $this->resolveColumnForTable($this->buildQualifiedColumnName($node->expression), $table);
             $nullRows = $table->eq($column, null);
             return $node->negated ? $table->except($nullRows) : $nullRows;
+        }
+
+        // IS [NOT] DISTINCT FROM - NULL-safe, so none of the pushdown paths
+        // apply: TableInterface::eq() drops NULLs and every predicate here
+        // assumes a comparison against NULL is UNKNOWN. Evaluate row by row.
+        if ($node instanceof \mini\Parsing\SQL\AST\DistinctFromOperation) {
+            return $this->filterByExpression($table, $node);
         }
 
         // IN operation
@@ -6893,14 +7067,6 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function applyOrderBy(TableInterface $table, array $orderBy): TableInterface
     {
-        // Column set used to validate the ORDER BY references. A PartialQuery
-        // resolves its schema by executing a query against its own database,
-        // which for a PartialQuery registered as a table in that same database
-        // recurses (a pre-existing defect, also reachable through WHERE), so
-        // skip validation rather than force the schema fetch. An empty column
-        // set means "schema not known", which is also not validatable.
-        $available = $table instanceof PartialQuery ? null : ($table->getColumns() ?: null);
-
         $parts = [];
         foreach ($orderBy as $item) {
             $colExpr = $item['column'];
@@ -6910,31 +7076,59 @@ class VirtualDatabase implements DatabaseInterface
                 throw new \RuntimeException("ORDER BY expression must be a column");
             }
 
-            $name = $this->buildQualifiedColumnName($colExpr);
-
-            if ($available === null) {
-                $parts[] = $name . ' ' . $direction;
-                continue;
-            }
-
-            $resolved = $this->resolveColumnForTable($name, $table);
-
-            // Fail fast: an ORDER BY naming a column the table does not expose
-            // used to be handed to order() anyway, where it silently no-opped
-            // (or, over a set operation, partially pushed into one branch and
-            // scrambled the output). Sorting by something that does not exist
-            // is always a bug in the query.
-            if (!isset($available[$resolved])) {
+            // TableInterface::order() has no way to express null ordering. The
+            // SELECT path routes such a query to the in-memory sort instead
+            // (see orderByNeedsExpressionEval()); the set-operation path has no
+            // such fallback, so say so rather than silently sorting differently
+            // from what was asked for.
+            if (isset($item['nulls'])) {
                 throw new \RuntimeException(
-                    "ORDER BY references unknown column: {$name} (available: "
-                    . implode(', ', array_keys($available)) . ")"
+                    "ORDER BY ... NULLS {$item['nulls']} is not supported on a set operation"
+                    . " (UNION/INTERSECT/EXCEPT); wrap it in a derived table instead"
                 );
             }
+
+            $resolved = $this->resolveOrderByColumn($table, $colExpr)
+                ?? $this->buildQualifiedColumnName($colExpr);
 
             $parts[] = $resolved . ' ' . $direction;
         }
 
         return $table->order(implode(', ', $parts));
+    }
+
+    /**
+     * Resolve one ORDER BY column against a table, failing fast if it is unknown
+     *
+     * Sorting by a column that does not exist is always a bug in the query:
+     * pushed into `order()` it silently no-ops, and sorted in memory it makes
+     * every comparison tie. Either way a typo returns unsorted rows and no
+     * error, which is why both ORDER BY paths run this check.
+     *
+     * Returns null when the table's schema is not knowable (a PartialQuery
+     * resolves its schema by executing a query against its own database, which
+     * for a PartialQuery registered as a table in that same database recurses;
+     * an empty column set means "schema not known"). Callers then skip the
+     * check rather than force the schema fetch.
+     */
+    private function resolveOrderByColumn(TableInterface $table, IdentifierNode $colExpr): ?string
+    {
+        $available = $table instanceof PartialQuery ? null : ($table->getColumns() ?: null);
+        if ($available === null) {
+            return null;
+        }
+
+        $name = $this->buildQualifiedColumnName($colExpr);
+        $resolved = $this->resolveColumnForTable($name, $table);
+
+        if (!isset($available[$resolved])) {
+            throw new \RuntimeException(
+                "ORDER BY references unknown column: {$name} (available: "
+                . implode(', ', array_keys($available)) . ")"
+            );
+        }
+
+        return $resolved;
     }
 
     /**
@@ -6959,6 +7153,12 @@ class VirtualDatabase implements DatabaseInterface
 
         foreach ($orderBy as $item) {
             $colExpr = $item['column'];
+
+            // NULLS FIRST/LAST cannot be expressed in a TableInterface order
+            // spec, so it has to be sorted here rather than pushed down.
+            if (isset($item['nulls'])) {
+                return true;
+            }
 
             // Not an identifier = expression (needs eval)
             if (!$colExpr instanceof IdentifierNode) {
@@ -6992,19 +7192,25 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         // Determine which ORDER BY items need original row context
-        // (expressions that reference columns not in SELECT aliases)
+        // (expressions that reference columns not in SELECT aliases), and
+        // check the plain column references while we are here.
+        //
+        // This path bypasses applyOrderBy(), so it used to bypass its
+        // unknown-column guard too: `ORDER BY nosuchcol NULLS LAST` returned
+        // unsorted rows and no error, while the same query without the NULLS
+        // clause threw. A typo'd column name has to fail either way.
         $needsOriginalRow = false;
         foreach ($ast->orderBy as $item) {
             $colExpr = $item['column'];
             if (!$colExpr instanceof IdentifierNode) {
                 $needsOriginalRow = true;
-                break;
+                continue;
             }
             $name = $colExpr->getName();
             if (!isset($aliasToExpr[$name])) {
-                // Not an alias - might be a table column
+                // Not an alias - must be a column of the source table
+                $this->resolveOrderByColumn($table, $colExpr);
                 $needsOriginalRow = true;
-                break;
             }
         }
 
@@ -7153,10 +7359,16 @@ class VirtualDatabase implements DatabaseInterface
      *
      * @param TableInterface $left The left table (already aliased)
      * @param \mini\Parsing\SQL\AST\JoinNode $join The JOIN AST node
+     * @param array<string, string> $mergedAway Out-parameter, accumulated across the
+     *        joins of one statement: lowercased bare name of a column that a
+     *        NATURAL/USING join merged => the name as spelled.
      * @return TableInterface The joined table
      */
-    private function applyJoin(TableInterface $left, \mini\Parsing\SQL\AST\JoinNode $join): TableInterface
-    {
+    private function applyJoin(
+        TableInterface $left,
+        \mini\Parsing\SQL\AST\JoinNode $join,
+        array &$mergedAway = []
+    ): TableInterface {
         // Handle derived table in JOIN
         if ($join->table instanceof SubqueryNode) {
             $rightTable = $this->executeDerivedTable($join->table, $join->alias);
@@ -7180,21 +7392,334 @@ class VirtualDatabase implements DatabaseInterface
             return new CrossJoinTable($left, $rightTable);
         }
 
+        // NATURAL / USING: derive the equi-join condition from the operands'
+        // column names. From here on these joins are ordinary ON joins, except
+        // that the common columns are merged into one on the way out.
+        $condition = $join->condition;
+        $commonColumns = [];
+        if ($join->natural || $join->using !== null) {
+            [$condition, $commonColumns] = $this->resolveCommonColumnJoin($left, $rightTable, $join);
+        }
+
         // Build predicate from ON condition
-        if ($join->condition === null) {
+        if ($condition === null) {
             throw new \RuntimeException(strtoupper($join->joinType) . " JOIN requires ON condition");
         }
 
-        $bindPredicate = $this->buildJoinPredicate($join->condition, $rightAlias);
+        $bindPredicate = $this->buildJoinPredicate($condition, $rightAlias);
         $leftWithBind = $left->withProperty('__bind__', $bindPredicate);
 
-        return match (strtoupper($join->joinType)) {
+        $joined = match (strtoupper($join->joinType)) {
             'INNER', 'JOIN' => new InnerJoinTable($leftWithBind, $rightTable),
             'LEFT', 'LEFT OUTER' => new LeftJoinTable($leftWithBind, $rightTable),
             'RIGHT', 'RIGHT OUTER' => new RightJoinTable($leftWithBind, $rightTable),
             'FULL', 'FULL OUTER' => new FullJoinTable($leftWithBind, $rightTable),
             default => throw new \RuntimeException("Unsupported join type: {$join->joinType}"),
         };
+
+        if ($commonColumns === []) {
+            return $joined;
+        }
+
+        // A merged column stops having *any* qualified spelling - see
+        // mergeCommonColumns(). Record the bare name it is exposed under, so
+        // the rest of the statement can be checked for qualified references
+        // to it.
+        //
+        // Recording the operands' qualified names instead (`users.name`,
+        // `orders.name`) was a bypass: the ban list then depended on which
+        // spelling the FROM clause happened to introduce, so
+        // `FROM users u JOIN orders o USING (name)` banned `u.name` and `o.name`
+        // but let `users.name` through - where IdentifierNode::getName() drops
+        // the qualifier and the merged column answers under its bare name.
+        // Keyed lowercase: unquoted SQL identifiers are case-insensitive.
+        foreach (array_keys($commonColumns) as $leftColumn) {
+            $exposed = $this->unqualifiedColumnName($leftColumn);
+            $mergedAway[strtolower($exposed)] = $exposed;
+        }
+
+        return $this->mergeCommonColumns($joined, $commonColumns);
+    }
+
+    /**
+     * Resolve the join columns of a NATURAL or USING join
+     *
+     * Returns the synthesised ON condition (an AND-chain of `left.c = right.c`)
+     * together with a map of qualified left column name => qualified right
+     * column name for every common column. The AST node is never mutated: the
+     * parse cache is shared, and the resolution depends on the tables in scope.
+     *
+     * @return array{0: \mini\Parsing\SQL\AST\ASTNode, 1: array<string, string>}
+     */
+    private function resolveCommonColumnJoin(
+        TableInterface $left,
+        TableInterface $right,
+        \mini\Parsing\SQL\AST\JoinNode $join
+    ): array {
+        $leftColumns = array_keys($left->getColumns());
+        $rightColumns = array_keys($right->getColumns());
+
+        if ($join->natural) {
+            $names = array_values(array_intersect(
+                array_unique(array_map($this->unqualifiedColumnName(...), $leftColumns)),
+                array_map($this->unqualifiedColumnName(...), $rightColumns)
+            ));
+
+            // A NATURAL JOIN with nothing in common degenerates to a cross
+            // join. That is what the standard says, and it is almost always a
+            // mistake - the join keys are invisible in the query text, so the
+            // cartesian product arrives silently. Mini fails fast instead;
+            // write CROSS JOIN when a cross join is what you mean.
+            if ($names === []) {
+                throw new \RuntimeException(
+                    "NATURAL JOIN has no columns in common (left: "
+                    . implode(', ', $leftColumns) . " / right: " . implode(', ', $rightColumns)
+                    . "). Use CROSS JOIN if a cartesian product is intended."
+                );
+            }
+        } else {
+            $names = $join->using;
+        }
+
+        $condition = null;
+        $common = [];
+
+        foreach ($names as $name) {
+            $leftColumn = $this->resolveCommonColumn($name, $leftColumns, 'left');
+            $rightColumn = $this->resolveCommonColumn($name, $rightColumns, 'right');
+
+            $equality = new BinaryOperation(
+                new IdentifierNode(explode('.', $leftColumn)),
+                '=',
+                new IdentifierNode(explode('.', $rightColumn))
+            );
+            $condition = $condition === null
+                ? $equality
+                : new BinaryOperation($condition, 'AND', $equality);
+
+            $common[$leftColumn] = $rightColumn;
+        }
+
+        return [$condition, $common];
+    }
+
+    /**
+     * Find the single column of an operand exposed under an unqualified name
+     *
+     * @param list<string> $columns Qualified (or bare) column names of the operand
+     */
+    private function resolveCommonColumn(string $name, array $columns, string $side): string
+    {
+        $matches = [];
+        foreach ($columns as $column) {
+            if ($column === $name || str_ends_with($column, '.' . $name)) {
+                $matches[] = $column;
+            }
+        }
+
+        if ($matches === []) {
+            throw new \RuntimeException(
+                "Join column '$name' does not exist in the $side operand (has: "
+                . implode(', ', $columns) . ")"
+            );
+        }
+        if (count($matches) > 1) {
+            throw new \RuntimeException(
+                "Join column '$name' is ambiguous in the $side operand (matches: "
+                . implode(', ', $matches) . ")"
+            );
+        }
+
+        return $matches[0];
+    }
+
+    /**
+     * Strip the table qualifier from a column name ("u.id" -> "id")
+     */
+    private function unqualifiedColumnName(string $column): string
+    {
+        $pos = strrpos($column, '.');
+        return $pos === false ? $column : substr($column, $pos + 1);
+    }
+
+    /**
+     * Collapse the common columns of a NATURAL/USING join into one column each
+     *
+     * SQL:2003 exposes a join column of a NATURAL/USING join exactly once, and
+     * its value is the coalesce of both sides - which matters for the outer
+     * variants, where the non-preserved side is null-extended.
+     *
+     * The merged column belongs to *neither* operand, so it is exposed under
+     * the bare column name (`name`, not `users.name`) - the same label SQLite
+     * and PostgreSQL print for it - and both operands' qualified copies are
+     * dropped. Keeping the merged value under the left operand's qualified
+     * name would make `users.name` and `orders.name` silently resolve to the
+     * coalesced value, which is a different value from either side's on an
+     * unmatched row of an outer join. Mini rejects those references instead;
+     * see assertNoMergedColumnReferences().
+     *
+     * @param array<string, string> $common Left qualified name => right qualified name
+     */
+    private function mergeCommonColumns(TableInterface $joined, array $common): TableInterface
+    {
+        $keep = [];
+        $defs = [];
+        foreach ($joined->getColumns() as $name => $def) {
+            if (in_array($name, $common, true)) {
+                continue; // the right operand's copy - folded into the left's
+            }
+            // A merged join column belongs to neither operand: expose it bare.
+            $exposed = isset($common[$name]) ? $this->unqualifiedColumnName($name) : $name;
+            $keep[$exposed] = $name;
+            // A merged join column is no longer unique: two rows of the
+            // preserved side can carry the same key value.
+            $defs[] = new ColumnDef(
+                $exposed,
+                $def->type,
+                isset($common[$name]) && $def->index->isUnique() ? IndexType::Index : $def->index
+            );
+        }
+
+        return new GeneratorTable(function () use ($joined, $keep, $common): \Generator {
+            foreach ($joined as $key => $row) {
+                $merged = new \stdClass();
+                foreach ($keep as $exposed => $name) {
+                    $value = $row->$name ?? null;
+                    if ($value === null && isset($common[$name])) {
+                        $shadowed = $common[$name];
+                        $value = $row->$shadowed ?? null;
+                    }
+                    $merged->$exposed = $value;
+                }
+                yield $key => $merged;
+            }
+        }, ...$defs);
+    }
+
+    /**
+     * Reject references to a column that a NATURAL/USING join merged away
+     *
+     * A merged join column is the coalesce of both operands' copies, and on an
+     * unmatched row of an outer join it equals neither. SQLite and PostgreSQL
+     * keep both originals addressable alongside the merged column; this engine
+     * builds join rows out of qualified column names and has no way to carry a
+     * column that `SELECT *` must not show, so it rejects the qualified
+     * spellings outright rather than answering with the coalesced value.
+     *
+     * The ban is on the *bare* name, whatever qualifier precedes it. Banning
+     * the operands' qualified spellings instead left two holes, both of which
+     * ended in the merged column answering under its bare name (which is what
+     * IdentifierNode::getName() resolves to once the qualifier does not match
+     * a property): a qualifier the FROM clause never introduced
+     * (`users.name` where the operand is `users u`), and a *third* table that
+     * genuinely has a column of the same name, whose own value is then
+     * unreachable. Both now say the same thing: a merged column has no
+     * qualified spelling.
+     *
+     * The check runs over every clause evaluated after the FROM - SELECT list
+     * (including nested expressions), WHERE, GROUP BY, HAVING, ORDER BY - so
+     * the same identifier fails the same way everywhere. It descends into
+     * subqueries, except where the subquery re-binds the qualifier to a table
+     * of its own.
+     *
+     * @param array<string, string> $mergedAway Lowercased bare name => name as spelled
+     */
+    private function assertNoMergedColumnReferences(SelectStatement $ast, array $mergedAway): void
+    {
+        if ($mergedAway === []) {
+            return;
+        }
+
+        $nodes = array_merge(
+            $ast->columns,
+            $ast->groupBy ?? [],
+            $ast->orderBy ?? [],
+            array_filter([$ast->where, $ast->having])
+        );
+
+        foreach ($nodes as $node) {
+            $this->walkForMergedColumns($node, $mergedAway);
+        }
+    }
+
+    /**
+     * @param array<string, string> $mergedAway Lowercased bare name => name as spelled
+     * @param array<string, true> $shadowed Lowercased qualifiers re-bound by an
+     *        enclosing subquery, for which the ban does not apply
+     */
+    private function walkForMergedColumns(mixed $node, array $mergedAway, array $shadowed = []): void
+    {
+        if (is_array($node)) {
+            foreach ($node as $child) {
+                $this->walkForMergedColumns($child, $mergedAway, $shadowed);
+            }
+            return;
+        }
+
+        if (!is_object($node)) {
+            return;
+        }
+
+        if ($node instanceof IdentifierNode) {
+            if (!$node->isQualified()) {
+                return;
+            }
+            $bare = strtolower($node->getName());
+            $qualifier = strtolower(implode('.', $node->getQualifier()));
+            if (isset($mergedAway[$bare]) && !isset($shadowed[$qualifier])) {
+                $full = $node->getFullName();
+                $exposed = $mergedAway[$bare];
+                throw new \RuntimeException(
+                    "Column '$full' is not available after a NATURAL/USING join: "
+                    . "the join column '$exposed' is exposed once, unqualified, and its value is "
+                    . "the coalesce of both operands. Write '$exposed'."
+                );
+            }
+            return;
+        }
+
+        if ($node instanceof SelectStatement) {
+            // A subquery that re-binds the qualifier resolves it against a
+            // table of its own, so the ban stops applying to that qualifier
+            // for the whole of the subquery.
+            foreach ($this->boundAliases($node) as $alias) {
+                $shadowed[strtolower($alias)] = true;
+            }
+        }
+
+        // Deliberately structural rather than a per-node-type switch: the walk
+        // may not miss a branch, and a switch over AST classes silently stops
+        // covering whatever node type gets added next.
+        foreach (get_object_vars($node) as $child) {
+            if (is_object($child) || is_array($child)) {
+                $this->walkForMergedColumns($child, $mergedAway, $shadowed);
+            }
+        }
+    }
+
+    /**
+     * The table names and aliases a SELECT binds in its own FROM clause
+     *
+     * @return list<string>
+     */
+    private function boundAliases(SelectStatement $ast): array
+    {
+        // An alias hides the table name it renames, so only one of the two is
+        // ever a usable qualifier.
+        $aliases = [];
+        if ($ast->fromAlias !== null) {
+            $aliases[] = $ast->fromAlias;
+        } elseif ($ast->from instanceof IdentifierNode) {
+            $aliases[] = $ast->from->getFullName();
+        }
+        foreach ($ast->joins as $join) {
+            if ($join->alias !== null) {
+                $aliases[] = $join->alias;
+            } elseif ($join->table instanceof IdentifierNode) {
+                $aliases[] = $join->table->getFullName();
+            }
+        }
+        return $aliases;
     }
 
     /**

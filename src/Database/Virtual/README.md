@@ -136,6 +136,28 @@ Exposing SQL to untrusted callers needs more than these: combine them with a PHP
 `memory_limit`, a request-level timeout, and `registerModel()` so row-level
 authorization applies to SQL as well.
 
+## Limits
+
+`mini\Database\Limits` states in code what the engine is for: *sensible* SQL over
+heterogeneous sources, not an unbounded RDBMS. A query that exceeds one of these
+fails immediately with an error naming the limit, the value exceeded, and how to
+raise it — a bug report rather than an outage, which matters under a Fiber-based
+runtime where a runaway query takes every coroutine in the worker with it.
+
+```php
+$engine->setLimits(new mini\Database\Limits(
+    maxJoinedTables: 8,             // tables in one query
+    maxSubqueryDepth: 8,            // nesting of subqueries, derived tables, CTE bodies
+    maxRecursionIterations: 10_000, // fixpoint iterations for a recursive CTE
+    maxBufferedWrites: 1_000_000,   // rows one statement may buffer; null disables
+));
+```
+
+`setMaxMaterializedRows()` is a shorthand for `maxBufferedWrites` — the two are
+one setting, and either is readable through `getLimits()`. If you find yourself
+raising several limits at once, that is a signal the work belongs in a real
+database registered as a source.
+
 ## Temporary Tables
 
 Each request/fiber gets its own `Session` with isolated temp tables:
