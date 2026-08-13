@@ -4,6 +4,13 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## VDB: OR chains push down flattened, predicate values bind as parameters (2026-08-13)
+
+Two pushdown improvements for tables backed by SQL databases (PartialQuery sources). No breaking API changes; observable behavior improves.
+
+- **`a OR b OR c` now pushes to the backend as native SQL.** It parses as `(a OR b) OR c`, and the planner handed the nested-OR operand to the Predicate builder, which cannot express nested OR — so any OR with three or more branches silently fell back to a full scan filtered in PHP, despite `TableInterface::or()` being variadic. The chain is flattened into its branches before delegating. Two-branch ORs and conjunctions inside branches pushed before and still do; documented refusals (`!=`, NULL comparisons, `NOT LIKE` in a branch) still fall back safely.
+- **Predicate values converted to AST now bind as driver parameters.** The `or()` pushdown path inlined values as quoted literals (`name = 'Bob'`), unlike `eq()`/`lt()`/`like()` which bind (`name = ?`). All non-NULL predicate values now travel as typed bound parameters — one cached backend plan per SQL shape instead of one per literal. NULL keeps its literal form so `= NULL` (matches nothing) is unchanged.
+
 ## VDB: Core SQL grammar, engine limits, and three silent-wrong-answer fixes (2026-08-07)
 
 **BREAKING CHANGES**

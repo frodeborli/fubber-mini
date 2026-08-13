@@ -1986,7 +1986,11 @@ final class PartialQuery implements ResultSetInterface, MutableTableInterface
         $value = $cond['value'];
         $bound = $cond['bound'];
 
-        // Create value node - bound values become literals, unbound become placeholders
+        // Create value node. Bound values become bound placeholders - the same
+        // mechanism eq()/lt()/like() use - so they reach the backend as driver
+        // parameters, not inlined literals. NULL stays a literal to preserve
+        // its SQL semantics (`= NULL` matches nothing) unchanged. Unbound
+        // conditions become named placeholders resolved at bind time.
         if ($cond['operator'] === Operator::In) {
             // IN requires special handling - value is a SetInterface
             if ($value instanceof SetInterface) {
@@ -1997,7 +2001,9 @@ final class PartialQuery implements ResultSetInterface, MutableTableInterface
                 $colName = $setColumns[0] ?? $cond['column'];
                 foreach ($value as $row) {
                     $rowValue = $row->$colName;
-                    $values[] = $this->valueToLiteral($rowValue);
+                    $values[] = $rowValue === null
+                        ? $this->valueToLiteral($rowValue)
+                        : $this->boundPlaceholder($rowValue);
                 }
                 return new InOperation($column, $values, false);
             }
@@ -2006,14 +2012,14 @@ final class PartialQuery implements ResultSetInterface, MutableTableInterface
 
         if ($cond['operator'] === Operator::Like) {
             $valueNode = $bound
-                ? $this->valueToLiteral($value)
+                ? ($value === null ? $this->valueToLiteral($value) : $this->boundPlaceholder($value))
                 : $this->createBoundPlaceholder($value);
             return new LikeOperation($column, $valueNode, false);
         }
 
         // Standard comparison operators
         $valueNode = $bound
-            ? $this->valueToLiteral($value)
+            ? ($value === null ? $this->valueToLiteral($value) : $this->boundPlaceholder($value))
             : $this->createBoundPlaceholder($value);
 
         return new BinaryOperation($column, $cond['operator']->value, $valueNode);

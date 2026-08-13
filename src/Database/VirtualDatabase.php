@@ -3894,6 +3894,19 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Flatten an OR-connected expression into a list of branches
+     */
+    private function flattenOrBranches(ASTNode $node, array &$branches): void
+    {
+        if ($node instanceof BinaryOperation && strtoupper($node->operator) === 'OR') {
+            $this->flattenOrBranches($node->left, $branches);
+            $this->flattenOrBranches($node->right, $branches);
+        } else {
+            $branches[] = $node;
+        }
+    }
+
+    /**
      * Find which tables are referenced in a predicate
      *
      * @param ASTNode $node The predicate to analyze
@@ -6074,12 +6087,19 @@ class VirtualDatabase implements DatabaseInterface
             return $table;
         }
 
-        // Binary OR: use table's or() method with predicates, or fall back to row-by-row
+        // Binary OR: use table's or() method with predicates, or fall back to row-by-row.
+        // `a OR b OR c` parses as `(a OR b) OR c`, so the chain is flattened into
+        // its branches first - or() is variadic, and handing it a nested OR as a
+        // "branch" is inexpressible as a Predicate and used to force the fallback.
         if ($node instanceof BinaryOperation && strtoupper($node->operator) === 'OR') {
             try {
-                $leftPredicate = $this->buildPredicateFromAst($node->left);
-                $rightPredicate = $this->buildPredicateFromAst($node->right);
-                return $table->or($leftPredicate, $rightPredicate);
+                $branches = [];
+                $this->flattenOrBranches($node, $branches);
+                $predicates = array_map(
+                    fn(\mini\Parsing\SQL\AST\ASTNode $branch) => $this->buildPredicateFromAst($branch),
+                    $branches
+                );
+                return $table->or(...$predicates);
             } catch (\RuntimeException $e) {
                 // Can't convert to predicates - evaluate row-by-row
                 return $this->filterByExpression($table, $node);
