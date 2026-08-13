@@ -4,6 +4,16 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## VDB: semi-join reduction — schema-driven join pushdown (2026-08-13)
+
+Performance change, no API or semantic changes. For `SELECT v.name FROM events e JOIN venues v ON e.venue_id = v.id WHERE e.id = 22`, the planner previously pushed `e.id = 22` into the events backend but then streamed the **entire** venues table to join against one row.
+
+The planner now uses the one cardinality fact a schema provides without statistics: an eq predicate against a unique/primary column **proves** at most one row; an eq against any column suggests few. A join side hinted small is materialized once (capped at 1,000 rows), its distinct join keys are pushed into the other side as a parameterized `IN`, and the materialized rows replace the hinted side so nothing is fetched twice. Backend traffic for the query above becomes two point lookups: `WHERE id = ?` and `WHERE id IN (?)`.
+
+- An empty hinted side short-circuits: the other backend is not queried at all (inner-join semantics; this planner path is inner-only).
+- Past the key cap the reduction steps aside and the join streams as before — it is an optimization bound, not a failure limit, which is why it is a constant rather than a `Limits` field.
+- Future direction (not implemented): when both sides of a join are `PartialQuery` views onto the *same* backend, the whole join could be shipped to that backend as one SQL statement.
+
 ## VDB: OR chains push down flattened, predicate values bind as parameters (2026-08-13)
 
 Two pushdown improvements for tables backed by SQL databases (PartialQuery sources). No breaking API changes; observable behavior improves.

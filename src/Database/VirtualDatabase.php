@@ -3723,8 +3723,14 @@ class VirtualDatabase implements DatabaseInterface
             }
         }
 
-        // 3. Classify predicates and push single-table ones
+        // 3. Classify predicates and push single-table ones. While pushing,
+        //    record schema-based selectivity hints: an eq on a unique/primary
+        //    column PROVES the table yields at most one row, and an eq on any
+        //    column suggests few rows. There are no statistics - uniqueness is
+        //    the one cardinality fact the schema gives us for free, and it is
+        //    what drives the semi-join reduction below.
         $remainingPredicates = [];
+        $eqHints = []; // alias => 'unique' | 'eq'
         foreach ($predicates as $pred) {
             $tablesReferenced = $this->findTablesInPredicate($pred, array_keys($tables));
 
@@ -3732,7 +3738,12 @@ class VirtualDatabase implements DatabaseInterface
                 // Single-table predicate - push to that table
                 $tableAlias = $tablesReferenced[0];
                 try {
-                    $tables[$tableAlias] = $this->applyWhereToTableInterface($tables[$tableAlias], $pred);
+                    $pushedTo = $this->applyWhereToTableInterface($tables[$tableAlias], $pred);
+                    $hint = $this->detectEqSelectivityHint($pred, $tables[$tableAlias]);
+                    if ($hint !== null && ($eqHints[$tableAlias] ?? '') !== 'unique') {
+                        $eqHints[$tableAlias] = $hint;
+                    }
+                    $tables[$tableAlias] = $pushedTo;
                 } catch (\RuntimeException $e) {
                     // Can't push this predicate - keep for later
                     $remainingPredicates[] = $pred;
@@ -3763,6 +3774,17 @@ class VirtualDatabase implements DatabaseInterface
                 }
             }
         }
+
+        // 4b. Semi-join reduction (sideways information passing). For each
+        //     equi-join edge where one side is known to be small - proven by
+        //     an eq on a unique column, or suggested by any eq - materialize
+        //     that side once, collect its distinct join-key values, and push
+        //     them into the other side as an IN filter. Turns "fetch every
+        //     venue to join against one event" into a point lookup on both
+        //     backends. Past the key cap the reduction is skipped and the
+        //     join streams as before - the cap bounds the optimization, it
+        //     is not a failure limit.
+        $this->applySemiJoinReduction($tables, $equiJoins, $eqHints);
 
         // Build connected components using union-find
         $parent = array_combine($tableNames, $tableNames);
@@ -3903,6 +3925,128 @@ class VirtualDatabase implements DatabaseInterface
             $this->flattenOrBranches($node->right, $branches);
         } else {
             $branches[] = $node;
+        }
+    }
+
+    /**
+     * Maximum distinct join-key values shipped as an IN filter during
+     * semi-join reduction. Past this the reduction is skipped and the join
+     * streams the un-reduced side as before - an optimization bound, not a
+     * failure limit, which is why it does not live in Limits.
+     */
+    private const SEMI_JOIN_KEY_CAP = 1000;
+
+    /**
+     * Detect a schema-based selectivity hint from a pushed predicate
+     *
+     * 'unique' - eq against a unique/primary column: at most one row, proven.
+     * 'eq'     - eq against any column: likely few rows, heuristic.
+     * null     - no cardinality knowledge.
+     */
+    private function detectEqSelectivityHint(ASTNode $pred, TableInterface $table): ?string
+    {
+        if (!$pred instanceof BinaryOperation || $pred->operator !== '=') {
+            return null;
+        }
+
+        // Accept col = value and value = col
+        $isValue = fn(ASTNode $n) => $n instanceof LiteralNode
+            || ($n instanceof PlaceholderNode && $n->isBound);
+        if ($pred->left instanceof IdentifierNode && $isValue($pred->right)) {
+            $colNode = $pred->left;
+        } elseif ($pred->right instanceof IdentifierNode && $isValue($pred->left)) {
+            $colNode = $pred->right;
+        } else {
+            return null;
+        }
+
+        $column = $this->buildQualifiedColumnName($colNode);
+        $def = $table->getColumns()[$column] ?? null;
+
+        return $def !== null && $def->index->isUnique() ? 'unique' : 'eq';
+    }
+
+    /**
+     * Reduce equi-join fetch volume using selectivity hints
+     *
+     * For each equi-join edge with exactly one small-hinted side (preferring
+     * a 'unique' proof over an 'eq' heuristic when both qualify), the hinted
+     * side is materialized once, its distinct non-NULL join keys are pushed
+     * into the other side as an IN filter, and the materialized rows replace
+     * the hinted table so the join does not re-fetch it. An empty hinted
+     * side empties the other side outright - inner-join semantics, and this
+     * planner path is inner-only (outer joins take the standard path).
+     */
+    private function applySemiJoinReduction(array &$tables, array $equiJoins, array $eqHints): void
+    {
+        if ($eqHints === []) {
+            return;
+        }
+
+        foreach ($equiJoins as $ej) {
+            [$t1, $t2] = $ej['tables'];
+            $h1 = $eqHints[$t1] ?? null;
+            $h2 = $eqHints[$t2] ?? null;
+            if ($h1 === null && $h2 === null) {
+                continue;
+            }
+
+            // Prefer the proven-unique side when both are hinted
+            $hinted = match (true) {
+                $h1 !== null && $h2 === null => $t1,
+                $h2 !== null && $h1 === null => $t2,
+                $h1 === 'unique' => $t1,
+                $h2 === 'unique' => $t2,
+                default => $t1,
+            };
+            $other = $hinted === $t1 ? $t2 : $t1;
+
+            // Map the edge's qualified columns to their sides by alias prefix
+            $cols = [$ej['cols']['left'], $ej['cols']['right']];
+            $hintedCol = null;
+            $otherCol = null;
+            foreach ($cols as $col) {
+                if (str_starts_with($col, $hinted . '.')) {
+                    $hintedCol = $col;
+                } elseif (str_starts_with($col, $other . '.')) {
+                    $otherCol = $col;
+                }
+            }
+            if ($hintedCol === null || $otherCol === null) {
+                continue;
+            }
+
+            // Materialize the small side once, bounded
+            $rows = [];
+            $keys = [];
+            $overflow = false;
+            foreach ($tables[$hinted] as $row) {
+                $rows[] = $row;
+                $key = $row->$hintedCol ?? null;
+                if ($key !== null) {
+                    $keys[(string)$key] = $key;
+                }
+                if (count($rows) > self::SEMI_JOIN_KEY_CAP) {
+                    $overflow = true;
+                    break;
+                }
+            }
+            if ($overflow) {
+                continue; // hint was wrong; stream the join as before
+            }
+
+            if ($rows === []) {
+                // Inner join against an empty side yields nothing
+                $tables[$other] = EmptyTable::from($tables[$other]);
+                continue;
+            }
+
+            // Reuse the materialized rows so the hinted side is fetched once
+            $tables[$hinted] = $this->rowsToTable($rows);
+            $tables[$other] = $tables[$other]->in(
+                $otherCol,
+                new \mini\Table\Utility\Set($otherCol, array_values($keys))
+            );
         }
     }
 
