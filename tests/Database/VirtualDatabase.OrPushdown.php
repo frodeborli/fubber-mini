@@ -106,10 +106,11 @@ $test = new class extends Test {
 
     public function testUnsupportedShapeFallsBackSafely(): void
     {
-        // != inside OR is a documented pushdown refusal: the backend gets a
-        // full scan and PHP filters. The answer must still be correct - the
-        // fallback is fail-safe, never fail-wrong.
-        $names = $this->runLogged("SELECT name FROM emp WHERE salary != 50 OR name = 'Zed'");
+        // NOT LIKE inside OR is a documented pushdown refusal: the backend
+        // gets a full scan and PHP filters. The answer must still be correct -
+        // the fallback is fail-safe, never fail-wrong. (This test previously
+        // used !=, which now pushes via the range-split rewrite.)
+        $names = $this->runLogged("SELECT name FROM emp WHERE name NOT LIKE 'A%' OR salary = 999");
         sort($names);
         $this->assertSame(['Bob', 'Carol'], $names);
         $this->assertFalse($this->backendSawWhere(), 'refused shape scans and filters in PHP');
@@ -148,6 +149,43 @@ $test = new class extends Test {
         $this->assertSame(3, substr_count($sql, '?'), "expected 3 placeholders in: $sql");
         $this->assertSame([40, 'Bob', 1], $params);
         $this->assertSame('integer', gettype($params[0]), 'numeric values keep their PHP type');
+    }
+
+    public function testNotEqualsPushesAsRangeSplit(): void
+    {
+        // x != k has no direct pushdown verb, but under a total ordering it is
+        // exactly (x < k OR x > k) - both verbs the backend push supports. NULL
+        // semantics survive: a NULL operand makes both branches UNKNOWN, so the
+        // OR is UNKNOWN and the row is excluded, as != requires.
+        \mini\db()->exec("INSERT INTO orpush (id, name, salary) VALUES (4, NULL, 10)");
+
+        $names = $this->runLogged("SELECT name FROM emp WHERE name != 'Bob'");
+        sort($names);
+        $this->assertSame(['Alice', 'Carol'], $names, 'NULL name row must be excluded, like SQL != does');
+
+        $this->assertTrue($this->backendSawWhere(), 'name != literal must push as a range split');
+        $whereSql = implode(' ', $this->backendSql);
+        $this->assertStringContainsString('<', $whereSql);
+        $this->assertStringContainsString('>', $whereSql);
+    }
+
+    public function testNotEqualsInsideOrPushes(): void
+    {
+        // After range-splitting, a != inside an OR flattens into plain branches
+        $names = $this->runLogged("SELECT name FROM emp WHERE name != 'Bob' OR salary > 60");
+        sort($names);
+        $this->assertSame(['Alice', 'Carol'], $names);
+        $this->assertTrue($this->backendSawWhere(), '!= inside OR must push, not scan');
+    }
+
+    public function testLikePrefixPushesToBackend(): void
+    {
+        // The sargable spelling an LLM should use for prefix matching - and the
+        // spelling backends can serve from an index - already pushes.
+        $names = $this->runLogged("SELECT name FROM emp WHERE name LIKE 'A%'");
+        $this->assertSame(['Alice'], $names);
+        $this->assertTrue($this->backendSawWhere(), 'LIKE prefix must push');
+        $this->assertStringContainsString('LIKE', implode(' ', $this->backendSql));
     }
 };
 

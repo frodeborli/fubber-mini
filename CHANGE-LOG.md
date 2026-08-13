@@ -4,6 +4,10 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## VDB: `!=` pushes down as a range split (2026-08-13)
+
+Performance change, no semantic change. `col != literal` previously had no pushdown verb and forced row-by-row evaluation — a full scoped scan on the backend for one of the most common predicate shapes there is. Under the total ordering of storage-class comparison, `x != k` is exactly `x < k OR x > k`, so the planner now rewrites it and delegates through the existing OR pushdown: the backend receives `WHERE (col < ?) OR (col > ?)` with bound parameters, and can serve it from an index as two range scans. NULL semantics are preserved by construction — a NULL operand makes both branches UNKNOWN, so the row is excluded, exactly as `!=` requires. NULL literals (`x != NULL`) are not rewritten. Works standalone and inside OR trees, where the split branches flatten into the variadic delegation.
+
 ## VDB: one comparison semantics — SQLite affinity on every path (2026-08-13)
 
 **BREAKING CHANGE**

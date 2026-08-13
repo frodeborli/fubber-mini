@@ -3916,6 +3916,49 @@ class VirtualDatabase implements DatabaseInterface
     }
 
     /**
+     * Recursively rewrite `col != literal` comparisons into range splits
+     * (`col < literal OR col > literal`) so they ride the OR pushdown.
+     * Only bare column-vs-non-NULL-literal shapes are rewritten; everything
+     * else is returned unchanged and takes its existing path.
+     */
+    private function expandNotEquals(ASTNode $node): ASTNode
+    {
+        if (!$node instanceof BinaryOperation) {
+            return $node;
+        }
+
+        $op = strtoupper($node->operator);
+        if ($op === 'AND' || $op === 'OR') {
+            $left = $this->expandNotEquals($node->left);
+            $right = $this->expandNotEquals($node->right);
+            if ($left !== $node->left || $right !== $node->right) {
+                return new BinaryOperation($left, $node->operator, $right);
+            }
+            return $node;
+        }
+
+        if ($node->operator === '!=' || $node->operator === '<>') {
+            $isValue = fn(ASTNode $n): bool => $n instanceof LiteralNode && $n->value !== null;
+
+            if ($node->left instanceof IdentifierNode && $isValue($node->right)) {
+                [$col, $lit] = [$node->left, $node->right];
+            } elseif ($node->right instanceof IdentifierNode && $isValue($node->left)) {
+                [$col, $lit] = [$node->right, $node->left];
+            } else {
+                return $node;
+            }
+
+            return new BinaryOperation(
+                new BinaryOperation($col, '<', $lit),
+                'OR',
+                new BinaryOperation($col, '>', $lit)
+            );
+        }
+
+        return $node;
+    }
+
+    /**
      * Flatten an OR-connected expression into a list of branches
      */
     private function flattenOrBranches(ASTNode $node, array &$branches): void
@@ -6196,6 +6239,15 @@ class VirtualDatabase implements DatabaseInterface
      */
     private function applyWhereToTableInterface(TableInterface $table, \mini\Parsing\SQL\AST\ASTNode $node): TableInterface
     {
+        // `col != literal` has no pushdown verb, but under the total ordering
+        // of storage-class comparison it is exactly `col < literal OR col >
+        // literal` - two verbs every backend push supports, which the OR
+        // machinery then delegates. NULL semantics survive the rewrite: a NULL
+        // operand makes both branches UNKNOWN, so the OR is UNKNOWN and the
+        // row is excluded, precisely what != does. NULL literals are left
+        // alone (x != NULL is UNKNOWN for every row).
+        $node = $this->expandNotEquals($node);
+
         // Binary AND: flatten, push simple predicates first, then filter with complex ones
         if ($node instanceof BinaryOperation && strtoupper($node->operator) === 'AND') {
             // Flatten AND chain
