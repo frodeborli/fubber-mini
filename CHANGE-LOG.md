@@ -4,6 +4,22 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## VDB: one comparison semantics — SQLite affinity on every path (2026-08-13)
+
+**BREAKING CHANGE**
+
+The same predicate on the same data previously answered differently depending on which table class backed the data and whether the optimizer could push it down. With a TEXT column holding `'5.0'`, `WHERE label = 5` matched on ArrayTable (PHP loose `==`) but not on InMemoryTable (SQLite affinity), and on the same InMemoryTable the forced-evaluation spelling `label || '' = 5` matched while the pushable spelling did not. Plan-dependent semantics. Found while porting the engine to Python, which forced the implicit comparison rules to be written down — at which point they turned out not to be one thing.
+
+The rule is now SQLite's, everywhere, verified against a live SQLite oracle per test case:
+
+- **Comparison is two-stage: affinity, then storage class.** A bare column operand carries its column's affinity, converting the other side (`age = '5'` matches 5 on an INT column; `label = 5` compares `'5'` on a TEXT column). Expression operands carry no affinity, so `age + 0 = '5'` compares an integer against text and matches nothing — SQLite's own asymmetry, preserved deliberately.
+- **`ExpressionEvaluator::valuesEqual()`/`compareValues()` use storage-class semantics.** Mixed number/text operands are never equal (previously PHP loose `==` coerced them), and numbers order before all text. The evaluator receives column types via `ExpressionEvaluator::CTX_COLUMN_TYPES` from row-filtering call sites.
+- **ArrayTable comparisons now share the evaluator's semantics** — filter values coerce per column affinity, then compare by storage class; `IN` no longer uses PHP's loose `in_array()`. ArrayTable and InMemoryTable cannot disagree anymore.
+- **The arithmetic simplifier declines text comparands.** Rewriting `age + 0 = '5'` to `age = ('5' - 0)` pulled the string into arithmetic, introducing a coercion the original comparison would never perform. An optimization must not change semantics.
+- **`IS [NOT] DISTINCT FROM` applies comparand affinity** like `=`, since IS is a comparison operator.
+
+Migration: code relying on loose cross-type matches in row-evaluated predicates (`WHERE some_expr = '5'` matching integer 5) must compare like with like or `CAST` explicitly. Predicates on bare columns are unaffected — affinity gives them the same answers as before on the primary backend, now on every backend.
+
 ## VDB: semi-join reduction — schema-driven join pushdown (2026-08-13)
 
 Performance change, no API or semantic changes. For `SELECT v.name FROM events e JOIN venues v ON e.venue_id = v.id WHERE e.id = 22`, the planner previously pushed `e.id = 22` into the events backend but then streamed the **entire** venues table to join against one row.

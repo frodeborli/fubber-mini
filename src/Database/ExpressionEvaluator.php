@@ -40,6 +40,13 @@ use mini\Parsing\SQL\DatetimeText;
 class ExpressionEvaluator
 {
     /**
+     * Context key under which row-filtering call sites provide the table's
+     * column types (array<string, ColumnType>, keyed like row properties).
+     * Enables SQLite-style comparison affinity for bare column operands.
+     */
+    public const CTX_COLUMN_TYPES = 'columnTypes';
+
+    /**
      * Callable that executes a subquery and returns result rows
      * Signature: fn(SelectStatement $query, ?object $outerRow): iterable
      *
@@ -154,12 +161,17 @@ class ExpressionEvaluator
             return $this->evaluateIsNull($node, $row, $context);
         }
 
-        // a IS [NOT] DISTINCT FROM b - NULL-safe comparison, never UNKNOWN
+        // a IS [NOT] DISTINCT FROM b - NULL-safe comparison, never UNKNOWN.
+        // Affinity applies exactly as it does for '=': IS is a comparison
+        // operator, so a bare column operand converts the other side.
         if ($node instanceof DistinctFromOperation) {
-            $distinct = $this->valuesAreDistinct(
+            [$left, $right] = self::applyComparisonAffinity(
                 $this->evaluate($node->left, $row, $context),
                 $this->evaluate($node->right, $row, $context),
+                $this->operandColumnType($node->left, $context),
+                $this->operandColumnType($node->right, $context),
             );
+            $distinct = $this->valuesAreDistinct($left, $right);
             return ($node->negated ? !$distinct : $distinct) ? 1 : 0;
         }
 
@@ -350,6 +362,19 @@ class ExpressionEvaluator
             return null;
         }
 
+        // SQLite two-stage comparison: a bare column operand carries its
+        // column's affinity, which converts the OTHER operand before the
+        // storage-class comparison. Column types arrive via context from
+        // the row-filtering call sites (see CTX_COLUMN_TYPES).
+        if (in_array($op, ['=', '!=', '<>', '<', '<=', '>', '>='], true)) {
+            [$left, $right] = self::applyComparisonAffinity(
+                $left,
+                $right,
+                $this->operandColumnType($node->left, $context),
+                $this->operandColumnType($node->right, $context),
+            );
+        }
+
         return match ($op) {
             // Comparison
             '=' => self::valuesEqual($left, $right),
@@ -375,7 +400,7 @@ class ExpressionEvaluator
     }
 
     /**
-     * SQL equality for two non-NULL values.
+     * SQL equality for two non-NULL values - storage-class semantics.
      *
      * Two character strings compare as characters. PHP 8's `==` compares two
      * *numeric* strings numerically, which made '1' = '01', '5' = '5.0' and
@@ -385,28 +410,164 @@ class ExpressionEvaluator
      * it row by row, and `code <> '1'` silently dropped every row holding a
      * different spelling of 1.
      *
-     * Mixed string/number operands keep PHP's coercion - that is Mini's
-     * documented pragmatic-PHP stance, and it matches the table layer.
+     * Mixed string/number operands are NEVER equal: they belong to different
+     * storage classes, exactly as in SQLite, this engine's reference backend.
+     * (An earlier revision kept PHP's mixed coercion here, claiming it matched
+     * the table layer - it did not: `label = 5` on a TEXT column pushed to the
+     * SQLite backend answered differently from the same predicate evaluated
+     * row by row. Affinity conversion happens BEFORE this comparison, in
+     * applyComparisonAffinity(), when a bare column operand's type is known.)
      */
     public static function valuesEqual(mixed $a, mixed $b): bool
     {
         if (is_string($a) && is_string($b)) {
             return $a === $b;
         }
+        if (!is_string($a) && !is_string($b)) {
+            return $a == $b; // numeric family: int/float/bool compare by value
+        }
 
-        return $a == $b;
+        return false; // number vs text: different storage classes
     }
 
     /**
      * SQL ordering comparison for two non-NULL values. See {@see valuesEqual()}.
+     *
+     * Storage classes order as in SQLite: every number sorts before every
+     * text value, whatever the text spells.
      */
     public static function compareValues(mixed $a, mixed $b): int
     {
         if (is_string($a) && is_string($b)) {
             return strcmp($a, $b) <=> 0;
         }
+        if (!is_string($a) && !is_string($b)) {
+            return $a <=> $b;
+        }
 
-        return $a <=> $b;
+        return is_string($a) ? 1 : -1; // numbers < text
+    }
+
+    /**
+     * Apply SQLite comparison affinity to the operands of a comparison.
+     *
+     * SQLite comparison is two-stage: apply affinity, THEN compare by storage
+     * class. A bare column operand carries its column's affinity; a CAST
+     * carries its target's; every other expression carries none. Rules
+     * (SQLite "Type Conversions Prior To Comparison"):
+     *
+     *   1. One side numeric affinity, other side text/none -> numeric
+     *      conversion is attempted on the other side (only if the text is
+     *      entirely numeric; otherwise it stays text and the comparison
+     *      falls through to storage class).
+     *   2. Else one side TEXT affinity, other side none -> the number is
+     *      rendered as text.
+     *   3. Otherwise no conversion.
+     *
+     * This is what makes `WHERE age = '5'` match on an INT column and
+     * `WHERE label = 5` compare 5 as '5' on a TEXT column - while the same
+     * literals compared through bare expressions (`age + 0 = '5'`) keep
+     * their storage classes, exactly as the reference backend behaves.
+     *
+     * @param array<string, \mini\Table\Types\ColumnType> $columnTypes
+     * @return array{mixed, mixed}
+     */
+    public static function applyComparisonAffinity(
+        mixed $left,
+        mixed $right,
+        ?\mini\Table\Types\ColumnType $leftType,
+        ?\mini\Table\Types\ColumnType $rightType,
+    ): array {
+        $aff = static fn(?\mini\Table\Types\ColumnType $t): ?string => match ($t) {
+            \mini\Table\Types\ColumnType::Int,
+            \mini\Table\Types\ColumnType::Float,
+            \mini\Table\Types\ColumnType::Decimal => 'numeric',
+            null => null,
+            \mini\Table\Types\ColumnType::Binary => null,
+            default => 'text',
+        };
+        $leftAff = $aff($leftType);
+        $rightAff = $aff($rightType);
+
+        if ($leftAff === 'numeric' && $rightAff !== 'numeric') {
+            $right = self::tryNumericConversion($right);
+        } elseif ($rightAff === 'numeric' && $leftAff !== 'numeric') {
+            $left = self::tryNumericConversion($left);
+        } elseif ($leftAff === 'text' && $rightAff === null) {
+            $right = is_int($right) || is_float($right) ? self::castToText($right) : $right;
+        } elseif ($rightAff === 'text' && $leftAff === null) {
+            $left = is_int($left) || is_float($left) ? self::castToText($left) : $left;
+        }
+
+        return [$left, $right];
+    }
+
+    /**
+     * The column type a comparison operand carries, if it is a bare column
+     * reference with a resolvable type. Resolution mirrors row property
+     * lookup: exact key first, then a unique '.name'-suffix match for
+     * unqualified names against qualified row columns.
+     */
+    private function operandColumnType(ASTNode $operand, array $context): ?\mini\Table\Types\ColumnType
+    {
+        if (!$operand instanceof IdentifierNode) {
+            return null;
+        }
+        /** @var array<string, \mini\Table\Types\ColumnType> $types */
+        $types = $context[self::CTX_COLUMN_TYPES] ?? [];
+        if ($types === []) {
+            return null;
+        }
+
+        $name = $operand->isQualified()
+            ? ($operand->getQualifier()[0] ?? '') . '.' . $operand->getName()
+            : $operand->getName();
+
+        if (isset($types[$name])) {
+            return $types[$name];
+        }
+
+        // Unqualified name against qualified columns: unique suffix match
+        if (!str_contains($name, '.')) {
+            $match = null;
+            foreach ($types as $col => $type) {
+                if (str_ends_with($col, '.' . $name)) {
+                    if ($match !== null) {
+                        return null; // ambiguous - no affinity rather than a guess
+                    }
+                    $match = $type;
+                }
+            }
+            return $match;
+        }
+
+        return null;
+    }
+
+    /**
+     * Numeric-affinity conversion: a string that is entirely numeric (with
+     * optional surrounding whitespace, as SQLite allows) becomes int or
+     * float; anything else is returned unchanged.
+     */
+    private static function tryNumericConversion(mixed $value): mixed
+    {
+        if (!is_string($value)) {
+            return $value;
+        }
+        $trimmed = trim($value);
+        if ($trimmed === '' || !is_numeric($trimmed)) {
+            return $value;
+        }
+        if (preg_match('/^[+-]?\d+$/', $trimmed) === 1) {
+            $asInt = (int) $trimmed;
+            // Out-of-range integers degrade to float, like SQLite's REAL
+            if ((string) $asInt === ltrim($trimmed, '+')) {
+                return $asInt;
+            }
+        }
+        $asFloat = (float) $trimmed;
+        // Integral floats compare as their integer value where exact
+        return $asFloat == (int) $asFloat && abs($asFloat) < 9.2e18 ? (int) $asFloat : $asFloat;
     }
 
     /**

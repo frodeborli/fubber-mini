@@ -6643,9 +6643,16 @@ class VirtualDatabase implements DatabaseInterface
         $columns = $table->getColumns();
         $filteredRows = [];
 
+        // Provide column types so bare-column comparisons apply SQLite
+        // affinity - the same predicate must answer identically here and
+        // when pushed down to a SQLite-backed table.
+        $context = [
+            ExpressionEvaluator::CTX_COLUMN_TYPES => array_map(fn($def) => $def->type, $columns),
+        ];
+
         foreach ($table as $row) {
             // Evaluate the condition against this row
-            if ($this->evaluator->evaluateAsBool($condition, $row)) {
+            if ($this->evaluator->evaluateAsBool($condition, $row, $context)) {
                 $filteredRows[] = $row;
             }
         }
@@ -6861,6 +6868,16 @@ class VirtualDatabase implements DatabaseInterface
             return null;
         }
         $rightValue = $node->right->value;
+
+        // A text comparand must not be simplified: solving for the column
+        // pulls the string into arithmetic ('5' - 0 = 5), introducing a
+        // numeric coercion the original comparison would never perform - an
+        // arithmetic expression has no affinity, so `age + 0 = '5'` compares
+        // an integer against text and matches nothing. Declining keeps the
+        // rewrite a pure optimization; the row evaluator answers correctly.
+        if (is_string($rightValue)) {
+            return null;
+        }
 
         // Left side must be arithmetic: (col OP const) or (const OP col)
         if (!$node->left instanceof BinaryOperation) {

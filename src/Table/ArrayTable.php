@@ -471,7 +471,9 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
         foreach ($filters as $filter) {
             $column = $filter['column'];
             $op = $filter['op'];
-            $filterValue = $filter['value'];
+            $filterValue = is_array($filter['value'])
+                ? $filter['value']
+                : $this->coerceCompareValue($filter['column'], $filter['value']);
 
             if ($column === '_rowid_') {
                 $rowValue = $rowId;
@@ -485,7 +487,7 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
                 '<=' => $this->compareLte($rowValue, $filterValue),
                 '>' => $this->compareGt($rowValue, $filterValue),
                 '>=' => $this->compareGte($rowValue, $filterValue),
-                'IN' => in_array($rowValue, $filterValue, false),
+                'IN' => $this->inListMatches($column, $rowValue, $filterValue),
                 'LIKE' => $this->compareLike($rowValue, $filterValue),
                 default => true,
             };
@@ -503,7 +505,9 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
         foreach ($this->where as $filter) {
             $column = $filter['column'];
             $op = $filter['op'];
-            $filterValue = $filter['value'];
+            $filterValue = is_array($filter['value'])
+                ? $filter['value']
+                : $this->coerceCompareValue($filter['column'], $filter['value']);
 
             // Special handling for _rowid_ (internal row identifier)
             if ($column === '_rowid_') {
@@ -518,7 +522,7 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
                 '<=' => $this->compareLte($rowValue, $filterValue),
                 '>' => $this->compareGt($rowValue, $filterValue),
                 '>=' => $this->compareGte($rowValue, $filterValue),
-                'IN' => in_array($rowValue, $filterValue, false),
+                'IN' => $this->inListMatches($column, $rowValue, $filterValue),
                 'LIKE' => $this->compareLike($rowValue, $filterValue),
                 default => true,
             };
@@ -531,20 +535,39 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
         return true;
     }
 
+    /**
+     * Apply this column's affinity to a filter value before comparing,
+     * mirroring what the SQLite backend does with a comparand: a numeric
+     * column converts an entirely-numeric string to a number; a text column
+     * renders a number as text. The same predicate must answer identically
+     * on ArrayTable and on InMemoryTable.
+     */
+    private function coerceCompareValue(string $column, mixed $value): mixed
+    {
+        if ($value === null || $column === '_rowid_') {
+            return $value;
+        }
+        $type = ($this->getAllColumns()[$column] ?? null)?->type;
+
+        [, $coerced] = \mini\Database\ExpressionEvaluator::applyComparisonAffinity(
+            null, $value, $type, null
+        );
+        return $coerced;
+    }
+
     private function compareEqual(mixed $a, mixed $b): bool
     {
         // NULL handling: NULL = NULL is true, NULL = anything_else is false
+        // (eq(col, null) is the table API's IS NULL spelling)
         if ($a === null && $b === null) {
             return true;
         }
         if ($a === null || $b === null) {
             return false;
         }
-        // Numeric comparison for numeric strings
-        if (is_numeric($a) && is_numeric($b)) {
-            return (float) $a == (float) $b;
-        }
-        return $a == $b;
+        // Storage-class semantics, shared with the expression evaluator so
+        // pushed and row-evaluated predicates cannot disagree
+        return \mini\Database\ExpressionEvaluator::valuesEqual($a, $b);
     }
 
     private function compareLt(mixed $a, mixed $b): bool
@@ -552,10 +575,7 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
         if ($a === null || $b === null) {
             return false;
         }
-        if (is_numeric($a) && is_numeric($b)) {
-            return (float) $a < (float) $b;
-        }
-        return $a < $b;
+        return \mini\Database\ExpressionEvaluator::compareValues($a, $b) < 0;
     }
 
     private function compareLte(mixed $a, mixed $b): bool
@@ -563,10 +583,7 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
         if ($a === null || $b === null) {
             return false;
         }
-        if (is_numeric($a) && is_numeric($b)) {
-            return (float) $a <= (float) $b;
-        }
-        return $a <= $b;
+        return \mini\Database\ExpressionEvaluator::compareValues($a, $b) <= 0;
     }
 
     private function compareGt(mixed $a, mixed $b): bool
@@ -574,10 +591,7 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
         if ($a === null || $b === null) {
             return false;
         }
-        if (is_numeric($a) && is_numeric($b)) {
-            return (float) $a > (float) $b;
-        }
-        return $a > $b;
+        return \mini\Database\ExpressionEvaluator::compareValues($a, $b) > 0;
     }
 
     private function compareGte(mixed $a, mixed $b): bool
@@ -585,10 +599,26 @@ class ArrayTable extends AbstractTable implements MutableTableInterface
         if ($a === null || $b === null) {
             return false;
         }
-        if (is_numeric($a) && is_numeric($b)) {
-            return (float) $a >= (float) $b;
+        return \mini\Database\ExpressionEvaluator::compareValues($a, $b) >= 0;
+    }
+
+    /**
+     * IN-list matching with per-element affinity and storage-class equality,
+     * so `label IN (30, 25)` on a TEXT column answers as the SQLite backend
+     * would (elements render as text), never via PHP's loose in_array().
+     */
+    private function inListMatches(string $column, mixed $rowValue, array $values): bool
+    {
+        if ($rowValue === null) {
+            return false;
         }
-        return $a >= $b;
+        foreach ($values as $candidate) {
+            $coerced = $this->coerceCompareValue($column, $candidate);
+            if ($coerced !== null && \mini\Database\ExpressionEvaluator::valuesEqual($rowValue, $coerced)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function compareLike(mixed $value, string $pattern): bool
