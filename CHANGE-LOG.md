@@ -4,6 +4,29 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## CLI: an uncaught exception now exits non-zero (2026-08-14)
+
+**BREAKING CHANGE** (for anything reading the exit status)
+
+Mini's fallback exception handler in `functions.php` rendered a 500 page and returned. Under a web SAPI that is fine and nobody notices. Under CLI there is no response to render, and the exit status is the only channel the caller has — so a script that died from an uncaught exception told the shell it succeeded. Cron jobs, CI steps, deploy scripts and `&&` chains all silently passed over a crash.
+
+Under `PHP_SAPI === 'cli'` the handler now writes the exception to `STDERR` and exits `255`. Web behaviour is unchanged, and an application that installs its own exception handler still owns the exit code — Mini only ever installs the fallback when none exists. Migration: a CLI script that relied on crashing quietly must catch its own exceptions.
+
+Found by the new documentation harness, which could not tell a passing example from a fatal one. Regression test: `tests/Http/UncaughtExceptionExitCode.php`.
+
+## Docs: examples are executed, not just written (2026-08-14)
+
+Not a breaking change — new test coverage, backported from the Python port (MiniSQL), whose suite runs its README quickstart verbatim and checks every error message the README advertises against the string the code actually raises. Both caught real documentation lies within minutes of being written; that is the whole argument for them.
+
+`tests/Docs/Examples.php` applies four checks to `README.md`, `CLAUDE.md`, `src/Database/Virtual/README.md`, `src/Router/README.md` and `src/Database/README.md`:
+
+1. **Every ```php block parses.** Cheap, and catches truncated or mangled examples.
+2. **Every `mini\` class named in an example exists.** This is the check that catches real rot — `db()->partialQuery()` and `_errors/404.php` both lived in these docs for months after the things they named were gone.
+3. **A block tagged ```php runnable``` is executed**, and its own `assert()`s are the test. `src/Database/Virtual/README.md` now carries one covering registration, a join with `GROUP BY`, and a recursive CTE.
+4. **Every error message quoted under "## Errors name the fix" is provoked from the engine and compared exactly.** The markdown is the source of truth: the test parses the messages out of the doc rather than restating them, so embellishing a quoted message, or adding a plausible one no code raises, fails.
+
+The harness was itself verified by mutation — each check was confirmed to go red when the corresponding doc claim was falsified. Two did not, which is how the exit-code bug above was found: examples are executed with `-d zend.assertions=1` (the CLI default of `zend.assertions=-1` compiles `assert()` out entirely, so a runnable example would "pass" while asserting nothing), and completion is proven by a sentinel printed after the last line rather than by exit status alone.
+
 ## PartialQuery: negative limit/offset rejected — a capability could be widened (2026-08-14)
 
 **BREAKING CHANGE** (rejects input that previously "worked" — by breaking the security guarantee)

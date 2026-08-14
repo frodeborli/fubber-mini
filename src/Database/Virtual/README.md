@@ -205,6 +205,70 @@ protected function materialize(string ...$additional): \Traversable
 Validation errors thrown from `insert()` reach the caller verbatim (see
 below), so an agent that supplies a bad value is told exactly why.
 
+## Errors name the fix
+
+Every message the engine raises is written for whoever has to act on it — a
+developer, or increasingly a model that will read the error and retry. It names
+the offending identifier, the alternatives when the set is small, and the knob
+when one exists:
+
+```
+ORDER BY references unknown column: nmae (available: id, name)
+Table not found: nosuch
+Column 'id' is not valid on this aliased table; use 'u.id' instead.
+Column name conflict in SELECT: disambiguating produced the output name 'a_id' for two different columns, so one would be silently lost. Alias them explicitly, e.g. SELECT a.id AS a_key, b.id AS b_key.
+```
+
+These are checked against the engine by `tests/Docs/Examples.php`, so a message
+quoted here is one the code really produces. Handing the message straight back
+to an LLM client is a working self-correction loop.
+
+Here is the whole engine in one runnable example — this block is executed by
+the test suite on every run, so it cannot drift:
+
+```php runnable
+use mini\Database\VirtualDatabase;
+use mini\Table\ArrayTable;
+use mini\Table\ColumnDef;
+use mini\Table\Types\ColumnType;
+use mini\Table\Types\IndexType;
+
+$users = new ArrayTable(
+    new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+    new ColumnDef('name', ColumnType::Text),
+);
+$users->insert(['id' => 1, 'name' => 'Alice']);
+$users->insert(['id' => 2, 'name' => 'Bob']);
+
+$orders = new ArrayTable(
+    new ColumnDef('id', ColumnType::Int, IndexType::Primary),
+    new ColumnDef('user_id', ColumnType::Int),
+    new ColumnDef('total', ColumnType::Float),
+);
+$orders->insert(['id' => 1, 'user_id' => 1, 'total' => 100.0]);
+$orders->insert(['id' => 2, 'user_id' => 1, 'total' => 50.0]);
+
+$vdb = new VirtualDatabase();
+$vdb->registerTable('users', $users);
+$vdb->registerTable('orders', $orders);
+
+$rows = iterator_to_array($vdb->query(
+    'SELECT u.name, COUNT(*) AS n, SUM(o.total) AS total
+     FROM users u JOIN orders o ON o.user_id = u.id
+     GROUP BY u.name'
+));
+assert(count($rows) === 1);
+assert($rows[0]->name === 'Alice');
+assert((int) $rows[0]->n === 2);
+assert((float) $rows[0]->total === 150.0);
+
+// A recursive CTE, with the column list in scope for the recursive term
+$n = iterator_to_array($vdb->query(
+    'WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 5) SELECT n FROM c'
+));
+assert(count($n) === 5);
+```
+
 ## Business rules on write
 
 `VirtualDatabase` does not wrap exceptions from the table layer, so a domain

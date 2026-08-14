@@ -215,6 +215,15 @@ function bootstrap(): void
             error_log("Uncaught exception: " . $exception->getMessage() . " in " . $exception->getFile() . " line " . $exception->getLine());
             error_log("Stack trace: " . $exception->getTraceAsString());
 
+            // Under CLI there is no response to render, and the exit status is
+            // the only thing the caller can see. Without this an uncaught
+            // exception exits 0, so cron jobs, CI steps and shell pipelines
+            // report success for a script that crashed.
+            if (\PHP_SAPI === 'cli') {
+                fwrite(\STDERR, (string) $exception . "\n");
+                exit(255);
+            }
+
             if (headers_sent()) {
                 if (Mini::$mini->debug) {
                     echo $exception;
