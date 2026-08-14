@@ -229,3 +229,16 @@ SELECT DISTINCT n FROM t WHERE n IS NOT NULL
 ----
 10
 25
+
+# --- Duplicate column names collapse (shared limitation, pinned) -----------
+# Rows are name-keyed (stdClass in PHP, dict in Python), so two result columns
+# cannot share a name: the later one wins. SQLite returns both. This is a
+# property of the row representation, identical in both engines, and it is
+# pinned here so the two cannot drift apart on it. Alias duplicates explicitly
+# when a query would otherwise produce them.
+
+query II
+SELECT 1 AS x, 2 AS x, 3 AS y
+----
+2
+3

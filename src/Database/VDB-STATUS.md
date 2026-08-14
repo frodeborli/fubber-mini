@@ -278,14 +278,26 @@ WITH RECURSIVE nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n <
 ## Conformance against the public sqllogictest corpus
 
 The engine runs the standard **sqllogictest** corpus (`tests/sqllogictest/`)
-via `mini\Test\SqlLogicTest`. On the measured slice it passes **736 of 741
-records (99.3%)**.
+via `mini\Test\SqlLogicTest`. On the full file it passes **10,002 of 10,032
+records (99.7%)**, in about 3 seconds.
 
-All five remaining failures are the *same* documented deliberate divergence:
-MiniSQL divides as PHP does (`431 / -698` is `-0.617...`), while SQLite uses
-integer division for two integers (`0`). Queries whose result depends on that
-choice therefore differ by design, not by defect. See "Deliberate divergences"
-below.
+(The file holds 12,140 query records; ~2,100 carry `skipif`/`onlyif`
+directives naming other database engines and are not ours to run.)
+
+The 30 failures are two classes, both understood:
+
+* **20 — the deliberate division divergence.** MiniSQL divides as PHP does
+  (`431 / -698` is `-0.617...`); SQLite uses integer division for two integers
+  (`0`). Queries whose result depends on that choice differ by design. See
+  "Deliberate divergences" below.
+* **10 — duplicate column names collapse.** `SELECT 1 AS x, 2 AS x` returns
+  *one* column here and two in SQLite. Rows are name-keyed objects
+  (`stdClass` in PHP, `dict` in the Python port), so two columns cannot share
+  a name — the later one wins and the earlier is lost. This is a property of
+  the row representation, not a bug in a query path, and it is identical in
+  both engines. Alias duplicates explicitly (`AS x1`, `AS x2`) when a query
+  would otherwise produce them. Fixing it would mean positional rows, giving
+  up `$row->name` access, which the framework is not willing to trade.
 
 The dialect itself is pinned by `tests/minisql/*.test` — the shared spec both
 this engine and the Python port (minivdb) execute.
