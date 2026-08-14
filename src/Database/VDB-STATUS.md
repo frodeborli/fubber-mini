@@ -275,6 +275,21 @@ WITH v AS (VALUES (1), (2)) SELECT * FROM v
 WITH RECURSIVE nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < 10) SELECT * FROM nums
 ```
 
+## Conformance against the public sqllogictest corpus
+
+The engine runs the standard **sqllogictest** corpus (`tests/sqllogictest/`)
+via `mini\Test\SqlLogicTest`. On the measured slice it passes **736 of 741
+records (99.3%)**.
+
+All five remaining failures are the *same* documented deliberate divergence:
+MiniSQL divides as PHP does (`431 / -698` is `-0.617...`), while SQLite uses
+integer division for two integers (`0`). Queries whose result depends on that
+choice therefore differ by design, not by defect. See "Deliberate divergences"
+below.
+
+The dialect itself is pinned by `tests/minisql/*.test` — the shared spec both
+this engine and the Python port (minivdb) execute.
+
 ## Not Supported
 
 Verified by probing the engine (2026-08-07), and re-verified on every test

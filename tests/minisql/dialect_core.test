@@ -201,3 +201,31 @@ WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 4) SELE
 2
 3
 4
+
+# --- Set quantifiers: DISTINCT and its explicit opposite, ALL ---------------
+# ALL is the SQL:2003 default (keep duplicates), so it only has to be
+# accepted — SELECT ALL x is exactly SELECT x. It appears constantly in the
+# public sqllogictest corpus, which is where its absence was found.
+
+query I
+SELECT ALL n FROM t WHERE id = 1
+----
+10
+
+query I rowsort
+SELECT ALL id FROM t
+----
+1
+2
+3
+
+query I
+SELECT COUNT(ALL n) FROM t
+----
+2
+
+query I rowsort
+SELECT DISTINCT n FROM t WHERE n IS NOT NULL
+----
+10
+25

@@ -336,9 +336,16 @@ class SqlParser
         $this->expect(SqlLexer::T_SELECT);
         $stmt = new SelectStatement();
 
-        // Handle DISTINCT
+        // Set quantifier: SELECT DISTINCT / SELECT ALL. ALL is the SQL:2003
+        // default (keep duplicates), so it only has to be accepted - the same
+        // treatment the aggregate set quantifier already gives it. Guard the
+        // consume so a column literally named `all` still parses as a column.
         if ($this->match(SqlLexer::T_DISTINCT)) {
             $stmt->distinct = true;
+        } elseif ($this->current()['type'] === SqlLexer::T_ALL
+            && !in_array($this->peek()['type'], [SqlLexer::T_FROM, SqlLexer::T_COMMA], true)
+        ) {
+            $this->match(SqlLexer::T_ALL);
         }
 
         $stmt->columns = $this->parseColumnList();
