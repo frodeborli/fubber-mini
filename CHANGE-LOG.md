@@ -4,6 +4,19 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## PartialQuery: negative limit/offset rejected — a capability could be widened (2026-08-14)
+
+**BREAKING CHANGE** (rejects input that previously "worked" — by breaking the security guarantee)
+
+`PartialQuery` is documented as an access-control primitive: hand one to downstream code and it can only narrow the result set, never widen it. Two negative arguments broke that guarantee, found by auditing the same surface in the Python port:
+
+- **`limit(-1)` rendered `LIMIT -1`**, which SQLite reads as *no limit at all* — a capability scoped to 2 rows returned all 10.
+- **`offset(-5)` ran the additive-offset arithmetic backwards**, *raising* the limit — the same 2-row capability returned 7.
+
+Both now throw `InvalidArgumentException` naming why. `limit(0)` (no rows) and `offset(0)` remain valid narrowings, and legitimate narrowing is unchanged. Any code passing a negative bound was widening a scope, deliberately or not, and must be fixed rather than accommodated.
+
+Also added, backported from the Python port's methodology: `tests/Database/VirtualDatabase.DifferentialSweep.php`, ~75 queries run against both VDB and a live SQLite oracle over identical data and compared row-for-row (joins, NULL semantics, aggregates/grouping, subqueries, set operations, CTEs including recursive, expressions, CAST, LIKE ESCAPE). Deliberate divergences are asserted *as* divergences so they cannot change silently. Adding a query to its corpus is now the cheapest regression test in the repo.
+
 ## VDB: `!=` pushes down as a range split (2026-08-13)
 
 Performance change, no semantic change. `col != literal` previously had no pushdown verb and forced row-by-row evaluation — a full scoped scan on the backend for one of the most common predicate shapes there is. Under the total ordering of storage-class comparison, `x != k` is exactly `x < k OR x > k`, so the planner now rewrites it and delegates through the existing OR pushdown: the backend receives `WHERE (col < ?) OR (col > ?)` with bound parameters, and can serve it from an index as two range scans. NULL semantics are preserved by construction — a NULL operand makes both branches UNKNOWN, so the row is excluded, exactly as `!=` requires. NULL literals (`x != NULL`) are not rewritten. Works standalone and inside OR trees, where the split branches flatten into the variadic delegation.

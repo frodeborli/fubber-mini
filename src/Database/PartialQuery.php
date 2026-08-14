@@ -1301,6 +1301,18 @@ final class PartialQuery implements ResultSetInterface, MutableTableInterface
      */
     public function limit(int $limit): self
     {
+        // A negative limit renders as `LIMIT -1`, which SQLite (and MySQL with
+        // its own spelling) reads as "no limit at all" - so accepting one would
+        // let a narrowing call WIDEN the query, breaking the guarantee that a
+        // PartialQuery handed to downstream code can only be narrowed.
+        if ($limit < 0) {
+            throw new \InvalidArgumentException(
+                "limit($limit): a limit must not be negative - it renders as SQL " .
+                "meaning 'no limit', which would widen this query instead of " .
+                'narrowing it. Use limit(0) for "no rows".'
+            );
+        }
+
         $new = clone $this;
         $select = $new->getModifiableSelect();
 
@@ -1331,6 +1343,18 @@ final class PartialQuery implements ResultSetInterface, MutableTableInterface
      */
     public function offset(int $offset): self
     {
+        // Offset is additive and shrinks any existing limit by the same amount
+        // to stay inside the original window. A negative offset runs that
+        // arithmetic backwards - it would slide the window earlier and GROW
+        // the limit, so a narrowing call would widen the query.
+        if ($offset < 0) {
+            throw new \InvalidArgumentException(
+                "offset($offset): an offset must not be negative - offsets are " .
+                'additive and reduce the remaining limit, so a negative one ' .
+                'would widen this query instead of narrowing it.'
+            );
+        }
+
         $new = clone $this;
         $select = $new->getModifiableSelect();
 
