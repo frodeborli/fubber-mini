@@ -330,3 +330,54 @@ query I
 SELECT ja.id AS k, jb.id AS k FROM ja JOIN jb ON jb.ja_id = ja.id
 ----
 99
+
+# --- Keywords as column names ----------------------------------------------
+# Key/value tables are one of the most natural things to mount virtually, and
+# they want a column called `key`. Two rules:
+#
+#   * After a dot only a name can appear, so ANY keyword is an identifier
+#     there: `s.key`, `t.order`, `a.end` all parse.
+#   * In bare position, keywords that can never begin an expression or clause
+#     are identifiers too: key, action, index, table, first.
+#
+# Structurally significant keywords (ORDER, GROUP, END, ROWS) still need
+# quoting in bare position, because `SELECT order FROM t` is genuinely
+# ambiguous with the ORDER BY that may follow a select list.
+
+statement ok
+CREATE TABLE kv("key" TEXT, value TEXT, "order" INTEGER)
+
+statement ok
+INSERT INTO kv VALUES('theme', 'dark', 1)
+
+query T
+SELECT key FROM kv
+----
+theme
+
+query T
+SELECT s.key FROM kv s
+----
+theme
+
+query TT
+SELECT key, value FROM kv WHERE key = 'theme'
+----
+theme
+dark
+
+query TI
+SELECT s.key, s."order" FROM kv s ORDER BY s."order"
+----
+theme
+1
+
+query I
+SELECT "order" FROM kv
+----
+1
+
+# Bare ORDER stays a syntax error - quote it.
+
+statement error
+SELECT order FROM kv

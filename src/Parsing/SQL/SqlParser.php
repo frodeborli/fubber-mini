@@ -1331,6 +1331,14 @@ class SqlParser
             return new PlaceholderNode($token['value']);
         }
 
+        // A keyword that can never begin an expression or a clause is being
+        // used as a column name - `SELECT key FROM settings`, which a
+        // key/value table makes unavoidable. Treat it as an identifier and
+        // let the normal qualified-name path continue from there.
+        if ($this->isBareNameKeyword($token)) {
+            return $this->parseIdentifierFromKeyword();
+        }
+
         throw new SqlSyntaxException(
             "Unexpected token in expression: " . $token['type'],
             $this->sql,
@@ -1752,6 +1760,87 @@ class SqlParser
         return new CaseWhenNode($operand, $whenClauses, $elseResult);
     }
 
+    /**
+     * Keywords that may stand in for an identifier
+     *
+     * Two tiers. After a dot ANY keyword is unambiguous - only a name can
+     * follow - so every keyword qualifies there. In bare position only the
+     * keywords that can never begin an expression or a clause are safe:
+     * `SELECT key FROM t` is unambiguous, `SELECT order FROM t` is not
+     * (ORDER BY may follow a select list). The unsafe ones still work when
+     * quoted: `SELECT "order" FROM t`.
+     *
+     * @var array<string, true>
+     */
+    private const NAME_LIKE_KEYWORDS = [
+        SqlLexer::T_KEY => true,
+        SqlLexer::T_ACTION => true,
+        SqlLexer::T_INDEX => true,
+        SqlLexer::T_TABLE => true,
+        SqlLexer::T_FIRST => true,
+    ];
+
+    /**
+     * May this token stand in for an identifier after a dot?
+     *
+     * Everything except punctuation and the wildcard: after `t.` the grammar
+     * admits only a name, so a keyword there is a name.
+     */
+    private function isKeywordUsableAsName(array $token): bool
+    {
+        $type = $token['type'];
+        if ($type === SqlLexer::T_STAR || $type === SqlLexer::T_EOF) {
+            return false;
+        }
+        // A keyword token carries its own spelling as the value; punctuation
+        // does not name anything.
+        return isset($token['value'])
+            && is_string($token['value'])
+            && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $token['value']) === 1;
+    }
+
+    /**
+     * May this token stand in for an identifier in bare position?
+     */
+    private function isBareNameKeyword(array $token): bool
+    {
+        return isset(self::NAME_LIKE_KEYWORDS[$token['type']]);
+    }
+
+    /**
+     * Parse a keyword token that is standing in for a column name
+     *
+     * Mirrors parseIdentifier()'s qualification loop so `key`, `t.key` and
+     * `key.sub` all behave the same as an ordinary identifier would.
+     */
+    private function parseIdentifierFromKeyword(): IdentifierNode
+    {
+        $token = $this->current();
+        $this->pos++;
+        $parts = [$token['value']];
+
+        while ($this->current()['type'] === SqlLexer::T_DOT) {
+            $this->pos++;
+            $next = $this->current();
+            if ($next['type'] === SqlLexer::T_STAR) {
+                $parts[] = '*';
+                $this->pos++;
+                break;
+            }
+            if (!$this->isKeywordUsableAsName($next)) {
+                throw new SqlSyntaxException(
+                    "Expected identifier or * after dot",
+                    $this->sql,
+                    $next['pos']
+                );
+            }
+            $parts[] = $next['value'];
+            $this->pos++;
+        }
+
+        return new IdentifierNode($parts);
+    }
+
     private function parseIdentifier(): IdentifierNode
     {
         $token = $this->expect(SqlLexer::T_IDENTIFIER);
@@ -1763,6 +1852,14 @@ class SqlParser
             $nextToken = $this->current();
 
             if ($nextToken['type'] === SqlLexer::T_IDENTIFIER) {
+                $parts[] = $nextToken['value'];
+                $this->pos++;
+            } elseif ($this->isKeywordUsableAsName($nextToken)) {
+                // After a dot only a name can appear, so a keyword here is
+                // unambiguously an identifier: `s.key`, `t.order`, `a.end`.
+                // Rejecting it forced quoting for column names that are
+                // perfectly common in real schemas (a key/value table being
+                // the obvious one).
                 $parts[] = $nextToken['value'];
                 $this->pos++;
             } elseif ($nextToken['type'] === SqlLexer::T_STAR) {
