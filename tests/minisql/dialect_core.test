@@ -242,3 +242,60 @@ SELECT 1 AS x, 2 AS x, 3 AS y
 ----
 2
 3
+
+# --- Colliding output column names are rejected ----------------------------
+# Rows are name-keyed, so `SELECT a.id, b.id` would silently drop one column:
+# the caller asked for two DIFFERENT columns and the engine's un-qualifying of
+# the output name collided them. That is a wrong answer, so it fails fast with
+# a message naming the fix. Aliasing is the fix and works.
+#
+# (Distinct from `SELECT 1 AS x, 2 AS x` above, where the caller named both
+# columns the same deliberately - SQLite tolerates that and so do we.)
+
+statement ok
+CREATE TABLE ja(id INTEGER, label TEXT)
+
+statement ok
+CREATE TABLE jb(id INTEGER, ja_id INTEGER)
+
+statement ok
+INSERT INTO ja VALUES(1, 'one')
+
+statement ok
+INSERT INTO jb VALUES(99, 1)
+
+# Colliding qualified columns fall back to `qualifier_column`, so nothing is
+# lost and the result is still reachable as $row->ja_id in PHP (a qualified
+# key would not be: $row->ja.id is not valid PHP syntax).
+
+query II
+SELECT ja.id, jb.id FROM ja JOIN jb ON jb.ja_id = ja.id
+----
+1
+99
+
+# The same column selected twice is redundant, not lossy - one output column.
+
+query I
+SELECT ja.id, ja.id FROM ja JOIN jb ON jb.ja_id = ja.id
+----
+1
+
+# When the fallback ITSELF would collide there is no safe answer left, so it
+# fails fast rather than guessing: ja.id -> ja_id clashes with the real
+# jb.ja_id -> ja_id.
+
+statement error
+SELECT ja.id, jb.id, jb.ja_id FROM ja JOIN jb ON jb.ja_id = ja.id
+
+query II
+SELECT ja.id AS a_key, jb.id AS b_key FROM ja JOIN jb ON jb.ja_id = ja.id
+----
+1
+99
+
+query IT
+SELECT ja.id, ja.label FROM ja JOIN jb ON jb.ja_id = ja.id
+----
+1
+one

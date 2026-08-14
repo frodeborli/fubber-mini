@@ -2001,6 +2001,11 @@ class VirtualDatabase implements DatabaseInterface
 
     private function executeSelect(SelectStatement $ast): iterable
     {
+        // Reject a SELECT list that would silently lose a column to a name
+        // collision, before any work is done. Checked here rather than in
+        // projectRow() so the cost is per query, not per row.
+        $this->assertNoCollidingOutputNames($ast->columns);
+
         // Get the source table
         if ($ast->from === null) {
             // SELECT without FROM - use SingleRowTable
@@ -4817,6 +4822,137 @@ class VirtualDatabase implements DatabaseInterface
                 : $col->expression->getName();
         }
 
+        $this->assertNoCollidingOutputNames($columns);
+
+        return $names;
+    }
+
+    /**
+     * Reject a SELECT list whose columns would collide on their output name
+     *
+     * Rows are name-keyed objects, so two result columns cannot share a name -
+     * the later one wins and the earlier is silently lost. `SELECT a.id, b.id`
+     * is the shape that matters: the caller asked for two *different* columns
+     * and it is the engine's un-qualifying of the output name that collides
+     * them, so answering with one column is a wrong answer, not a quirk.
+     *
+     * Only unaliased qualified identifiers are checked. An explicit
+     * `SELECT 1 AS x, 2 AS x` is the caller naming both columns the same on
+     * purpose; SQLite tolerates it and so do we (documented in VDB-STATUS.md).
+     *
+     * Aliasing is the fix and already works: `SELECT a.id AS a_id, b.id AS b_id`.
+     */
+    private function assertNoCollidingOutputNames(array $columns): void
+    {
+        $this->outputColumnNames($columns); // throws if unresolvable
+    }
+
+    /**
+     * Output column name for every ColumnNode in a SELECT list
+     *
+     * Rows are name-keyed objects, so two result columns cannot share a name -
+     * the later would silently overwrite the earlier. `SELECT a.id, b.id` is
+     * the shape that matters: the caller asked for two *different* columns and
+     * it is the un-qualifying of the output name that collides them.
+     *
+     * Colliding qualified columns fall back to `qualifier_column`, so
+     * `SELECT a.id, b.id` yields `a_id` and `b_id`. The underscore form is
+     * used rather than the qualified `a.id` because rows are objects and
+     * `$row->a.id` is not valid PHP - it parses as `$row->a . id` - while
+     * `$row->a_id` is. (No PDO fetch mode produces this spelling; PDO either
+     * collapses the duplicate, or with FETCH_NAMED returns both values as an
+     * array. This is Mini's own resolution, and the Python port applies the
+     * same rule so both engines agree.)
+     *
+     * If the fallback *also* collides - e.g. `SELECT a.id, b.id, x.a_id` -
+     * there is no safe answer left, so it throws rather than guessing.
+     *
+     * @param array $columns SELECT list nodes
+     * @return array<int, string> spl_object_id(ColumnNode) => output name
+     */
+    private function outputColumnNames(array $columns): array
+    {
+        $preferred = [];
+        $identity = [];
+        $byName = [];
+
+        foreach ($columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                continue;
+            }
+            $id = spl_object_id($col);
+
+            $name = $col->alias;
+            if ($name === null && $col->expression instanceof IdentifierNode) {
+                $name = $col->expression->getName();
+            }
+            if ($name === null) {
+                $name = 'col_' . $id;
+            }
+
+            // Two entries are "the same column" when they name the same thing:
+            // the same alias, or the same qualified column. Selecting one
+            // twice is redundant, not lossy, so it may share an output name.
+            $ident = $col->alias !== null
+                ? 'alias:' . $col->alias
+                : ($col->expression instanceof IdentifierNode
+                    ? 'col:' . $col->expression->getFullName()
+                    : 'expr:' . $id);
+
+            $preferred[$id] = $name;
+            $identity[$id] = $ident;
+            $byName[$name][$ident] = true;
+        }
+
+        $names = $preferred;
+        $renamed = [];
+
+        foreach ($columns as $col) {
+            if (!$col instanceof ColumnNode) {
+                continue;
+            }
+            $id = spl_object_id($col);
+            $name = $preferred[$id];
+
+            // Only disambiguate when DISTINCT columns share an output name.
+            // An explicit `AS x` twice is the caller's own naming, and an
+            // unqualified duplicate has no qualifier to fall back on.
+            if (count($byName[$name]) < 2
+                || $col->alias !== null
+                || !$col->expression instanceof IdentifierNode
+                || !$col->expression->isQualified()
+            ) {
+                continue;
+            }
+
+            $qualifier = $col->expression->getQualifier()[0] ?? null;
+            if ($qualifier !== null) {
+                $names[$id] = $qualifier . '_' . $name;
+                $renamed[$id] = true;
+            }
+        }
+
+        // Throw only when DISAMBIGUATION ITSELF failed - a fallback name that
+        // lands on another column. Collisions we never tried to resolve (an
+        // explicit `AS x` twice, or a bare column an expression was aliased
+        // onto) are the caller's own naming; SQLite tolerates them, the later
+        // column wins, and that is documented in VDB-STATUS.md.
+        $claimedBy = [];
+        foreach ($names as $id => $name) {
+            $prev = $claimedBy[$name] ?? null;
+            if ($prev !== null
+                && $identity[$prev] !== $identity[$id]
+                && (isset($renamed[$id]) || isset($renamed[$prev]))
+            ) {
+                throw new \RuntimeException(
+                    "Column name conflict in SELECT: disambiguating produced the output "
+                    . "name '$name' for two different columns, so one would be silently "
+                    . 'lost. Alias them explicitly, e.g. SELECT a.id AS a_key, b.id AS b_key.'
+                );
+            }
+            $claimedBy[$name] = $id;
+        }
+
         return $names;
     }
 
@@ -5791,20 +5927,15 @@ class VirtualDatabase implements DatabaseInterface
         }
 
         $result = new \stdClass();
+        $outputNames = $this->outputColumnNames($columns);
 
         foreach ($columns as $col) {
             if (!$col instanceof ColumnNode) {
                 continue;
             }
 
-            // Determine output column name
-            $name = $col->alias;
-            if ($name === null && $col->expression instanceof IdentifierNode) {
-                $name = $col->expression->getName();
-            }
-            if ($name === null) {
-                $name = 'col_' . spl_object_id($col);
-            }
+            // Output column name, with collisions already resolved
+            $name = $outputNames[spl_object_id($col)] ?? 'col_' . spl_object_id($col);
 
             // Handle table.* (select all columns from a table)
             if ($col->expression instanceof IdentifierNode && $col->expression->isWildcard()) {

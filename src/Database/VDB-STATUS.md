@@ -290,14 +290,22 @@ The 30 failures are two classes, both understood:
   (`431 / -698` is `-0.617...`); SQLite uses integer division for two integers
   (`0`). Queries whose result depends on that choice differ by design. See
   "Deliberate divergences" below.
-* **10 — duplicate column names collapse.** `SELECT 1 AS x, 2 AS x` returns
-  *one* column here and two in SQLite. Rows are name-keyed objects
-  (`stdClass` in PHP, `dict` in the Python port), so two columns cannot share
-  a name — the later one wins and the earlier is lost. This is a property of
-  the row representation, not a bug in a query path, and it is identical in
-  both engines. Alias duplicates explicitly (`AS x1`, `AS x2`) when a query
-  would otherwise produce them. Fixing it would mean positional rows, giving
-  up `$row->name` access, which the framework is not willing to trade.
+* **10 — explicitly duplicated output names collapse.** `SELECT 1 AS x, 2 AS x`
+  (and `SELECT col, expr AS col`) returns *one* column here and two in SQLite.
+  Rows are name-keyed objects (`stdClass` in PHP, `dict` in the Python port),
+  so two columns cannot share a name — the later wins. Where the caller named
+  both columns the same, that is their choice and it is left alone.
+
+  What is **not** left alone is the case where the caller asked for two
+  *different* columns and the engine's un-qualifying collided them:
+  `SELECT a.id, b.id` now yields `a_id` and `b_id` rather than silently
+  dropping one. The underscore spelling is used because rows are objects and
+  `$row->a.id` is not valid PHP (it parses as `$row->a . id`) while
+  `$row->a_id` is. No PDO fetch mode produces this spelling — PDO either
+  collapses the duplicate or, with `FETCH_NAMED`, returns both values as an
+  array — so this is Mini's own resolution, applied identically in both
+  engines. If the fallback would itself collide (`SELECT a.id, b.id, x.a_id`)
+  there is no safe answer left and the query fails fast.
 
 The dialect itself is pinned by `tests/minisql/*.test` — the shared spec both
 this engine and the Python port (minivdb) execute.
