@@ -1,0 +1,203 @@
+# MiniSQL dialect conformance — core semantics
+#
+# THE SHARED SPEC. This file is the executable definition of MiniSQL, the SQL
+# dialect implemented by BOTH the PHP engine (mini\Database\VirtualDatabase)
+# and the Python port (minivdb). It is written in sqllogictest format, which
+# is language-neutral by design, so the same file runs against both engines.
+#
+# A behaviour is MiniSQL if and only if it is pinned here. Where the dialect
+# deliberately differs from SQLite, this file records the difference, so the
+# divergence is a decision rather than an accident of an implementation.
+#
+# Add a case here BEFORE implementing a dialect decision in either engine.
+
+statement ok
+CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, r REAL, s TEXT)
+
+statement ok
+INSERT INTO t VALUES(1, 10, 2.5, 'alpha')
+
+statement ok
+INSERT INTO t VALUES(2, 25, 7.25, 'beta')
+
+statement ok
+INSERT INTO t VALUES(3, NULL, NULL, NULL)
+
+# --- Division: PHP semantics, deliberately NOT SQLite's -------------------
+# int/int yields int when exact, float otherwise; division by zero is NULL.
+# SQLite would answer 2 for 10/4 (integer division). This is the dialect's
+# one deliberate arithmetic divergence and it is the same in both engines.
+
+query I
+SELECT 10 / 5
+----
+2
+
+query R
+SELECT 10 / 4
+----
+2.500
+
+query T
+SELECT CASE WHEN 1 / 0 IS NULL THEN 'null' ELSE 'not-null' END
+----
+null
+
+# --- Comparison affinity: SQLite's two-stage rule --------------------------
+# A bare column operand carries its column's affinity and converts the other
+# side; an expression operand carries none. Both engines agree with SQLite.
+
+query I
+SELECT id FROM t WHERE n = '25'
+----
+2
+
+query I
+SELECT COUNT(*) FROM t WHERE n + 0 = '25'
+----
+0
+
+query I
+SELECT id FROM t WHERE s = 'alpha'
+----
+1
+
+# --- Three-valued logic ----------------------------------------------------
+
+query I
+SELECT COUNT(*) FROM t WHERE n = NULL
+----
+0
+
+query I
+SELECT COUNT(*) FROM t WHERE n IS NULL
+----
+1
+
+query I
+SELECT COUNT(*) FROM t WHERE n != 10
+----
+1
+
+query I
+SELECT COUNT(*) FROM t WHERE NOT (n > 100)
+----
+2
+
+# --- Aggregates over NULL --------------------------------------------------
+
+query II
+SELECT COUNT(*), COUNT(n) FROM t
+----
+3
+2
+
+query I
+SELECT SUM(n) FROM t
+----
+35
+
+query T
+SELECT CASE WHEN SUM(n) IS NULL THEN 'null' ELSE 'value' END FROM t WHERE id > 100
+----
+null
+
+# --- Ordering: NULLs sort first --------------------------------------------
+# Unsorted comparison (no rowsort) so the ORDER BY itself is what is pinned:
+# row 3 has n = NULL and must come first, as SQLite orders it.
+
+query I
+SELECT id FROM t ORDER BY n
+----
+3
+1
+2
+
+# --- String functions: SQLite spellings are the supported ones -------------
+
+query T
+SELECT UPPER(s) FROM t WHERE id = 1
+----
+ALPHA
+
+query I
+SELECT LENGTH(s) FROM t WHERE id = 2
+----
+4
+
+query T
+SELECT SUBSTR(s, 1, 3) FROM t WHERE id = 1
+----
+alp
+
+query T
+SELECT s || '!' FROM t WHERE id = 1
+----
+alpha!
+
+# --- Standard scalar syntax (Core SQL) also supported ----------------------
+
+query I
+SELECT CHARACTER_LENGTH(s) FROM t WHERE id = 2
+----
+4
+
+query T
+SELECT SUBSTRING(s FROM 1 FOR 3) FROM t WHERE id = 1
+----
+alp
+
+query I
+SELECT POSITION('ph' IN s) FROM t WHERE id = 1
+----
+3
+
+query T
+SELECT TRIM(BOTH 'a' FROM s) FROM t WHERE id = 1
+----
+lph
+
+# --- CAST: SQLite coercion rules -------------------------------------------
+
+query I
+SELECT CAST('12abc' AS INTEGER)
+----
+12
+
+query I
+SELECT CAST('abc' AS INTEGER)
+----
+0
+
+query I
+SELECT CAST(1.7 AS INTEGER)
+----
+1
+
+# --- LIKE with ESCAPE ------------------------------------------------------
+
+query I
+SELECT COUNT(*) FROM t WHERE s LIKE 'al%'
+----
+1
+
+query I
+SELECT COUNT(*) FROM t WHERE s LIKE 'a!%' ESCAPE '!'
+----
+0
+
+# --- CTEs, including the recursive column-list form ------------------------
+
+query I rowsort
+WITH c AS (SELECT id FROM t WHERE id < 3) SELECT id FROM c
+----
+1
+2
+
+query I rowsort
+WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 4) SELECT x FROM c
+----
+1
+2
+3
+4
