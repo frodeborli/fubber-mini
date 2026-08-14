@@ -34,18 +34,25 @@ use mini\Table\Predicate;
  * Using stdClass (not array) ensures column names are always explicit,
  * which is required for SetInterface::has() with composite keys.
  *
- * Row IDs are required for UPDATE/DELETE operations and for deduplication
- * when merging results (e.g., OR clauses via union()).
+ * ## The consistency contract: filters and rows must agree
  *
- * TableInterface extends SetInterface, enabling tables to be used as
- * subqueries in IN clauses:
+ * An implementation has two surfaces: the **filter surface** (`eq`, `lt`,
+ * `gt`, `lte`, `gte`, `like`, `in`, `or`) and the **row surface**
+ * (iteration). The engine pushes predicates into the filter surface and never
+ * re-checks them against the rows that come back - that delegation is the
+ * whole point, because it lets a backend answer from an index, from SQL sent
+ * to a real database, or from a remote API's query parameters, WITHOUT
+ * materialising rows.
  *
- * ```php
- * $activeUserIds = $users->eq('status', 'active')->columns('id');
- * $orders->in('user_id', $activeUserIds);
- * ```
+ * The consequence is a contract the engine cannot enforce and must assume:
  *
- * @extends IteratorAggregate<int|string, stdClass>
+ * > **`eq('c', $v)` MUST return exactly the rows whose iterated `c` equals
+ * > `$v`** - and likewise for every other filter method.
+ *
+ * The practical case where this bites: a table that shows one value and
+ * filters on another. If a value must not be readable, keep it out of the
+ * rows entirely rather than masking a storage-backed column - see
+ * "Write-only values" in `src/Database/Virtual/README.md`.
  */
 interface TableInterface extends SetInterface, IteratorAggregate, Countable
 {

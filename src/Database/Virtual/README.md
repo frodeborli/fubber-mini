@@ -136,6 +136,106 @@ Exposing SQL to untrusted callers needs more than these: combine them with a PHP
 `memory_limit`, a request-level timeout, and `registerModel()` so row-level
 authorization applies to SQL as well.
 
+## Values the caller may not read: use a custom backend
+
+"An agent may change the password but must not read it" is a job for a
+**custom backend**, not for masking a column of a storage-backed table.
+
+The reason is the consistency contract in `TableInterface`: predicates are
+pushed down, so `WHERE value LIKE 's%'` becomes `$table->like('value', 's%')`
+and the backend decides which rows match. Keep the real value in a storage
+engine - `ArrayTable`, `InMemoryTable`, a PDO table - and *that engine* answers
+predicates from the stored value, whatever your row output shows. Masking a row
+inside SQLite or MySQL is not something this engine can offer, and does not try
+to.
+
+### The easy way: a GeneratorTable
+
+A `GeneratorTable` has no storage behind it, so its filters can only run over
+what the closure yields. The filter surface and the row surface are the same
+data *by construction* - there is nothing to disagree with:
+
+```php
+$settings = new GeneratorTable(
+    function () use ($store) {
+        foreach ($store->all() as $i => [$key, $value]) {
+            yield $i => (object) [
+                'key'   => $key,
+                'value' => $key === 'password' ? '***' : $value,
+            ];
+        }
+    },
+    new ColumnDef('key', ColumnType::Text, IndexType::Primary),
+    new ColumnDef('value', ColumnType::Text),
+);
+```
+
+```sql
+SELECT key, value FROM settings                          -- password shows as ***
+SELECT key FROM settings WHERE value LIKE 's%'           -- no rows: nothing to probe
+SELECT key FROM settings WHERE value = '***'             -- matches, consistently
+```
+
+The secret is never yielded, so no predicate can reach it. For writes, add
+`insert()`/`update()` that apply changes to your own store while the generator
+keeps yielding the public view.
+
+### Or keep it out of rows entirely: a write-only sink
+
+When a value should never appear in any row, a table that accepts writes and
+yields nothing is the simplest thing that works:
+
+```php
+public function insert(array $row): int|string
+{
+    $v = $row['new_password'] ?? null;
+    if (!is_string($v) || strlen($v) < 8) {
+        throw new \RuntimeException('new_password must be at least 8 characters.');
+    }
+    ($this->onSet)($v);          // applied somewhere the engine never reads
+    return 1;
+}
+
+protected function materialize(string ...$additional): \Traversable
+{
+    yield from [];               // write-only: never yields a row
+}
+```
+
+Validation errors thrown from `insert()` reach the caller verbatim (see
+below), so an agent that supplies a bad value is told exactly why.
+
+## Business rules on write
+
+`VirtualDatabase` does not wrap exceptions from the table layer, so a domain
+exception thrown by a custom `insert()`, `update()` or `delete()` reaches the
+caller with its class and message intact. That is what makes a virtual table
+a place to enforce business rules:
+
+```php
+final class SettingsTable extends ArrayTable
+{
+    public function update(TableInterface $query, array $changes): int
+    {
+        foreach ($query as $row) {
+            $this->validate(array_merge((array) $row, $changes));  // resulting state
+        }
+        return parent::update($query, $changes);
+    }
+}
+```
+
+```
+UPDATE settings SET value = 'neon' WHERE key = 'theme'
+-> SettingValidationError: Setting 'theme' must be one of: light, dark; got 'neon'.
+```
+
+Because writes are deferred until the statement finishes reading (see
+`PendingWrites`), a validation failure part-way through leaves the table
+untouched rather than half-applied. Write the message the way the engine
+writes its own — name the valid values, not just "invalid" — and an LLM
+client can correct itself from it.
+
 ## Limits
 
 `mini\Database\Limits` states in code what the engine is for: *sensible* SQL over
