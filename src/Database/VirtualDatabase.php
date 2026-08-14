@@ -4850,10 +4850,14 @@ class VirtualDatabase implements DatabaseInterface
     /**
      * Output column name for every ColumnNode in a SELECT list
      *
-     * Rows are name-keyed objects, so two result columns cannot share a name -
-     * the later would silently overwrite the earlier. `SELECT a.id, b.id` is
-     * the shape that matters: the caller asked for two *different* columns and
-     * it is the un-qualifying of the output name that collides them.
+     * Rows are name-keyed objects, so two result columns cannot share a name.
+     * The rule is whose name it is:
+     *
+     * - A name the CALLER wrote (an alias) is intent: honoured verbatim, and
+     *   shadowing an earlier column with it is a feature, not an error.
+     * - A name the ENGINE derived (the bare part of a qualified column) is not
+     *   intent, so it yields. `SELECT a.id, b.id` asks for two *different*
+     *   columns; the collision is the un-qualifying, so the engine fixes it.
      *
      * Colliding qualified columns fall back to `qualifier_column`, so
      * `SELECT a.id, b.id` yields `a_id` and `b_id`. The underscore form is

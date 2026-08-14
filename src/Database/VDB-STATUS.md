@@ -290,22 +290,41 @@ The 30 failures are two classes, both understood:
   (`431 / -698` is `-0.617...`); SQLite uses integer division for two integers
   (`0`). Queries whose result depends on that choice differ by design. See
   "Deliberate divergences" below.
-* **10 — explicitly duplicated output names collapse.** `SELECT 1 AS x, 2 AS x`
-  (and `SELECT col, expr AS col`) returns *one* column here and two in SQLite.
-  Rows are name-keyed objects (`stdClass` in PHP, `dict` in the Python port),
-  so two columns cannot share a name — the later wins. Where the caller named
-  both columns the same, that is their choice and it is left alone.
+* **10 — explicit shadowing.** `SELECT 1 AS x, 2 AS x` returns *one* column
+  here and two in SQLite. See the rule below: this is deliberate.
 
-  What is **not** left alone is the case where the caller asked for two
-  *different* columns and the engine's un-qualifying collided them:
-  `SELECT a.id, b.id` now yields `a_id` and `b_id` rather than silently
-  dropping one. The underscore spelling is used because rows are objects and
-  `$row->a.id` is not valid PHP (it parses as `$row->a . id`) while
-  `$row->a_id` is. No PDO fetch mode produces this spelling — PDO either
-  collapses the duplicate or, with `FETCH_NAMED`, returns both values as an
-  array — so this is Mini's own resolution, applied identically in both
-  engines. If the fallback would itself collide (`SELECT a.id, b.id, x.a_id`)
-  there is no safe answer left and the query fails fast.
+### Output column names: explicit names shadow, derived names yield
+
+Rows are name-keyed objects (`stdClass` in PHP, `dict` in the Python port), so
+two result columns cannot share a name. MiniSQL resolves that by asking whose
+name it is:
+
+* **A name the caller wrote is intent, and is honoured verbatim.** Writing the
+  same alias twice — `SELECT a.id AS k, b.id AS k` — shadows, last one wins.
+  That is a feature, not an error: naming two things the same is a deliberate
+  act, and SQLite tolerates it too. An alias also always keeps its exact
+  spelling, so it can shadow a column selected earlier
+  (`SELECT a.name, a.id AS name` → the alias owns `name`).
+
+* **A name the engine derived is not intent, and yields rather than colliding.**
+  `SELECT a.id, b.id` asks for two *different* columns; the bare `id` on both
+  is the engine's un-qualifying, so the engine fixes it: the result is `a_id`
+  and `b_id`. Nothing the caller asked for is dropped.
+
+  The underscore spelling is used because rows are objects: `$row->a.id` is not
+  valid PHP (it parses as `$row->a . id`) while `$row->a_id` is. No PDO fetch
+  mode produces this spelling — PDO collapses the duplicate, or with
+  `FETCH_NAMED` returns both values as an array, and MySQL's
+  `ATTR_FETCH_TABLE_NAMES` prefixes with a dot — so this is Mini's own
+  resolution, applied identically in both engines.
+
+* **Selecting the same column twice** (`SELECT a.id, a.id`) is redundant, not
+  lossy: one column out.
+
+* **When disambiguation itself would collide** (`SELECT a.id, b.id, x.a_id`,
+  where the fallback `a_id` lands on a real column) there is no safe answer
+  left, so the query fails fast rather than guessing.
+
 
 The dialect itself is pinned by `tests/minisql/*.test` — the shared spec both
 this engine and the Python port (minivdb) execute.

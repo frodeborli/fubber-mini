@@ -299,3 +299,34 @@ SELECT ja.id, ja.label FROM ja JOIN jb ON jb.ja_id = ja.id
 ----
 1
 one
+
+# --- Explicit names shadow; derived names yield ----------------------------
+# The rule in one line: a name the CALLER wrote is intent and is always
+# honoured verbatim - shadowing an earlier column with it is a feature. A name
+# the ENGINE derived (the bare part of a qualified column) is not intent, so
+# when two of them would collide the engine disambiguates rather than dropping
+# a column the caller asked for.
+
+# An explicit alias keeps its exact name; the derived one yields to it.
+
+query II
+SELECT ja.id, jb.id AS id FROM ja JOIN jb ON jb.ja_id = ja.id
+----
+1
+99
+
+# Explicit shadowing of a selected column: `label` is the alias's, and the
+# column it displaced is still reachable, renamed.
+
+query TI
+SELECT ja.label, ja.id AS label FROM ja JOIN jb ON jb.ja_id = ja.id
+----
+one
+1
+
+# Two explicit names that are the same: deliberate shadowing, last wins.
+
+query I
+SELECT ja.id AS k, jb.id AS k FROM ja JOIN jb ON jb.ja_id = ja.id
+----
+99
