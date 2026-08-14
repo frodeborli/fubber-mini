@@ -357,7 +357,7 @@ class SqlParser
                 $stmt->from = $this->parseDerivedTable();
                 // Derived tables require an alias
                 if ($this->match(SqlLexer::T_AS)) {
-                    $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                    $aliasToken = $this->expectName();
                     $stmt->fromAlias = $aliasToken['value'];
                 } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
                     $stmt->fromAlias = $this->current()['value'];
@@ -377,7 +377,7 @@ class SqlParser
 
                 // Optional table alias
                 if ($this->match(SqlLexer::T_AS)) {
-                    $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                    $aliasToken = $this->expectName();
                     $stmt->fromAlias = $aliasToken['value'];
                 } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
                     // Implicit alias (without AS)
@@ -391,7 +391,7 @@ class SqlParser
                 $table = $this->parseIdentifier();
                 $alias = null;
                 if ($this->match(SqlLexer::T_AS)) {
-                    $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                    $aliasToken = $this->expectName();
                     $alias = $aliasToken['value'];
                 } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
                     // Implicit alias (keywords have their own token types)
@@ -676,7 +676,7 @@ class SqlParser
         $names = [];
         $seen = [];
         do {
-            $token = $this->expect(SqlLexer::T_IDENTIFIER);
+            $token = $this->expectName();
             $name = $token['value'];
 
             // SQL:2003 requires the column names of a derived table to be
@@ -888,7 +888,7 @@ class SqlParser
      */
     private function parseCteDefinition(): array
     {
-        $nameToken = $this->expect(SqlLexer::T_IDENTIFIER);
+        $nameToken = $this->expectName();
         $name = $nameToken['value'];
 
         // Optional column list: cte_name(col1, col2)
@@ -896,7 +896,7 @@ class SqlParser
         if ($this->match(SqlLexer::T_LPAREN)) {
             $columns = [];
             do {
-                $colToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                $colToken = $this->expectName();
                 $columns[] = $colToken['value'];
             } while ($this->match(SqlLexer::T_COMMA));
             $this->expect(SqlLexer::T_RPAREN);
@@ -928,7 +928,7 @@ class SqlParser
                 $alias = null;
 
                 if ($this->match(SqlLexer::T_AS)) {
-                    $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                    $aliasToken = $this->expectName();
                     $alias = $aliasToken['value'];
                 } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
                     // Implicit alias
@@ -1636,7 +1636,7 @@ class SqlParser
 
     private function parseFunctionCall(): FunctionCallNode|WindowFunctionNode
     {
-        $nameToken = $this->expect(SqlLexer::T_IDENTIFIER);
+        $nameToken = $this->expectName();
         $this->expect(SqlLexer::T_LPAREN);
         $args = [];
         $distinct = false;
@@ -1808,6 +1808,27 @@ class SqlParser
     }
 
     /**
+     * Consume a token that names something (a column, alias, table, CTE)
+     *
+     * Accepts an identifier, or a keyword that can never begin an expression
+     * or a clause - see NAME_LIKE_KEYWORDS. Every naming position goes through
+     * here, so `key`, `action`, `index`, `table` and `first` work as names
+     * wherever a name is expected: select lists, UPDATE ... SET, INSERT column
+     * lists, CTE column lists and aliases.
+     *
+     * @return array The consumed token
+     */
+    private function expectName(): array
+    {
+        $token = $this->current();
+        if ($token['type'] === SqlLexer::T_IDENTIFIER || $this->isBareNameKeyword($token)) {
+            $this->pos++;
+            return $token;
+        }
+        return $this->expect(SqlLexer::T_IDENTIFIER); // throws with the standard message
+    }
+
+    /**
      * Parse a keyword token that is standing in for a column name
      *
      * Mirrors parseIdentifier()'s qualification loop so `key`, `t.key` and
@@ -1843,7 +1864,7 @@ class SqlParser
 
     private function parseIdentifier(): IdentifierNode
     {
-        $token = $this->expect(SqlLexer::T_IDENTIFIER);
+        $token = $this->expectName();
         $parts = [$token['value']];
 
         // Handle qualified identifiers (schema.table.column or table.*)
@@ -1918,7 +1939,7 @@ class SqlParser
             // Derived tables require an alias
             $alias = null;
             if ($this->match(SqlLexer::T_AS)) {
-                $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                $aliasToken = $this->expectName();
                 $alias = $aliasToken['value'];
             } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
                 $alias = $this->current()['value'];
@@ -1939,7 +1960,7 @@ class SqlParser
             // Optional alias
             $alias = null;
             if ($this->match(SqlLexer::T_AS)) {
-                $aliasToken = $this->expect(SqlLexer::T_IDENTIFIER);
+                $aliasToken = $this->expectName();
                 $alias = $aliasToken['value'];
             } elseif ($this->current()['type'] === SqlLexer::T_IDENTIFIER) {
                 // Implicit alias - but be careful not to consume ON
