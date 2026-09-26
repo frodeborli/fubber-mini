@@ -26,6 +26,9 @@ the RequestDispatcher's, so existing registrations apply to both paths.
 - An exception without a converter is rethrown as itself; before, `ConverterRegistry::convert()`
   replaced it with "No converter registered".
 - `onAfterRequest` fires when handle() returns, which under Swerve is before a streamed body is sent.
+- Additions (not breaking): `RequestDispatcher::within($request, $fn)` makes a request current
+  again for work that outlives its response (a WebSocket connection); a phasync context
+  implementing `mini\Contracts\RequestScopeProviderInterface` shares the request scope it names.
 
 Regression tests: `tests/Dispatcher/RequestDispatcher.php`.
 

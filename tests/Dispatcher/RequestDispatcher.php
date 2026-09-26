@@ -105,6 +105,14 @@ $test = new class extends Test {
         $this->assertThrows(fn () => \mini\request(), \RuntimeException::class);
     }
 
+    public function testWithinMakesARequestCurrentAgainAfterHandleReturned(): void
+    {
+        $request = new ServerRequest('GET', '/live?id=kept', '');
+        $this->handle('/x?id=other');
+        $this->assertSame('kept/kept', RequestDispatcher::within($request, fn () => \mini\request()->getQueryParams()['id'] . '/' . $_GET['id']));
+        $this->assertThrows(fn () => \mini\request(), \RuntimeException::class);
+    }
+
     public function testAConvertedExceptionBecomesItsResponse(): void
     {
         $response = $this->handle('/x?throw=nope');

@@ -202,6 +202,28 @@ class RequestDispatcher implements RequestHandlerInterface
     }
 
     /**
+     * Run $fn as the current request scope's work on $request, after handle() returned it a
+     * response: for a request whose work outlives its response, such as the connection a
+     * WebSocket upgrade (101) hands over. request() and the proxies see $request meanwhile, as
+     * they did in handle(); the request hooks don't fire again.
+     *
+     * @template T
+     * @param \Closure(): T $fn
+     * @return T
+     */
+    public static function within(ServerRequestInterface $request, \Closure $fn): mixed
+    {
+        self::$currentRequests ??= new \WeakMap();
+        $scope = Mini::$mini->getRequestScope();
+        self::$currentRequests[$scope] = $request;
+        try {
+            return $fn();
+        } finally {
+            unset(self::$currentRequests[$scope]);
+        }
+    }
+
+    /**
      * The request the current request scope is handling: what the ServerRequestInterface
      * service (mini\request()) returns
      *
