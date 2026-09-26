@@ -12,7 +12,7 @@
 
 use mini\Mini;
 use mini\Converter\ConverterRegistryInterface;
-use mini\Dispatcher\HttpDispatcher;
+use mini\Dispatcher\RequestDispatcher;
 use Psr\Http\Message\ResponseInterface;
 use mini\Http\Message\Response;
 
@@ -49,7 +49,7 @@ $converters->register(function(ResponseInterface $response): ResponseInterface {
 // Register Default Exception Handlers
 // ============================================================================
 
-$dispatcher = Mini::$mini->get(HttpDispatcher::class);
+$dispatcher = Mini::$mini->get(RequestDispatcher::class);
 
 // Handle NotFoundException → 404
 $dispatcher->registerExceptionConverter(function(\mini\Exceptions\NotFoundException $e): ResponseInterface {

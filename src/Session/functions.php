@@ -2,7 +2,7 @@
 
 namespace mini;
 
-use mini\Dispatcher\HttpDispatcher;
+use mini\Dispatcher\RequestDispatcher;
 use mini\Session\SessionInterface;
 use mini\Session\SessionMiddleware;
 
@@ -24,4 +24,4 @@ Mini::$mini->addService(
 );
 
 // Register SessionMiddleware to add session cookies to responses
-Mini::$mini->get(HttpDispatcher::class)->addMiddleware(new SessionMiddleware());
+Mini::$mini->get(RequestDispatcher::class)->addMiddleware(new SessionMiddleware());

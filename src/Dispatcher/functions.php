@@ -45,5 +45,8 @@ namespace mini\Dispatcher;
 use mini\Mini;
 use mini\Lifetime;
 
-// Register HttpDispatcher service
+// Register the request pipeline (any PSR-15 server) and the SAPI dispatcher (FPM) over it
+Mini::$mini->addService(RequestDispatcher::class, Lifetime::Singleton, fn() => new RequestDispatcher());
+// The request the current request scope is handling (mini\request())
+Mini::$mini->addService(\Psr\Http\Message\ServerRequestInterface::class, Lifetime::Transient, fn() => RequestDispatcher::currentRequest());
 Mini::$mini->addService(HttpDispatcher::class, Lifetime::Singleton, fn() => new HttpDispatcher());

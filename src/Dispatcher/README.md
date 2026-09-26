@@ -37,6 +37,20 @@ HttpDispatcher follows this exact sequence:
 7. **Handle exceptions** - Converts exceptions to PSR-7 responses
 8. **Emit response** - Sends status, headers, and body to browser
 
+## PSR-15: RequestDispatcher
+
+The pipeline behind `dispatch()` (middleware, the Router, exception conversion, the request hooks)
+is `mini\Dispatcher\RequestDispatcher`, a PSR-15 `RequestHandlerInterface`. `HttpDispatcher` feeds
+it the request of PHP's own SAPI and emits the response; an application server that speaks PSR-15
+uses it directly. With Swerve:
+
+```php
+// swerve.php
+return mini\Mini::$mini->get(mini\Dispatcher\RequestDispatcher::class);
+```
+
+Middleware and exception converters registered on either dispatcher apply to both.
+
 ## Request Globals are Fiber-Safe
 
 Mini replaces `$_GET`, `$_POST`, `$_COOKIE` with proxy objects during dispatch. This makes them **fiber-safe** without code changes:

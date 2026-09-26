@@ -12,7 +12,7 @@ use mini\Mini;
 use mini\Lifetime;
 use mini\Util\PathsRegistry;
 use mini\Static\StaticFiles;
-use mini\Dispatcher\HttpDispatcher;
+use mini\Dispatcher\RequestDispatcher;
 
 // Register static paths registry
 $primaryStaticPath = $_ENV['MINI_STATIC_ROOT'] ?? (Mini::$mini->root . '/_static');
@@ -25,7 +25,7 @@ Mini::$mini->paths->static->addPath($frameworkStaticPath);
 // Register StaticFiles middleware as singleton service
 Mini::$mini->addService(StaticFiles::class, Lifetime::Singleton, fn() => new StaticFiles());
 
-// Add StaticFiles middleware to the HttpDispatcher pipeline
+// Add StaticFiles middleware to the request pipeline
 // This runs during Bootstrap phase, before Ready phase
-$dispatcher = Mini::$mini->get(HttpDispatcher::class);
+$dispatcher = Mini::$mini->get(RequestDispatcher::class);
 $dispatcher->addMiddleware(Mini::$mini->get(StaticFiles::class));

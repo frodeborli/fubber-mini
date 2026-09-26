@@ -11,15 +11,19 @@ use mini\Http\Message\{ServerRequest, Stream, UploadedFile};
 /**
  * HTTP request dispatcher
  *
- * The HttpDispatcher is the entry point for HTTP requests. It:
+ * The HttpDispatcher is the entry point for HTTP requests in PHP's own SAPIs (FPM, the built-in
+ * server). It:
  * 1. Creates PSR-7 ServerRequest from PHP globals
- * 2. Makes request available via mini\request()
- * 3. Delegates to RequestHandlerInterface (Router)
- * 4. Converts exceptions to HTTP responses
- * 5. Emits response to browser
+ * 2. Hands it to the RequestDispatcher: middleware, the Router, exception conversion
+ * 3. Emits the response to the browser, with Range support
+ * 4. Shows a last-resort error page for an exception nothing converted
  *
  * Architecture:
- * HttpDispatcher (request lifecycle) → RequestHandlerInterface (Router) → Controllers
+ * HttpDispatcher (SAPI) → RequestDispatcher (PSR-15 pipeline) → Router → Controllers
+ *
+ * Application servers that speak PSR-15, such as Swerve, use the RequestDispatcher directly.
+ * The registration methods here (addMiddleware(), registerExceptionConverter(), the request
+ * hooks) are the RequestDispatcher's, so what is registered applies to both.
  *
  * Exception handling:
  * Exceptions thrown during request handling are converted to ResponseInterface
@@ -43,303 +47,70 @@ use mini\Http\Message\{ServerRequest, Stream, UploadedFile};
  */
 class HttpDispatcher
 {
-    private ConverterRegistryInterface $exceptionConverters;
-    private ?ServerRequestInterface $currentServerRequest = null;
-
-    /** @var array<MiddlewareInterface> Middleware stack (FIFO order) */
-    private array $middlewares = [];
+    private RequestDispatcher $requests;
 
     /**
-     * Event triggered before processing a request
-     *
-     * Listeners receive the ServerRequestInterface being processed.
-     * Use this for request-scoped initialization.
+     * Event triggered before processing a request: the RequestDispatcher's
      *
      * @var \mini\Hooks\Event<ServerRequestInterface>
      */
     public readonly \mini\Hooks\Event $onBeforeRequest;
 
     /**
-     * Event triggered after processing a request (in finally block)
-     *
-     * Always fires, even if an exception was thrown or response already sent.
-     * Use this for cleanup, session saving, logging, etc.
-     *
-     * Listeners receive: (ServerRequestInterface $request, ?ResponseInterface $response, ?\Throwable $exception)
-     * - $response is null if exception was thrown before response was created
-     * - $exception is the thrown exception (if any), null on success
+     * Event triggered after processing a request: the RequestDispatcher's
      *
      * @var \mini\Hooks\Event<ServerRequestInterface, ?ResponseInterface, ?\Throwable>
      */
     public readonly \mini\Hooks\Event $onAfterRequest;
 
-    public function __construct(
-        private ?RequestHandlerInterface $requestHandler = null,
-    ) {
-        // Create separate converter registry for exceptions
-        // This keeps exception handling separate from content conversion
-        $this->exceptionConverters = new \mini\Converter\ConverterRegistry();
-
-        // Initialize request lifecycle hooks
-        $this->onBeforeRequest = new \mini\Hooks\Event('http.before-request');
-        $this->onAfterRequest = new \mini\Hooks\Event('http.after-request');
+    /**
+     * @param RequestHandlerInterface|null $requestHandler a final handler instead of the Router,
+     *                                                    with a RequestDispatcher of its own
+     */
+    public function __construct(?RequestHandlerInterface $requestHandler = null)
+    {
+        $this->requests = null === $requestHandler ? Mini::$mini->get(RequestDispatcher::class) : new RequestDispatcher($requestHandler);
+        $this->onBeforeRequest = $this->requests->onBeforeRequest;
+        $this->onAfterRequest = $this->requests->onAfterRequest;
     }
 
     /**
-     * Add middleware to the request pipeline
-     *
-     * Middleware is executed in the order added (FIFO).
-     * Can only be called during Bootstrap phase - throws exception if called after Ready phase.
-     *
-     * Examples:
-     * ```php
-     * // In bootstrap.php or module functions.php
-     * $dispatcher = Mini::$mini->get(HttpDispatcher::class);
-     * $dispatcher->addMiddleware(Mini::$mini->get(StaticFiles::class));
-     * $dispatcher->addMiddleware(new CorsMiddleware());
-     * $dispatcher->addMiddleware(new AuthMiddleware());
-     * ```
-     *
-     * @param MiddlewareInterface $middleware PSR-15 middleware instance
-     * @return self For method chaining
-     * @throws \RuntimeException If called after Bootstrap phase
+     * Add middleware to the request pipeline, see RequestDispatcher::addMiddleware()
      */
     public function addMiddleware(MiddlewareInterface $middleware): self
     {
-        // Only allow middleware registration during Bootstrap phase
-        $currentPhase = Mini::$mini->phase->getCurrentState();
-        if ($currentPhase === \mini\Phase::Ready || $currentPhase === \mini\Phase::Shutdown) {
-            throw new \RuntimeException(
-                'Cannot add middleware after Bootstrap phase. ' .
-                'Middleware must be registered during application bootstrap.'
-            );
-        }
+        $this->requests->addMiddleware($middleware);
 
-        $this->middlewares[] = $middleware;
         return $this;
     }
 
     /**
-     * Register an exception converter
-     *
-     * Exception converters transform exceptions to HTTP responses.
-     * They are separate from the main converter registry to keep concerns separated.
-     *
-     * Examples:
-     * ```php
-     * // Handle 404 errors
-     * $dispatcher->registerExceptionConverter(function(NotFoundException $e): ResponseInterface {
-     *     return new Response(404, ['Content-Type' => 'text/html'], render('404'));
-     * });
-     *
-     * // Handle validation errors
-     * $dispatcher->registerExceptionConverter(function(ValidationException $e): ResponseInterface {
-     *     $json = json_encode(['errors' => $e->errors]);
-     *     return new Response(400, ['Content-Type' => 'application/json'], $json);
-     * });
-     *
-     * // Generic error handler
-     * $dispatcher->registerExceptionConverter(function(\Throwable $e): ResponseInterface {
-     *     $statusCode = 500;
-     *     $message = Mini::$mini->debug ? $e->getMessage() : 'Internal Server Error';
-     *     return new Response($statusCode, ['Content-Type' => 'text/html'], render('error', compact('message')));
-     * });
-     * ```
-     *
-     * @param \Closure $converter Typed closure: function(ExceptionType): ResponseInterface
-     * @return void
+     * Register an exception converter, see RequestDispatcher::registerExceptionConverter()
      */
     public function registerExceptionConverter(\Closure $converter): void
     {
-        // During Bootstrap phase, allow transparent replacement of existing converters.
-        // This lets application code override framework defaults without errors.
-        if (Mini::$mini->phase->getCurrentState() === \mini\Phase::Bootstrap) {
-            $this->exceptionConverters->replace($converter);
-        } else {
-            $this->exceptionConverters->register($converter);
-        }
+        $this->requests->registerExceptionConverter($converter);
     }
-
 
     /**
      * Dispatch the current HTTP request
      *
-     * Complete HTTP request lifecycle:
-     * 1. Register ServerRequest as Transient service
-     * 2. Create PSR-7 ServerRequest from PHP request globals
-     * 3. Set as current request
-     * 4. Replace $_GET, $_POST, $_COOKIE with proxies (fiber-safe)
-     * 5. Declare Ready phase (locks down service registration)
-     * 6. Add request replacement callback for Router
-     * 7. Build middleware chain and get RequestHandlerInterface (Router)
-     * 8. Process request through middleware chain → router → handlers
-     * 9. Catch exceptions and convert to responses
-     * 10. Emit response to browser
+     * Creates the PSR-7 ServerRequest from PHP's request globals, handles it with the
+     * RequestDispatcher, and emits the response. An exception nothing converted gets the
+     * last-resort error page.
      *
      * @return void
      */
     public function dispatch(): void
     {
-        $response = null;
-        $exception = null;
-
+        $request = null;
         try {
-            // 1. Register ServerRequest as Transient service that returns current request
-            Mini::$mini->addService(
-                ServerRequestInterface::class,
-                \mini\Lifetime::Transient,
-                fn() => $this->currentServerRequest ?? throw new \RuntimeException(
-                    'No ServerRequest available. ServerRequest is only available during request handling.'
-                )
-            );
-
-            // 2. Create PSR-7 ServerRequest from PHP request globals (SAPI-specific)
-            $serverRequest = $this->createServerRequestFromGlobals();
-
-            // 3. Set current request
-            $this->currentServerRequest = $serverRequest;
-
-            // 4. Replace request globals with proxies (fiber-safe)
-            $this->installRequestGlobalProxies();
-
-            // 5. Declare Ready phase (locks down service registration)
-            Mini::$mini->phase->trigger(\mini\Phase::Ready);
-
-            // 6. Attach replaceRequest callback so Router can update
-            //    currentServerRequest for internal mutations (query param parsing, reroutes)
-            $serverRequest = $serverRequest->withAttribute(
-                'mini.dispatcher.replaceRequest',
-                function(ServerRequestInterface $newRequest) {
-                    $this->currentServerRequest = $newRequest;
-                }
-            );
-
-            // 7. Trigger before-request hook
-            $this->onBeforeRequest->trigger($serverRequest);
-
-            // 8. Build middleware chain and dispatch into the framework
-            try {
-                // Get the final handler (Router by default)
-                $handler = $this->requestHandler ?? Mini::$mini->get(\mini\Router\Router::class);
-
-                // Wrap handler with middleware stack (reverse order for FIFO execution)
-                // Each wrapper updates currentServerRequest so mini\request() and
-                // $_GET/$_POST proxies always reflect the latest request from middleware
-                $handler = $this->buildMiddlewareChain($handler);
-
-                // Process request through middleware chain
-                $response = $handler->handle($serverRequest);
-
-            } catch (\Throwable $e) {
-                // Convert exception to response
-                $response = $this->exceptionConverters->convert($e, ResponseInterface::class);
-
-                if ($response === null) {
-                    // No exception converter registered - rethrow
-                    $exception = $e;
-                    throw $e;
-                }
-            }
-
-            // 9. Emit response
-            $this->emitResponse($response);
-
+            $request = $this->createServerRequestFromGlobals();
+            $this->emitResponse($this->requests->handle($request), $request);
         } catch (\Throwable $e) {
             // Last resort error handling
-            $exception = $e;
-            $this->handleFatalError($e);
-        } finally {
-            // Always trigger after-request hook for cleanup (session save, logging, etc.)
-            if ($this->currentServerRequest !== null) {
-                $this->onAfterRequest->trigger($this->currentServerRequest, $response, $exception);
-            }
+            $this->handleFatalError($e, $request);
         }
-    }
-
-    /**
-     * Build middleware chain wrapper around the final handler
-     *
-     * Wraps the handler (Router) with all registered middleware in reverse order
-     * to ensure FIFO execution (first added middleware executes first).
-     *
-     * Each wrapper updates currentServerRequest when handle() is called, so that
-     * mini\request() and $_GET/$_POST proxies always reflect the latest request
-     * as it flows through middleware. This enables middleware like JSON body parsers
-     * to make their changes visible to $_POST and request()->getParsedBody().
-     *
-     * @param RequestHandlerInterface $handler Final handler (typically Router)
-     * @return RequestHandlerInterface Wrapped handler with middleware chain
-     */
-    private function buildMiddlewareChain(RequestHandlerInterface $handler): RequestHandlerInterface
-    {
-        // Closure that updates the current request — captured by each wrapper
-        $trackRequest = function(ServerRequestInterface $request) {
-            $this->currentServerRequest = $request;
-        };
-
-        // Wrap the final handler (Router) so its handle() calls are also tracked
-        $handler = new class($handler, $trackRequest) implements RequestHandlerInterface {
-            /** @param \Closure(ServerRequestInterface): void $trackRequest */
-            public function __construct(
-                private RequestHandlerInterface $inner,
-                private \Closure $trackRequest
-            ) {}
-
-            public function handle(ServerRequestInterface $request): ResponseInterface {
-                ($this->trackRequest)($request);
-                return $this->inner->handle($request);
-            }
-        };
-
-        // Wrap handler with middleware in reverse order (FIFO execution)
-        // Last middleware in array wraps the handler first
-        for ($i = count($this->middlewares) - 1; $i >= 0; $i--) {
-            $middleware = $this->middlewares[$i];
-            $handler = new class($middleware, $handler, $trackRequest) implements RequestHandlerInterface {
-                /** @param \Closure(ServerRequestInterface): void $trackRequest */
-                public function __construct(
-                    private MiddlewareInterface $middleware,
-                    private RequestHandlerInterface $next,
-                    private \Closure $trackRequest
-                ) {}
-
-                public function handle(ServerRequestInterface $request): ResponseInterface {
-                    ($this->trackRequest)($request);
-                    return $this->middleware->process($request, $this->next);
-                }
-            };
-        }
-
-        return $handler;
-    }
-
-    /**
-     * Install request global proxies for fiber-safe request handling
-     *
-     * Replaces $_GET, $_POST, $_COOKIE with ArrayAccess proxies that delegate
-     * to the current ServerRequest. This enables:
-     * - Fiber-safe concurrent request handling
-     * - Zero code changes (existing $_GET['id'] works)
-     * - Works with all SAPIs (FPM, Swoole, ReactPHP, etc.)
-     *
-     * Called once during HttpDispatcher construction. Idempotent - safe to call multiple times.
-     *
-     * @return void
-     */
-    private function installRequestGlobalProxies(): void
-    {
-        static $installed = false;
-
-        if ($installed) {
-            return;
-        }
-
-        $_GET = new \mini\Http\RequestGlobalProxy('query');
-        $_POST = new \mini\Http\RequestGlobalProxy('post');
-        $_COOKIE = new \mini\Http\RequestGlobalProxy('cookie');
-        $_SESSION = new \mini\Session\SessionProxy();
-
-        $installed = true;
     }
 
     /**
@@ -350,7 +121,7 @@ class HttpDispatcher
      * @param ResponseInterface $response
      * @return void
      */
-    private function emitResponse(ResponseInterface $response): void
+    private function emitResponse(ResponseInterface $response, ServerRequestInterface $request): void
     {
         $body = $response->getBody();
         $size = $this->resolveBodySize($response, $body);
@@ -366,8 +137,7 @@ class HttpDispatcher
         $startOffset = 0;
         $remaining = $size; // null = unknown length, stream until eof
 
-        $request = $this->currentServerRequest;
-        $rangeHeader = $request !== null ? $request->getHeaderLine('Range') : '';
+        $rangeHeader = $request->getHeaderLine('Range');
 
         if ($rangeable
             && $rangeHeader !== ''
@@ -507,7 +277,7 @@ class HttpDispatcher
      * @param \Throwable $e
      * @return void
      */
-    private function handleFatalError(\Throwable $e): void
+    private function handleFatalError(\Throwable $e, ?ServerRequestInterface $request): void
     {
         // Clean output buffer if present
         while (ob_get_level() > 0) {
@@ -568,9 +338,9 @@ class HttpDispatcher
         // Request information
         $requestInfo = '';
         try {
-            if ($this->currentServerRequest) {
-                $method = htmlspecialchars($this->currentServerRequest->getMethod());
-                $uri = htmlspecialchars((string)$this->currentServerRequest->getUri());
+            if ($request) {
+                $method = htmlspecialchars($request->getMethod());
+                $uri = htmlspecialchars((string)$request->getUri());
                 $requestInfo = "<h2>Request Information</h2>
                 <p><strong>Method:</strong> $method</p>
                 <p><strong>URI:</strong> $uri</p>";

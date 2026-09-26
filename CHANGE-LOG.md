@@ -4,6 +4,31 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Dispatcher: RequestDispatcher, a PSR-15 request handler; phasync scopes by context (2026-09-26)
+
+**BREAKING CHANGE** (small; for code that relied on internals)
+
+The request pipeline (middleware, the Router, exception conversion, the before/after-request
+hooks) moved out of `HttpDispatcher` into `mini\Dispatcher\RequestDispatcher`, which implements
+PSR-15's `RequestHandlerInterface`. Any PSR-15 server can now host a Mini application; Swerve's
+`swerve.php` is `return Mini::$mini->get(RequestDispatcher::class);`. `HttpDispatcher` is the
+classical-SAPI adapter: request from the globals, `RequestDispatcher::handle()`, emit (with Range).
+Its `addMiddleware()`, `registerExceptionConverter()`, `onBeforeRequest` and `onAfterRequest` are
+the RequestDispatcher's, so existing registrations apply to both paths.
+
+- The current request is kept per request scope, not in one dispatcher field, so concurrent
+  requests in one process each see their own `request()`, `$_GET`, `$_POST`, `$_COOKIE`.
+  The `ServerRequestInterface` service is declared at bootstrap with the other dispatcher services.
+- `Mini::getRequestScope()` returns `phasync::getContext()` when phasync is loaded and running:
+  the application server gives each request a context, and the coroutines a request starts
+  share it. Scoping by `Fiber::getCurrent()` put two requests of one kept-alive connection in
+  the same scope under Swerve: the second user got the first user's session.
+- An exception without a converter is rethrown as itself; before, `ConverterRegistry::convert()`
+  replaced it with "No converter registered".
+- `onAfterRequest` fires when handle() returns, which under Swerve is before a streamed body is sent.
+
+Regression tests: `tests/Dispatcher/RequestDispatcher.php`.
+
 ## CLI: an uncaught exception now exits non-zero (2026-08-14)
 
 **BREAKING CHANGE** (for anything reading the exit status)

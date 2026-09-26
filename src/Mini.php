@@ -216,13 +216,22 @@ final class Mini implements ContainerInterface {
      * of the request only.
      *
      * Returns:
-     * - Current Fiber if in fiber context (Swerve, ReactPHP, RoadRunner)
+     * - The phasync context of the current coroutine, under phasync (Swerve): an application
+     *   server gives each request a context of its own, and the coroutines a request starts
+     *   share it
+     * - Current Fiber if in another fiber context (ReactPHP, RoadRunner)
      * - $this if in traditional PHP-FPM request (after bootstrap() called)
+     *
+     * phasync is not a dependency: it is only asked when it is loaded and running.
      *
      * @return object
      * @throws \LogicException If called in Bootstrap phase (before mini\bootstrap())
      */
     public function getRequestScope(): object {
+        if (\class_exists(\phasync::class, false) && \phasync::isRunning() && Fiber::getCurrent() !== null) {
+            return \phasync::getContext();
+        }
+
         $fiber = Fiber::getCurrent();
         if ($fiber !== null) {
             return $fiber;
