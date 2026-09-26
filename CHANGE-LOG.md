@@ -28,8 +28,7 @@ the RequestDispatcher's, so existing registrations apply to both paths.
 - `onAfterRequest` fires when handle() returns, which under Swerve is before a streamed body is sent.
 - Additions (not breaking): `RequestDispatcher::within($request, $fn)` makes a request current
   again for work that outlives its response (a WebSocket connection), and refuses to start while
-  the scope still handles a request; a child phasync context
-  (`phasync\Context\ChildContextInterface`, phasync 2.0.0-alpha7) is in its parent's scope.
+  the scope still handles a request.
 
 Regression tests: `tests/Dispatcher/RequestDispatcher.php`.
 
