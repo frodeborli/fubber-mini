@@ -210,11 +210,16 @@ class RequestDispatcher implements RequestHandlerInterface
      * @template T
      * @param \Closure(): T $fn
      * @return T
+     * @throws \LogicException when the scope is still handling a request: handle() would end
+     *                         $request's turn when it returns
      */
     public static function within(ServerRequestInterface $request, \Closure $fn): mixed
     {
         self::$currentRequests ??= new \WeakMap();
         $scope = Mini::$mini->getRequestScope();
+        if (isset(self::$currentRequests[$scope])) {
+            throw new \LogicException('RequestDispatcher::within() is for after handle() returned, but this request scope is handling a request');
+        }
         self::$currentRequests[$scope] = $request;
         try {
             return $fn();

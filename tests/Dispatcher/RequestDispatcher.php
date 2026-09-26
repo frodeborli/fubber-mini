@@ -113,6 +113,17 @@ $test = new class extends Test {
         $this->assertThrows(fn () => \mini\request(), \RuntimeException::class);
     }
 
+    public function testWithinIsRefusedWhileTheScopeHandlesARequest(): void
+    {
+        $dispatcher = new RequestDispatcher(new class implements RequestHandlerInterface {
+            public function handle(ServerRequestInterface $request): ResponseInterface
+            {
+                return RequestDispatcher::within($request, fn () => new Response('too early'));
+            }
+        });
+        $this->assertThrows(fn () => $dispatcher->handle(new ServerRequest('GET', '/x', '')), \LogicException::class);
+    }
+
     public function testAConvertedExceptionBecomesItsResponse(): void
     {
         $response = $this->handle('/x?throw=nope');
