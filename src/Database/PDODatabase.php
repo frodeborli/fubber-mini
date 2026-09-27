@@ -21,11 +21,29 @@ use function mini\sqlval;
  * Wraps any PDO instance with a clean, ergonomic API that makes database
  * operations pleasant while supporting any PDO-compatible database.
  * Fetches PDO from container lazily to ensure proper scoping.
+ *
+ * Under phasync (an application server such as Swerve, where many requests and their
+ * coroutines run at once in one process), and without a PDO of its own: each statement borrows
+ * a connection from the process's pool (phasync\Util\Pool, MINI_DATABASE_POOL_SIZE connections,
+ * 5 by default) and gives it back when done, so concurrent coroutines never share one, and a
+ * process never opens more than that. A transaction() keeps one connection for itself until it
+ * ends; statements of the same coroutine inside it use it. lastInsertId() is the calling
+ * coroutine's. Query results are fetched completely before the connection is given back.
  */
 class PDODatabase implements DatabaseInterface
 {
     private ?PDO $pdo = null;
     private bool $inTransaction = false;
+    private ?SqlDialect $dialect = null;
+
+    /** @var \WeakMap<\Fiber, PDO> pooled: the connection each coroutine's transaction holds */
+    private \WeakMap $transactions;
+
+    /** @var \WeakMap<\Fiber, string> pooled: each coroutine's last insert id */
+    private \WeakMap $insertIds;
+
+    /** The process's connections, under phasync; see the class description */
+    private static ?\phasync\Util\Pool $pool = null;
 
     /** @var \WeakMap<Query, PartialQuery> Maps Query instances to their underlying PartialQuery */
     private \WeakMap $queryMap;
@@ -39,6 +57,62 @@ class PDODatabase implements DatabaseInterface
     {
         $this->pdo = $pdo;
         $this->queryMap = new \WeakMap();
+        $this->transactions = new \WeakMap();
+        $this->insertIds = new \WeakMap();
+    }
+
+    /**
+     * The process's connection pool when statements borrow from it: under phasync, in a
+     * coroutine, without a PDO of our own. Null otherwise.
+     */
+    private function pool(): ?\phasync\Util\Pool
+    {
+        if (null !== $this->pdo || !\class_exists(\phasync\Util\Pool::class) || !\phasync::isRunning() || null === \Fiber::getCurrent()) {
+            return null;
+        }
+
+        return self::$pool ??= new \phasync\Util\Pool(static function (): PDO {
+            $pdo = Mini::$mini->loadServiceConfig(PDO::class);
+            PDOService::configure($pdo);
+
+            return $pdo;
+        }, \max(1, (int) ($_ENV['MINI_DATABASE_POOL_SIZE'] ?? \getenv('MINI_DATABASE_POOL_SIZE') ?: 5)));
+    }
+
+    /**
+     * $fn with the connection for one statement: our own; or pooled, the coroutine's
+     * transaction's, else one borrowed for $fn alone.
+     *
+     * @template T
+     * @param \Closure(PDO): T $fn
+     * @return T
+     */
+    private function withPdo(\Closure $fn): mixed
+    {
+        if (null === ($pool = $this->pool())) {
+            return $fn($this->lazyPdo());
+        }
+        $fiber = \Fiber::getCurrent();
+        if (isset($this->transactions[$fiber])) {
+            return $fn($this->transactions[$fiber]);
+        }
+
+        return $pool->use($fn);
+    }
+
+    /** Pooled: keep the coroutine's last insert id, as the connection goes back after the statement */
+    private function rememberInsertId(PDO $pdo): void
+    {
+        if (null !== $this->pool()) {
+            try {
+                $id = $pdo->lastInsertId();
+                if (false !== $id && '0' !== $id) {
+                    $this->insertIds[\Fiber::getCurrent()] = $id;
+                }
+            } catch (PDOException) {
+                // No insert id in this session (PostgreSQL without a sequence used)
+            }
+        }
     }
 
     /**
@@ -110,6 +184,17 @@ class PDODatabase implements DatabaseInterface
                     [$sql, $params] = $query->getSql($dialect);
                 }
 
+                if (null !== $this->pool()) {
+                    // Fetched completely: the connection goes back before the caller iterates
+                    yield from $this->withPdo(static function (PDO $pdo) use ($sql, $params) {
+                        $stmt = $pdo->prepare($sql);
+                        self::bindAndExecute($stmt, $params);
+
+                        return $stmt->fetchAll(PDO::FETCH_OBJ);
+                    });
+
+                    return;
+                }
                 $stmt = $this->lazyPdo()->prepare($sql);
                 self::bindAndExecute($stmt, $params);
 
@@ -128,10 +213,12 @@ class PDODatabase implements DatabaseInterface
     public function queryOne(string $sql, array $params = []): ?object
     {
         try {
-            $stmt = $this->lazyPdo()->prepare($sql);
-            self::bindAndExecute($stmt, $params);
-            $result = $stmt->fetch(PDO::FETCH_OBJ);
-            return $result ?: null;
+            return $this->withPdo(static function (PDO $pdo) use ($sql, $params) {
+                $stmt = $pdo->prepare($sql);
+                self::bindAndExecute($stmt, $params);
+                $result = $stmt->fetch(PDO::FETCH_OBJ);
+                return $result ?: null;
+            });
         } catch (PDOException $e) {
             throw new Exception("Query one failed: " . $e->getMessage());
         }
@@ -143,9 +230,11 @@ class PDODatabase implements DatabaseInterface
     public function queryField(string $sql, array $params = []): mixed
     {
         try {
-            $stmt = $this->lazyPdo()->prepare($sql);
-            self::bindAndExecute($stmt, $params);
-            return $stmt->fetchColumn();
+            return $this->withPdo(static function (PDO $pdo) use ($sql, $params) {
+                $stmt = $pdo->prepare($sql);
+                self::bindAndExecute($stmt, $params);
+                return $stmt->fetchColumn();
+            });
         } catch (PDOException $e) {
             throw new Exception("Query field failed: " . $e->getMessage());
         }
@@ -157,9 +246,11 @@ class PDODatabase implements DatabaseInterface
     public function queryColumn(string $sql, array $params = []): array
     {
         try {
-            $stmt = $this->lazyPdo()->prepare($sql);
-            self::bindAndExecute($stmt, $params);
-            return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
+            return $this->withPdo(static function (PDO $pdo) use ($sql, $params) {
+                $stmt = $pdo->prepare($sql);
+                self::bindAndExecute($stmt, $params);
+                return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
+            });
         } catch (PDOException $e) {
             throw new Exception("Query column failed: " . $e->getMessage());
         }
@@ -171,9 +262,12 @@ class PDODatabase implements DatabaseInterface
     public function exec(string $sql, array $params = []): int
     {
         try {
-            $stmt = $this->lazyPdo()->prepare($sql);
-            self::bindAndExecute($stmt, $params);
-            return $stmt->rowCount();
+            return $this->withPdo(function (PDO $pdo) use ($sql, $params) {
+                $stmt = $pdo->prepare($sql);
+                self::bindAndExecute($stmt, $params);
+                $this->rememberInsertId($pdo);
+                return $stmt->rowCount();
+            });
         } catch (PDOException $e) {
             throw new Exception("Exec failed: " . $e->getMessage());
         }
@@ -184,6 +278,15 @@ class PDODatabase implements DatabaseInterface
      */
     public function lastInsertId(): ?string
     {
+        if (null !== $this->pool()) {
+            $fiber = \Fiber::getCurrent();
+            if (isset($this->transactions[$fiber])) {
+                $id = $this->transactions[$fiber]->lastInsertId();
+                return $id !== false ? $id : null;
+            }
+
+            return $this->insertIds[$fiber] ?? null;
+        }
         $id = $this->lazyPdo()->lastInsertId();
         return $id !== false ? $id : null;
     }
@@ -250,7 +353,7 @@ class PDODatabase implements DatabaseInterface
 
             // Fallback for databases that don't support INFORMATION_SCHEMA (like SQLite)
             // Try to query the table and see if it fails
-            $this->lazyPdo()->prepare("SELECT 1 FROM {$tableName} LIMIT 0")->execute();
+            $this->withPdo(static fn (PDO $pdo) => $pdo->prepare("SELECT 1 FROM {$tableName} LIMIT 0")->execute());
             return true;
         } catch (PDOException $e) {
             // If the query failed, the table likely doesn't exist
@@ -265,23 +368,49 @@ class PDODatabase implements DatabaseInterface
      */
     public function transaction(\Closure $task): mixed
     {
+        if (null !== ($pool = $this->pool())) {
+            // Pooled: a connection for this coroutine's transaction alone, until it ends
+            $fiber = \Fiber::getCurrent();
+            if (isset($this->transactions[$fiber])) {
+                throw new \RuntimeException(
+                    "Already in a transaction. Nested transactions are not supported. " .
+                    "Restructure your code to use a single transaction block."
+                );
+            }
+            $pdo = $pool->borrow();
+            $this->transactions[$fiber] = $pdo;
+            try {
+                return $this->runTransaction($pdo, $task);
+            } finally {
+                unset($this->transactions[$fiber]);
+                $pool->release($pdo);
+            }
+        }
+
         if ($this->inTransaction) {
             throw new \RuntimeException(
                 "Already in a transaction. Nested transactions are not supported. " .
                 "Restructure your code to use a single transaction block."
             );
         }
-
+        $this->inTransaction = true;
         try {
-            $this->lazyPdo()->beginTransaction();
-            $this->inTransaction = true;
+            return $this->runTransaction($this->lazyPdo(), $task);
+        } finally {
+            $this->inTransaction = false;
+        }
+    }
+
+    private function runTransaction(PDO $pdo, \Closure $task): mixed
+    {
+        try {
+            $pdo->beginTransaction();
         } catch (PDOException $e) {
             throw new \RuntimeException("Failed to start transaction: " . $e->getMessage(), 0, $e);
         }
 
         try {
             $result = $task($this);
-            $pdo = $this->lazyPdo();
             // MySQL implicitly commits on DDL (CREATE/ALTER/DROP/TRUNCATE/
             // RENAME). When that happens mid-task, PDO::inTransaction()
             // flips to false and a literal commit() would raise "no active
@@ -299,11 +428,9 @@ class PDODatabase implements DatabaseInterface
                     E_USER_WARNING,
                 );
             }
-            $this->inTransaction = false;
             return $result;
 
         } catch (\Throwable $e) {
-            $pdo = $this->lazyPdo();
             if ($pdo->inTransaction()) {
                 try {
                     $pdo->rollBack();
@@ -321,7 +448,6 @@ class PDODatabase implements DatabaseInterface
                     E_USER_WARNING,
                 );
             }
-            $this->inTransaction = false;
             throw $e;
         }
     }
@@ -332,10 +458,17 @@ class PDODatabase implements DatabaseInterface
      * This allows access to PDO-specific functionality when needed,
      * while keeping the common operations clean through the interface.
      *
+     * Pooled (under phasync): inside this coroutine's transaction(), its connection; otherwise
+     * the request scope's own PDO service, which is not from the pool: prefer this class's
+     * methods there, or phasync's Pool for work that needs a connection of its own.
+     *
      * @return PDO The underlying PDO instance
      */
     public function getPdo(): PDO
     {
+        if (null !== $this->pool() && isset($this->transactions[\Fiber::getCurrent()])) {
+            return $this->transactions[\Fiber::getCurrent()];
+        }
         return $this->lazyPdo();
     }
 
@@ -344,9 +477,12 @@ class PDODatabase implements DatabaseInterface
      */
     public function getDialect(): SqlDialect
     {
-        $driver = $this->lazyPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        if (null !== $this->dialect) {
+            return $this->dialect;
+        }
+        $driver = $this->withPdo(static fn (PDO $pdo) => $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));
 
-        return match($driver) {
+        return $this->dialect = match($driver) {
             'mysql' => SqlDialect::MySQL,
             'pgsql' => SqlDialect::Postgres,
             'sqlite' => SqlDialect::Sqlite,
@@ -362,9 +498,8 @@ class PDODatabase implements DatabaseInterface
     public function quote(mixed $value): string
     {
         if ($value === null) return 'NULL';
-        if (is_int($value)) return $this->lazyPdo()->quote($value, \PDO::PARAM_INT);
-        if (is_bool($value)) return $this->lazyPdo()->quote($value, \PDO::PARAM_BOOL);
-        return $this->lazyPdo()->quote($value, \PDO::PARAM_STR);
+        $type = is_int($value) ? \PDO::PARAM_INT : (is_bool($value) ? \PDO::PARAM_BOOL : \PDO::PARAM_STR);
+        return $this->withPdo(static fn (PDO $pdo) => $pdo->quote($value, $type));
     }
 
     /**
@@ -409,9 +544,11 @@ class PDODatabase implements DatabaseInterface
         [$sql, $params] = $renderer->renderAsDelete($pq);
 
         try {
-            $stmt = $this->lazyPdo()->prepare($sql);
-            self::bindAndExecute($stmt, $params);
-            return $stmt->rowCount();
+            return $this->withPdo(static function (PDO $pdo) use ($sql, $params) {
+                $stmt = $pdo->prepare($sql);
+                self::bindAndExecute($stmt, $params);
+                return $stmt->rowCount();
+            });
         } catch (PDOException $e) {
             throw new Exception("Delete failed: " . $e->getMessage());
         }
@@ -427,9 +564,11 @@ class PDODatabase implements DatabaseInterface
         [$sql, $params] = $renderer->renderAsUpdate($pq, $set, $params);
 
         try {
-            $stmt = $this->lazyPdo()->prepare($sql);
-            self::bindAndExecute($stmt, $params);
-            return $stmt->rowCount();
+            return $this->withPdo(static function (PDO $pdo) use ($sql, $params) {
+                $stmt = $pdo->prepare($sql);
+                self::bindAndExecute($stmt, $params);
+                return $stmt->rowCount();
+            });
         } catch (PDOException $e) {
             throw new Exception("Update failed: " . $e->getMessage());
         }
@@ -453,9 +592,13 @@ class PDODatabase implements DatabaseInterface
         $sql = "INSERT INTO $quotedTable ($columnList) VALUES ($placeholders)";
 
         try {
-            $stmt = $this->lazyPdo()->prepare($sql);
-            self::bindAndExecute($stmt, $values);
-            return $this->lastInsertId() ?? '';
+            return $this->withPdo(function (PDO $pdo) use ($sql, $values) {
+                $stmt = $pdo->prepare($sql);
+                self::bindAndExecute($stmt, $values);
+                $this->rememberInsertId($pdo);
+                $id = $pdo->lastInsertId();
+                return $id !== false ? $id : '';
+            });
         } catch (PDOException $e) {
             throw new Exception("Insert failed: " . $e->getMessage());
         }
@@ -500,17 +643,20 @@ class PDODatabase implements DatabaseInterface
 
         try {
             // SQL Server and Oracle MERGE use values directly in SQL, others use placeholders
-            if ($dialect === SqlDialect::SqlServer || $dialect === SqlDialect::Oracle) {
-                $stmt = $this->lazyPdo()->prepare($sql);
-                $stmt->execute();
-            } else {
-                // MySQL, Postgres, Sqlite use placeholders only for INSERT
-                // UPDATE uses VALUES() for MySQL or EXCLUDED for Postgres/Sqlite
-                $stmt = $this->lazyPdo()->prepare($sql);
-                $stmt->execute($values);
-            }
+            return $this->withPdo(function (PDO $pdo) use ($sql, $values, $dialect) {
+                if ($dialect === SqlDialect::SqlServer || $dialect === SqlDialect::Oracle) {
+                    $stmt = $pdo->prepare($sql);
+                    $stmt->execute();
+                } else {
+                    // MySQL, Postgres, Sqlite use placeholders only for INSERT
+                    // UPDATE uses VALUES() for MySQL or EXCLUDED for Postgres/Sqlite
+                    $stmt = $pdo->prepare($sql);
+                    $stmt->execute($values);
+                }
+                $this->rememberInsertId($pdo);
 
-            return $stmt->rowCount();
+                return $stmt->rowCount();
+            });
         } catch (PDOException $e) {
             throw new Exception("Upsert failed: " . $e->getMessage());
         }
@@ -639,12 +785,10 @@ class PDODatabase implements DatabaseInterface
         );
 
         $rowKey = 0;
-        $pdo = $this->lazyPdo();
 
         foreach ($tables as $table) {
             // Get column info via PRAGMA (use raw PDO - PRAGMA isn't a SELECT statement)
-            $stmt = $pdo->query("PRAGMA table_info({$table})");
-            $columns = $stmt->fetchAll(PDO::FETCH_OBJ);
+            $columns = $this->withPdo(static fn (PDO $pdo) => $pdo->query("PRAGMA table_info({$table})")->fetchAll(PDO::FETCH_OBJ));
             $pkColumns = [];
 
             foreach ($columns as $col) {
@@ -680,8 +824,7 @@ class PDODatabase implements DatabaseInterface
             }
 
             // Get indexes via PRAGMA
-            $stmt = $pdo->query("PRAGMA index_list({$table})");
-            $indexes = $stmt->fetchAll(PDO::FETCH_OBJ);
+            $indexes = $this->withPdo(static fn (PDO $pdo) => $pdo->query("PRAGMA index_list({$table})")->fetchAll(PDO::FETCH_OBJ));
 
             foreach ($indexes as $idx) {
                 // Skip auto-generated indexes
@@ -690,8 +833,7 @@ class PDODatabase implements DatabaseInterface
                 }
 
                 // Get columns in this index
-                $stmt = $pdo->query("PRAGMA index_info({$idx->name})");
-                $indexCols = $stmt->fetchAll(PDO::FETCH_OBJ);
+                $indexCols = $this->withPdo(static fn (PDO $pdo) => $pdo->query("PRAGMA index_info({$idx->name})")->fetchAll(PDO::FETCH_OBJ));
                 $colNames = array_map(fn($c) => $c->name, $indexCols);
 
                 yield $rowKey++ => (object)[

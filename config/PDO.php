@@ -25,6 +25,11 @@ use mini\Database\PDOService;
 $url = $_ENV['MINI_DATABASE_URL'] ?? $_ENV['DATABASE_URL'] ?? null;
 
 if ($url !== null) {
+    // SQLite: sqlite:///absolute/path, sqlite://relative/path, sqlite://:memory:. parse_url()
+    // rejects a URL with an empty host, as sqlite:///path is, so it is read here
+    if (preg_match('#^sqlite3?://(.*)$#', $url, $m)) {
+        return new PDO('sqlite:' . $m[1]);
+    }
     $parsed = parse_url($url);
 
     if ($parsed === false || !isset($parsed['scheme'])) {
@@ -40,10 +45,7 @@ if ($url !== null) {
     $query = $parsed['query'] ?? '';
 
     // Build PDO DSN based on driver
-    if ($driver === 'sqlite' || $driver === 'sqlite3') {
-        // SQLite: path is the database file
-        $dsn = "sqlite:$dbname";
-    } elseif ($driver === 'mysql') {
+    if ($driver === 'mysql') {
         $dsn = "mysql:host=$host;dbname=$dbname";
         if ($port) $dsn .= ";port=$port";
         // Parse query string for additional options

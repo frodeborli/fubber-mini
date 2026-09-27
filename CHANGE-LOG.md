@@ -4,6 +4,26 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Database: under phasync, statements borrow pooled connections (2026-09-27)
+
+Not breaking under PHP-FPM, where nothing changes. Under phasync (Swerve), a `PDODatabase`
+without a PDO of its own (the `DatabaseInterface` service) no longer uses the request scope's
+PDO: each statement borrows a connection from the process's `phasync\Util\Pool`
+(`MINI_DATABASE_POOL_SIZE`, 5 by default) and gives it back when done. Coroutines of one request
+(Tether components of one tab) no longer run statements on one connection at once, which with
+phasync-ext corrupted the MySQL protocol, and a worker opens at most that many connections
+however many requests (open tabs) it serves.
+
+- `transaction()` keeps one connection for its coroutine until it ends; that coroutine's
+  statements inside it use it (others don't see its uncommitted work).
+- `lastInsertId()` is the calling coroutine's.
+- `query()` results are fetched completely before the connection goes back.
+- `getPdo()` inside a transaction is its connection; otherwise still the scope's own PDO.
+- Fixed: `DATABASE_URL=sqlite:///path` (the documented form) threw "Invalid DATABASE_URL
+  format": `parse_url()` rejects an empty host.
+
+Tests: `tests/Database/PDODatabase.Pooled.php` (phasync is a dev dependency).
+
 ## Dispatcher: RequestDispatcher, a PSR-15 request handler; phasync scopes by context (2026-09-26)
 
 **BREAKING CHANGE** (small; for code that relied on internals)
