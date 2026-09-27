@@ -75,8 +75,16 @@ $dispatcher->registerExceptionConverter(function(\mini\Exceptions\BadRequestExce
     return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], 400);
 });
 
-// Handle generic exceptions (500 Internal Server Error)
+// Handle generic exceptions (500 Internal Server Error). Logged in every mode, with its trace:
+// debug mode only decides whether the visitor sees it too
 $dispatcher->registerExceptionConverter(function(\Throwable $e): ResponseInterface {
+    try {
+        $request = \mini\request();
+        $what = $request->getMethod() . ' ' . $request->getUri()->getPath();
+    } catch (\Throwable) {
+        $what = 'a request';
+    }
+    \mini\log()->error('{request} failed: {class}: {message}', ['request' => $what, 'class' => \get_class($e), 'message' => $e->getMessage(), 'exception' => $e]);
     $body = \mini\Http\ErrorHandler::renderExceptionPage($e, 500);
     return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], 500);
 });
