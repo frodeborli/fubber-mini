@@ -5,7 +5,7 @@
 Mini is a **forkable core framework** — a complete, zero-dependency foundation you can build on *or own outright*:
 
 - **Built to sit underneath.** Mini provides the generic building blocks — routing, HTTP, database, auth, i18n, validation, events. Opinionated conveniences (scaffolding, admin panels, a `GenericCRUDAPI`) belong in a "Maxi"-style layer *on top* of Mini, or in your application. The core stays small enough to understand end to end.
-- **Built to be forked.** A business that needs a head start it can maintain for a decade can fork Mini and own every line. There is no third-party abandonment risk to inherit: the `require` section is PHP itself, PSR interface packages, and two intl polyfill shims. The audit surface is Mini's own source.
+- **Built to be forked.** A business that needs a head start it can maintain for a decade can fork Mini and own every line. There is no third-party abandonment risk to inherit: the `require` section is PHP itself with its intl extension, and PSR interface packages. The audit surface is Mini's own source.
 - **Built on Lindy foundations.** APIs that have survived decades — SQL, MIME, PSR contracts, the filesystem, ICU, LINQ-style immutable composition — over trendy framework idioms that trigger a rewrite every major version. If a pattern has worked for 40 years, it will likely work for 40 more.
 
 The reasoning, shared by the phasync, swerve and Tether packages: [the Ennerd philosophy](PHILOSOPHY.md).

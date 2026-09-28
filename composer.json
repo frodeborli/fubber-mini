@@ -84,8 +84,7 @@
     },
     "require": {
         "php": ">=8.3",
-        "symfony/polyfill-intl-icu": "^1.25",
-        "symfony/polyfill-intl-messageformatter": "^1.25",
+        "ext-intl": "*",
         "psr/simple-cache": "^1.0 || ^2.0 || ^3.0",
         "psr/log": "^3.0",
         "psr/container": "^1.1 || ^2.0",
@@ -105,7 +104,6 @@
         "psr/log-implementation": "3.0"
     },
     "suggest": {
-        "ext-intl": "For full internationalization features with all languages and locales (the bundled symfony polyfills cover the basics)",
         "ext-curl": "Required by the bundled PSR-18 HttpClient",
         "ext-pdo_sqlite": "For the default SQLite-backed cache and database features"
     }
