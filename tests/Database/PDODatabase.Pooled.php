@@ -87,8 +87,9 @@ $test = new class extends Test {
 
             return $log;
         });
+        // It waited for a connection to come free: after one transaction committed at least
         $this->assertSame('query ran', \end($log));
-        $this->assertSame(3, \count($log));
+        $this->assertStringEndsWith('committed', $log[0]);
     }
 
     public function testLastInsertIdIsTheCallingCoroutines(): void
