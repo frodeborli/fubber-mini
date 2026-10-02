@@ -736,22 +736,40 @@ final class BTreeInternalPage
 }
 
 /**
- * Append-only B-tree index with on-disk persistence.
+ * Copy-on-write B-tree index with on-disk persistence.
  *
- * File layout (4KB aligned pages):
- * - Page 0: Header (64 bytes used, rest reserved for metadata)
- * - Page 1+: B-tree nodes (internal and leaf)
+ * File layout (4KB pages):
+ * - Page 0: header (magic and version), written once when the file is created
+ * - Page 1+: B-tree nodes (internal and leaf), only ever appended
  *
  * Design:
- * - Copy-on-write: pages never modified once written (except header)
+ * - Pages are never modified once committed; a changed page is written as a new page
  * - Variable-length keys with offset arrays for O(log n) binary search within pages
  *
- * TODO: Fully append-only design with separate log file
- * - Main file: pages only, never overwritten
- * - Log file: append-only sequence of [seq, root, checksum] entries
- * - Commit: append pages, fsync, append log entry, fsync
- * - Open: scan log from end for latest valid root
- * - Removes header overwrites for better crash safety
+ * Commit protocol:
+ * - There is no root pointer. The current root is the last page in the file that
+ *   has the root marker (high bit of the type byte) and a valid CRC32; open and
+ *   refresh scan backwards from the end of the file for it.
+ * - commit() appends the new non-root pages, fdatasync()s, appends the new root
+ *   page with its CRC, and fdatasync()s again. The root is the last page written,
+ *   so a transaction becomes visible only when its root page is complete.
+ * - A process killed before the root is complete leaves a missing or CRC-invalid
+ *   tail; the scan skips it and finds the previous root. The next writer starts
+ *   appending at the page after that root, overwriting the orphaned tail.
+ *
+ * Concurrency:
+ * - Writers hold an exclusive flock() on "<path>.lock" from begin() until commit(),
+ *   rollback() or close(), and reread the latest root after taking it. The kernel
+ *   releases the lock when a writer process dies.
+ * - Readers take no lock by default: they only follow pages of a committed root,
+ *   which are never rewritten. With $maxReadLatency <= 0 they take a shared lock
+ *   while looking for the root.
+ *
+ * tests/Table/Index/_BTreeIndex.Concurrency.php (manual, pcntl) runs concurrent
+ * writer and reader processes, some of which SIGKILL themselves right before or
+ * right after commit(), and checks that the reopened index is self-consistent.
+ * It does not kill inside commit(); the torn-tail behaviour above follows from
+ * the code, not from that test.
  */
 final class BTreeIndex implements IndexInterface
 {
