@@ -94,7 +94,7 @@
         "psr/http-client": "^1.0"
     },
     "require-dev": {
-        "phasync/phasync": "^2.0.0-alpha9"
+        "phasync/phasync": "^2.0.0-beta5"
     },
     "provide": {
         "psr/simple-cache-implementation": "1.0|2.0|3.0",
