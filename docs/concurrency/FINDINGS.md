@@ -6,7 +6,7 @@ running log of what that turned out to need, written down as it is found, becaus
 true of any PHP library that wants to live under concurrency. Newest first. Each entry says
 what was wrong, what we changed, and how it is tested.
 
-Target release: **0.19.0** (`0.19.0-alpha1` ... `rc1`). Minor versions bump only for breaking
+Target release: **0.18.0** (`0.18.0-alpha1` ... `rc1`). Minor versions bump only for breaking
 changes; several breaking changes share one minor version.
 
 ## Runtime shapes Mini has to fit
@@ -25,7 +25,7 @@ where the runtime offers the hook.
 
 ## Findings
 
-### Template output mixes between requests (fixed, 0.19.0)
+### Template output mixes between requests (fixed, 0.18.0)
 
 PHP's output buffers belong to the process, not to the request. Templates, `block()` and layout
 inheritance captured their output with `ob_start()`/`ob_get_clean()`. A request that was
@@ -46,7 +46,7 @@ Test: `tests/Template/Interleaving.php` suspends two renders mid-template with p
 checks each gets exactly its own output. Lesson: process-wide machinery can't be made
 per-request by using it carefully; the work has to stop going through it.
 
-### Scoped services outlive the request in a sequential worker (fixed, 0.19.0)
+### Scoped services outlive the request in a sequential worker (fixed, 0.18.0)
 
 `Mini::getRequestScope()` answered with the Mini instance itself when no runtime supplied a
 scope. Under FPM that is harmless. In a worker that handles requests one at a time and lives on
@@ -62,7 +62,7 @@ passes through; a sequential runtime makes a fresh object per `run()`. Override 
 Test: `tests/Dispatcher/SequentialScope.php`. Lesson: "one object per request" must be
 *produced by something at the start of the request*, not assumed.
 
-### A static guard wrapped around user code corrupts other requests (fixed, 0.19.0)
+### A static guard wrapped around user code corrupts other requests (fixed, 0.18.0)
 
 `Dehydrator::hydrate()` set a static `$hydrating[$class]` flag around `fromSqlRow()` so that the
 user's `fromSqlRow()` could call `hydrate()` again and get the reflection mapping. While one

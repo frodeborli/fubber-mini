@@ -4,7 +4,7 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
-## Dehydrator: no recursion guard; `hydrateReflection()` is public (0.19.0-alpha1, 2026-10-13)
+## Dehydrator: no recursion guard; `hydrateReflection()` is public (0.18.0-alpha1, 2026-10-13)
 
 **BREAKING CHANGE** (for a `fromSqlRow()` that calls `Dehydrator::hydrate()` on its own class to get the default mapping)
 
@@ -17,7 +17,7 @@ for the default mapping; `hydrate()` from inside `fromSqlRow()` of the same clas
 
 Regression test: `tests/Database/Dehydrator.Interleaved.php`.
 
-## Request scope: a configurable RequestScopeInterface (0.19.0-alpha1, 2026-10-13)
+## Request scope: a configurable RequestScopeInterface (0.18.0-alpha1, 2026-10-13)
 
 **BREAKING CHANGE** (for code that relied on `getRequestScope()` returning the Mini instance, and
 for runtimes that supplied a scope another way)
