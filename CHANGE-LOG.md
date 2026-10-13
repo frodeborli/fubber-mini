@@ -4,6 +4,22 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Request scope: a configurable RequestScopeInterface (0.19.0-alpha1, 2026-10-13)
+
+**BREAKING CHANGE** (for code that relied on `getRequestScope()` returning the Mini instance, and
+for runtimes that supplied a scope another way)
+
+Part of making Mini safe to run many requests in one process: see `docs/concurrency/FINDINGS.md`.
+
+`Mini::getRequestScope()` now asks a `mini\Contracts\RequestScopeInterface`
+(`_config/mini/Contracts/RequestScopeInterface.php`; the default `mini\Dispatcher\RequestScope`
+adapts to phasync, Fibers, or a sequential process). `RequestDispatcher::handle()` runs each
+request through its `run()`, so a sequential worker (RoadRunner, FrankenPHP) gets a fresh scope
+per request: before, its Scoped services (`PDO`, `Session`) were cached on the Mini instance and
+the next request inherited them.
+
+Regression test: `tests/Dispatcher/SequentialScope.php`.
+
 ## Database: under phasync, statements borrow pooled connections (2026-09-27)
 
 Not breaking under PHP-FPM, where nothing changes. Under phasync (Swerve), a `PDODatabase`

@@ -167,6 +167,12 @@ class RequestDispatcher implements RequestHandlerInterface
     public function handle(ServerRequestInterface $request): ResponseInterface
     {
         $this->start();
+
+        return Mini::$mini->getRequestScopeProvider()->run(fn () => $this->handleInScope($request));
+    }
+
+    private function handleInScope(ServerRequestInterface $request): ResponseInterface
+    {
         $scope     = Mini::$mini->getRequestScope();
         $response  = null;
         $exception = null;

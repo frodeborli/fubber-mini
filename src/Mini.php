@@ -209,43 +209,31 @@ final class Mini implements ContainerInterface {
         $this->bootstrap();
     }
 
+    /** @see getRequestScopeProvider() */
+    private ?Contracts\RequestScopeInterface $requestScopeProvider = null;
+
     /**
-     * An object that uniquely identifies the current request scope.
-     * This function is intended to be used for caching in WeakMap, instances
-     * that are request specific and should survive for the duration
-     * of the request only.
+     * An object that uniquely identifies the current request scope: the key Scoped services
+     * (and anything else that lives for one request) are cached under, in a WeakMap.
      *
-     * Returns:
-     * - The phasync context of the current coroutine, under phasync (Swerve): an application
-     *   server gives each request a context of its own, and the coroutines a request starts
-     *   share it
-     * - Current Fiber if in another fiber context (ReactPHP, RoadRunner)
-     * - $this if in traditional PHP-FPM request (after bootstrap() called)
-     *
-     * phasync is not a dependency: it is only asked when it is loaded and running.
+     * Which object that is depends on the runtime, so it is the configured
+     * {@see Contracts\RequestScopeInterface}'s answer. The default implementation uses the
+     * phasync context, a Fiber, or one object per request handled by the RequestDispatcher.
      *
      * @return object
      * @throws \LogicException If called in Bootstrap phase (before mini\bootstrap())
      */
     public function getRequestScope(): object {
-        if (\class_exists(\phasync::class, false) && \phasync::isRunning() && Fiber::getCurrent() !== null) {
-            return \phasync::getContext();
-        }
+        return $this->getRequestScopeProvider()->current();
+    }
 
-        $fiber = Fiber::getCurrent();
-        if ($fiber !== null) {
-            return $fiber;
-        }
-
-        // Not in fiber - check if we're in Ready phase (request handling enabled)
-        if ($this->phase->getCurrentState() !== Phase::Ready) {
-            throw new \LogicException(
-                'Cannot get request scope outside of Ready phase. ' .
-                'Current phase: ' . $this->phase
-            );
-        }
-
-        return $this;
+    /**
+     * The runtime's request scope provider: `_config/mini/Contracts/RequestScopeInterface.php`
+     * returns it, the framework default (config/) adapts to the runtime it finds. The
+     * RequestDispatcher runs every request through its `run()`.
+     */
+    public function getRequestScopeProvider(): Contracts\RequestScopeInterface {
+        return $this->requestScopeProvider ??= $this->loadServiceConfig(Contracts\RequestScopeInterface::class);
     }
 
     /**
@@ -304,6 +292,7 @@ final class Mini implements ContainerInterface {
         $configPath = str_replace('\\', '/', ltrim($className, '\\')) . '.php';
         return $this->loadConfig($configPath, ...array_slice(func_get_args(), 1));
     }
+
 
     /**
      * Returns an object that will survive for the duration of the current
