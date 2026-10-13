@@ -25,6 +25,27 @@ where the runtime offers the hook.
 
 ## Findings
 
+### Template output mixes between requests (fixed, 0.19.0)
+
+PHP's output buffers belong to the process, not to the request. Templates, `block()` and layout
+inheritance captured their output with `ob_start()`/`ob_get_clean()`. A request that was
+suspended while rendering (a lazy query inside the template, or preemption at a loop back-edge)
+left its buffer on top of the stack, so the next request that echoed wrote into it: request A
+returned part of request B's page, and B lost it.
+
+Fix: templates are compiled to PHP that never produces output. Mini tokenizes each template
+(`PhpToken::tokenize()`) and turns inline HTML, `<?= ?>`, `echo`, `print`, `printf` and `vprintf`
+into calls on `$this` that write to a `RenderSink` owned by the render. `block()`/`end()` push
+and pop the sink instead of output buffers. Compiled files keep every source line on the same
+line and mirror the template's path under the cache directory, so backtraces stay readable, and
+opcache caches them like any PHP file. The `var_dump` family and raw `include`/`require` are
+compile errors. Code a template calls that echoes directly still bypasses the sink: it should
+return a string or `Stringable`.
+
+Test: `tests/Template/Interleaving.php` suspends two renders mid-template with plain Fibers and
+checks each gets exactly its own output. Lesson: process-wide machinery can't be made
+per-request by using it carefully; the work has to stop going through it.
+
 ### Scoped services outlive the request in a sequential worker (fixed, 0.19.0)
 
 `Mini::getRequestScope()` answered with the Mini instance itself when no runtime supplied a
@@ -43,9 +64,10 @@ Test: `tests/Dispatcher/SequentialScope.php`. Lesson: "one object per request" m
 
 ### Open: found by audit, not yet fixed
 
-- **Output buffers are process-global.** `ob_start()` in templates, `block()`, and the Router
-  interleaves between requests when a request is suspended (or preempted, at any loop
-  back-edge) while a buffer is open. Template rendering is being moved off `ob_*`.
+- **The Router's output guard uses a process-global buffer.** `Router::runControllerFile()`
+  wraps `require` of a route file in `ob_start()` to reject route files that echo. If the route
+  file suspends, another request's output lands in that buffer: a false "produced output
+  directly" error for this request, and lost output for the other. (Templates are fixed, above.)
 - **`Dehydrator::$hydrating`** is a static recursion guard wrapped around user code
   (`fromSqlRow()`); a concurrent request hydrating the same class silently takes the other path.
 - **Locale and timezone** (`Locale::setDefault()`, `date_default_timezone_set()`) are
