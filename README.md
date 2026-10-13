@@ -180,8 +180,8 @@ $router->addRoute('GET', '/users/{id}', [UserController::class, 'show']);
 
 **Templates:**
 ```php
-// Mini: PHP IS the template language (no parsing overhead)
-<?= htmlspecialchars($user->name) ?>  // Direct output buffering, closure-based inheritance
+// Mini: PHP IS the template language (compiled once, no output buffering)
+<?= htmlspecialchars($user->name) ?>  // Compiles to a sink write, closure-based inheritance
 
 // Framework approach: Parse string templates into PHP (Blade, Twig)
 {{ $user->name }}

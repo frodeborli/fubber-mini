@@ -4,6 +4,52 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Template: templates are compiled, not output-buffered (2026-10-13)
+
+**BREAKING CHANGE** (templates that used a now-forbidden construct)
+
+`Renderer` and `TemplateContext` wrapped every template render in `ob_start()`/`ob_get_clean()`.
+Output buffers belong to the whole PHP process, not to one `render()` call - on a runtime where
+requests can interleave inside a process (a worker that suspends mid-template on a database call),
+one request's HTML could land in another request's buffer. Templates are now compiled once (and
+cached) into plain PHP that writes through `TemplateContext` to a `RenderSink` - a small object
+local to one render, so two renders, even interleaved across Fibers, can never share output.
+
+- `mini\Template\TemplateCompiler::compile()` tokenizes a template with `PhpToken::tokenize()`
+  (no regexes) and translates inline HTML, `<?= ?>`, `echo`, `print`, `printf()` and `vprintf()`
+  into calls on `$this` (`echo()`, `print()`, `printf()`, `vprintf()`) that write to the active
+  `RenderSink` instead of producing direct output. Every other construct (control structures,
+  alternative syntax, heredoc/nowdoc, ...) passes through unchanged. Line numbers are preserved
+  exactly - no newline is ever added or removed - so a thrown exception's line and a backtrace's
+  compiled-file line both point at the same line the source template has.
+- **Forbidden, with a compile-time error naming the template file and line:** `var_dump()`,
+  `debug_zval_dump()`, and `var_export()`/`print_r()` called without their return argument -
+  these only ever write directly. `include`/`include_once`/`require`/`require_once` of another
+  file are forbidden too - they would bypass compilation; use `mini\render()` for partials and
+  `$this->extend()`/`$this->block()` for layout inheritance, as before.
+  **Not detected:** a helper function or method called from a template that outputs directly
+  (an `echo` inside a plain class, `ob_*`, `flush()`, `readfile()`, ...) is not compiled and
+  bypasses the sink - return a string (or `Stringable`) from such code instead. See
+  `src/Template/README.md`.
+- Compiled files live under Mini's cache directory (`<project root>/_cache` by default,
+  `MINI_CACHE_ROOT` to override), mirroring the template's path - e.g. `_views/blog/post.php`
+  compiles to `<cache>/templates/_views/blog/post.php` - never a hashed name, so a backtrace
+  through the compiled file makes the source template obvious. Recompiled when the source is
+  newer, written atomically (temp file + `rename()`, safe under many php-fpm workers racing to
+  compile the same template), with `opcache_invalidate()` called on every recompile so this also
+  works under `opcache.validate_timestamps=0`.
+- `TemplateContext::block()`/`end()` now capture through the `RenderSink`'s own push/pop stack,
+  not `ob_start()`/`ob_get_clean()` - hand-written code that calls `TemplateContext` directly
+  (outside a compiled template) must write through `$ctx->echo()`, not bare `echo`.
+
+Tests: `tests/Template/TemplateCompiler.php` (every translation and every forbidden construct,
+including line-number and path checks), `tests/Template/CompiledTemplateCache.php` (compile once,
+reuse, recompile, `opcache_invalidate`), `tests/Template/Renderer.php` (inheritance, partials,
+compiled path, a thrown exception's reported line), `tests/Template/Interleaving.php` (two plain
+`Fiber`-based renders suspended mid-template - the actual bug this fixes), and
+`tests/Template/TemplateContext.php` (updated: buffered-block tests write through `$ctx->echo()`
+instead of bare `echo`/`ob_start()`, since that's what a compiled template actually does).
+
 ## Database: under phasync, statements borrow pooled connections (2026-09-27)
 
 Not breaking under PHP-FPM, where nothing changes. Under phasync (Swerve), a `PDODatabase`
