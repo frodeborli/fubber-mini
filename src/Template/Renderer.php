@@ -116,6 +116,10 @@ class Renderer implements RendererInterface
             throw new \Exception("Template not found: $template (searched in: $searchedPaths)");
         }
 
+        // Compile (or reuse the cached compile of) the template before
+        // including it - see CompiledTemplateCache and TemplateCompiler.
+        $compiledPath = CompiledTemplateCache::getCompiledPath($templatePath);
+
         $ctx = new TemplateContext();
 
         // Find and include _viewstart.php files (stacked, root first)
@@ -131,16 +135,20 @@ class Renderer implements RendererInterface
             $ctx->inheritBlocks($vars['__blocks']);
         }
 
-        // Render template with $this bound to context
-        ob_start();
+        // Render template with $this bound to context. The sink - not an
+        // output buffer - captures this render's output: it's a plain
+        // object local to this call, so two renders interleaved on
+        // different Fibers in the same process never share it.
+        $sink = $ctx->sink();
+        $sink->push();
         try {
-            $ctx->include($templatePath, $vars);
+            $ctx->include($compiledPath, $vars);
             $ctx->assertNoUnclosedBlocks();
         } catch (\Throwable $e) {
-            ob_end_clean();
+            $sink->pop();
             throw $e;
         }
-        $output = ob_get_clean();
+        $output = $sink->pop();
 
         // Capture any raw output as "content" ONLY if no child provided content
         // and we didn't receive blocks from a child (meaning we're not a parent template)
