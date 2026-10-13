@@ -36,6 +36,11 @@ Desktop.ini
 # The framework's own shipped translations live in /translations/ — not here.
 /_translations/
 
+# Compiled templates (CompiledTemplateCache - see src/Template/README.md).
+# Same reasoning as /_translations/ above: the repo root is the project root,
+# so rendering a template while developing Mini itself compiles it here.
+/_cache/
+
 # Scratch and debug artifacts
 /examples/cache/
 /scratch/
