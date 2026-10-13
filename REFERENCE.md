@@ -385,6 +385,7 @@ MINI_ROOT=/path/to/project      # Project root
 MINI_CONFIG_ROOT=/path/config   # Config directory
 MINI_ROUTES_ROOT=/path/routes   # Routes directory
 MINI_VIEWS_ROOT=/path/views      # Views directory
+MINI_CACHE_ROOT=/path/cache      # Compiled-template cache directory (default: <root>/_cache)
 MINI_LOCALE=nb_NO                # Default locale
 MINI_TIMEZONE=Europe/Oslo        # Default timezone
 MINI_LANG=nb                     # Default language

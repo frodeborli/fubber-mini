@@ -1,6 +1,15 @@
 # Template - PHP Template Rendering
 
-Pure-PHP templates with .NET-style multi-level inheritance — no template language for a forkable core to maintain, just PHP and output buffering.
+Pure-PHP templates with .NET-style multi-level inheritance — no template language for a forkable core to maintain, just PHP.
+
+Templates are **compiled** before they run: `TemplateCompiler` translates every output-producing
+construct (inline HTML, `<?= ?>`, `echo`, `print`, `printf()`, `vprintf()`) into a call that writes
+through `TemplateContext` to a `RenderSink`, instead of relying on PHP's output buffer
+(`ob_start()`/`ob_get_clean()`). An output buffer belongs to the whole process, not to one
+`render()` call — on a runtime where requests can interleave inside a process (a worker suspended
+mid-template on a database call), that mixes one request's HTML into another's buffer. A
+`RenderSink` is a plain object local to one render, so this can't happen. See "Compilation" below
+for what changes, what's forbidden, and what's still possible but out of scope.
 
 ## Philosophy
 
@@ -400,13 +409,85 @@ return new App\CustomRenderer();
 ## How It Works
 
 1. **Template Discovery**: Uses path registry to locate template files
-2. **ViewStart**: Includes `_viewstart.php` files from root to template directory (stacked)
-3. **Rendering**: PHP file is included with extracted variables
-4. **Block Capture**: `$this->block()` captures content via output buffering
-5. **Inheritance**: If `$this->extend()` was called, re-render parent with blocks
-6. **Output**: Final rendered content returned as string
+2. **Compilation**: `TemplateCompiler` translates the file into plain PHP (cached - see below)
+3. **ViewStart**: Includes `_viewstart.php` files from root to template directory (stacked)
+4. **Rendering**: Compiled PHP file is included with extracted variables
+5. **Block Capture**: `$this->block()` captures content through the render sink
+6. **Inheritance**: If `$this->extend()` was called, re-render parent with blocks
+7. **Output**: Final rendered content returned as string
 
 The renderer handles multi-level inheritance by recursively rendering parent templates, passing captured blocks upward through the `__blocks` variable. ViewStart files only run for the initial template, not for parent layouts.
+
+## Compilation
+
+A template file is never included as-is. `TemplateCompiler::compile()` tokenizes it with
+`PhpToken::tokenize()` (no regexes) and translates every construct that would otherwise write
+directly:
+
+| Source | Compiles to |
+|---|---|
+| inline HTML (text outside `<?php ... ?>`) | `$this->echo('...')` |
+| `<?= expr ?>` | `$this->echo(expr)` |
+| `echo a, b;` | `$this->echo(a, b);` |
+| `print expr` | `$this->print(expr)` - still an expression, still evaluates to `int(1)` |
+| `printf(...)` / `vprintf(...)` | `$this->printf(...)` / `$this->vprintf(...)` - arguments untouched |
+
+Everything else — control structures, alternative syntax (`if: ... endif;`), heredoc/nowdoc,
+assignments, your own function and method calls — passes through completely unchanged. A call
+written as `->printf(`, `::printf(`, `?->printf(`, or a function/method declaration named
+`printf`/`vprintf`, is left alone too; only a plain, unqualified call to the global function is
+rewritten.
+
+`$this->echo()`, `$this->print()`, `$this->printf()` and `$this->vprintf()` are `TemplateContext`
+methods that write to the active `RenderSink` instead of producing direct output. They're what
+your template's `echo`/`print`/`printf`/`vprintf` turn into — you never call them yourself.
+
+**Line numbers are exact.** No newline is ever added or removed by compilation — inline HTML's
+own newlines stay inside its string literal — so a thrown exception's line, and every line in a
+backtrace through a compiled template, is the same line number the source template has.
+
+### Forbidden constructs
+
+Compiling a template fails, with an error naming the file and line, for:
+
+- **`var_dump()` and `debug_zval_dump()`** - always, since they only ever write directly.
+- **`var_export()` and `print_r()` called without their second (return) argument** - with it,
+  they return a string instead of writing, which is fine: `var_export($value, true)`.
+- **`include`/`include_once`/`require`/`require_once`** - raw inclusion bypasses compilation
+  entirely (the included file would still try to produce direct output). Use `mini\render()` for
+  partials and `$this->extend()`/`$this->block()` for layout inheritance instead.
+
+### What's not detected (a documented limitation)
+
+This is a short, deliberate list — not an exhaustive scan for every way PHP can write output. A
+function or method called from a template that outputs directly (an `echo` inside a plain helper
+class, `ob_*`, `flush()`, `readfile()`, `fpassthru()`, ...) is **not compiled and not detected**:
+its output bypasses the sink and is lost (or, worse, lands in whatever output buffer happens to be
+active). Such code should return a string (or `Stringable`) instead of printing it.
+
+One subtler case of the same limitation: `$this->echo()`/`$this->printf()`/`$this->vprintf()` are
+plain variadic methods, so all of their arguments are evaluated *before* any of them is written -
+unlike the real `echo`/`printf()`, which write as they evaluate each argument. A construct that
+writes as a side effect while sitting inside another one's argument list (`print`/`printf()` used
+inside the same `echo`/`<?= ?>`) therefore writes out of the order a hand-written `echo` would
+produce. This essentially never comes up in normal templates (`echo print $x;` is not something
+anyone writes on purpose) - it only matters if you nest these constructs in one statement.
+
+## Compiled file cache
+
+Compiled files are ordinary PHP files, written under Mini's cache directory
+(`<project root>/_cache` by default, override with the `MINI_CACHE_ROOT` environment variable),
+mirroring the template's path relative to the project root under a `templates/` subdirectory - for
+example `_views/blog/post.php` compiles to `<cache>/templates/_views/blog/post.php`. The path is
+never a hash: a backtrace through the compiled file makes the source template obvious at a glance.
+
+A template is recompiled when its source file is newer than the compiled file (or the compiled
+file doesn't exist yet). The new file is written atomically - compiled to a temporary file in the
+same directory, then `rename()`d into place - so many php-fpm workers racing to compile the same
+template at once is harmless: compilation is a pure function of the source, every racing writer
+produces byte-identical output, and `rename()` never leaves a reader looking at a half-written
+file. `opcache_invalidate()` is called on every recompile, so this also works correctly under
+`opcache.validate_timestamps=0`.
 
 ## Template Variables
 
@@ -434,7 +515,10 @@ try {
 }
 ```
 
-Exceptions thrown while rendering are re-thrown after cleaning up output buffers — partial output is never emitted.
+Exceptions thrown while rendering are re-thrown after discarding whatever the render sink had
+captured so far — partial output is never emitted. A template using a forbidden construct (see
+"Compilation" above) throws `TemplateCompileException` the first time it's rendered, naming the
+template file and line.
 
 ## Best Practices
 

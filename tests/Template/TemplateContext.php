@@ -21,7 +21,10 @@ $test = new class extends Test {
     {
         $ctx = new TemplateContext();
         $ctx->block('content');
-        echo 'Buffered content';
+        // A compiled template writes via $this->echo(), not bare echo() -
+        // block()/end() capture through the render sink, not an output
+        // buffer, so that's what a buffered block actually captures.
+        $ctx->echo('Buffered content');
         $ctx->end();
         self::assertEquals('Buffered content', $ctx->blocks['content']);
     }
@@ -93,7 +96,8 @@ $test = new class extends Test {
             \LogicException::class,
             'Unclosed block(s): content'
         );
-        ob_end_clean(); // clean up the output buffer
+        // The unclosed capture frame lives on the context's own RenderSink,
+        // not in a global output buffer, so there's nothing to clean up.
     }
 
     public function testAssertNoUnclosedBlocksListsMultipleUnclosedBlocks(): void
@@ -107,27 +111,28 @@ $test = new class extends Test {
             \LogicException::class,
             'header, content'
         );
-        ob_end_clean();
-        ob_end_clean();
     }
 
     public function testShowOutputsBlockContent(): void
     {
+        // show() writes to the active sink frame, not to an output
+        // buffer, so capture it the way a compiled template would: a
+        // surrounding buffered block.
         $ctx = new TemplateContext();
         $ctx->block('title', 'Hello');
-        ob_start();
+        $ctx->block('capture');
         $ctx->show('title');
-        $output = ob_get_clean();
-        self::assertEquals('Hello', $output);
+        $ctx->end();
+        self::assertEquals('Hello', $ctx->blocks['capture']);
     }
 
     public function testShowOutputsDefaultWhenBlockMissing(): void
     {
         $ctx = new TemplateContext();
-        ob_start();
+        $ctx->block('capture');
         $ctx->show('missing', 'Default');
-        $output = ob_get_clean();
-        self::assertEquals('Default', $output);
+        $ctx->end();
+        self::assertEquals('Default', $ctx->blocks['capture']);
     }
 
     public function testLaterBlockDefinitionOverwritesEarlier(): void
@@ -143,7 +148,7 @@ $test = new class extends Test {
         $ctx = new TemplateContext();
         $ctx->block('title', 'Inline');
         $ctx->block('title');
-        echo 'Buffered';
+        $ctx->echo('Buffered');
         $ctx->end();
         self::assertEquals('Buffered', $ctx->blocks['title']);
     }
@@ -152,10 +157,58 @@ $test = new class extends Test {
     {
         $ctx = new TemplateContext();
         $ctx->block('title');
-        echo 'Buffered';
+        $ctx->echo('Buffered');
         $ctx->end();
         $ctx->block('title', 'Inline');
         self::assertEquals('Inline', $ctx->blocks['title']);
+    }
+
+    public function testEchoWritesEachArgumentInOrder(): void
+    {
+        $ctx = new TemplateContext();
+        $ctx->block('content');
+        $ctx->echo('a', 'b', 3);
+        $ctx->end();
+        self::assertEquals('ab3', $ctx->blocks['content']);
+    }
+
+    public function testEchoConvertsValuesLikeNativeEcho(): void
+    {
+        $ctx = new TemplateContext();
+        $ctx->block('content');
+        $ctx->echo(null, false, true, 1.5);
+        $ctx->end();
+        self::assertEquals('11.5', $ctx->blocks['content']);
+    }
+
+    public function testPrintWritesAndReturnsOne(): void
+    {
+        $ctx = new TemplateContext();
+        $ctx->block('content');
+        $result = $ctx->print('Hello');
+        $ctx->end();
+        self::assertSame(1, $result);
+        self::assertEquals('Hello', $ctx->blocks['content']);
+    }
+
+    public function testPrintfWritesFormattedStringAndReturnsLength(): void
+    {
+        $ctx = new TemplateContext();
+        $ctx->block('content');
+        $result = $ctx->printf('%s is %d', 'x', 5);
+        $ctx->end();
+        self::assertEquals('x is 5', $ctx->blocks['content']);
+        self::assertSame(6, $result);
+    }
+
+    public function testVprintfWritesFormattedStringAndReturnsLength(): void
+    {
+        $ctx = new TemplateContext();
+        $ctx->block('content');
+        $result = $ctx->vprintf('%s is %d', ['x', 5]);
+        $ctx->end();
+        self::assertEquals('x is 5', $ctx->blocks['content']);
+        self::assertSame(6, $result);
     }
 };
 
