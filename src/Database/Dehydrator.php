@@ -20,12 +20,6 @@ use mini\Mini;
 final class Dehydrator
 {
     /**
-     * Track classes currently being hydrated to detect recursion
-     * @var array<string, true>
-     */
-    private static array $hydrating = [];
-
-    /**
      * Hydrate a database row to an entity instance
      *
      * @template T of object
@@ -36,22 +30,21 @@ final class Dehydrator
      */
     public static function hydrate(object $row, string $entityClass, array|false $constructorArgs = false): object
     {
-        // If entity implements Hydratable and we're not already hydrating it (recursion guard)
-        if (is_subclass_of($entityClass, Hydratable::class) && !isset(self::$hydrating[$entityClass])) {
-            self::$hydrating[$entityClass] = true;
-            try {
-                return $entityClass::fromSqlRow($row);
-            } finally {
-                unset(self::$hydrating[$entityClass]);
-            }
+        if (is_subclass_of($entityClass, Hydratable::class)) {
+            return $entityClass::fromSqlRow($row);
         }
 
-        // Reflection-based hydration (also used as fallback for recursive calls)
         return self::hydrateReflection($row, $entityClass, $constructorArgs);
     }
 
     /**
      * Hydrate using reflection (maps columns to properties with type conversion)
+     *
+     * What hydrate() does for an entity that is not Hydratable. A fromSqlRow() that wants the
+     * default mapping calls this, never hydrate() (which would call fromSqlRow() again): there
+     * is deliberately no recursion guard, since a guard would have to be shared state, and a
+     * fromSqlRow() that waits (a query, a lazy load) would make other requests hydrating the
+     * same class skip it.
      *
      * @template T of object
      * @param object $row Database row (typically stdClass from PDO)
@@ -59,7 +52,7 @@ final class Dehydrator
      * @param array|false $constructorArgs
      * @return T
      */
-    private static function hydrateReflection(object $row, string $entityClass, array|false $constructorArgs = false): object
+    public static function hydrateReflection(object $row, string $entityClass, array|false $constructorArgs = false): object
     {
         $refClass = new \ReflectionClass($entityClass);
         $converterRegistry = null;

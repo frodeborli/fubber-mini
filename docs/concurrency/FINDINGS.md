@@ -62,14 +62,24 @@ passes through; a sequential runtime makes a fresh object per `run()`. Override 
 Test: `tests/Dispatcher/SequentialScope.php`. Lesson: "one object per request" must be
 *produced by something at the start of the request*, not assumed.
 
+### A static guard wrapped around user code corrupts other requests (fixed, 0.19.0)
+
+`Dehydrator::hydrate()` set a static `$hydrating[$class]` flag around `fromSqlRow()` so that the
+user's `fromSqlRow()` could call `hydrate()` again and get the reflection mapping. While one
+coroutine waited inside `fromSqlRow()`, any other hydrating the same class saw the flag and
+silently skipped `fromSqlRow()`: a wrong entity, no error.
+
+Fix: no flag. `hydrateReflection()` is public and is what a `fromSqlRow()` calls for the default
+mapping. Test: `tests/Database/Dehydrator.Interleaved.php` (two Fibers inside `fromSqlRow()` at
+once). Lesson: a re-entrancy guard is shared state; make re-entry impossible by API shape
+instead (give the callee a separate entry point), not by a flag around code you do not own.
+
 ### Open: found by audit, not yet fixed
 
 - **The Router's output guard uses a process-global buffer.** `Router::runControllerFile()`
   wraps `require` of a route file in `ob_start()` to reject route files that echo. If the route
   file suspends, another request's output lands in that buffer: a false "produced output
   directly" error for this request, and lost output for the other. (Templates are fixed, above.)
-- **`Dehydrator::$hydrating`** is a static recursion guard wrapped around user code
-  (`fromSqlRow()`); a concurrent request hydrating the same class silently takes the other path.
 - **Locale and timezone** (`Locale::setDefault()`, `date_default_timezone_set()`) are
   process-global, and `Fmt`, `Translator` and the datetime conversion read them. They need
   per-request storage that Mini's own code reads directly.

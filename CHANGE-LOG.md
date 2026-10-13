@@ -4,6 +4,19 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Dehydrator: no recursion guard; `hydrateReflection()` is public (0.19.0-alpha1, 2026-10-13)
+
+**BREAKING CHANGE** (for a `fromSqlRow()` that calls `Dehydrator::hydrate()` on its own class to get the default mapping)
+
+`Dehydrator::hydrate()` kept a static per-class "currently hydrating" flag around `fromSqlRow()`, so
+that `fromSqlRow()` could call `hydrate()` and fall through to reflection. Shared state spanning
+user code: while one coroutine waited inside `fromSqlRow()` (a query, a lazy load), another that
+hydrated the same class skipped `fromSqlRow()` and returned an entity built by reflection, a silent
+wrong answer. The flag is gone. Call `Dehydrator::hydrateReflection($row, static::class, false)`
+for the default mapping; `hydrate()` from inside `fromSqlRow()` of the same class now recurses.
+
+Regression test: `tests/Database/Dehydrator.Interleaved.php`.
+
 ## Request scope: a configurable RequestScopeInterface (0.19.0-alpha1, 2026-10-13)
 
 **BREAKING CHANGE** (for code that relied on `getRequestScope()` returning the Mini instance, and
