@@ -8,46 +8,65 @@ class PDOSqlite3ApcuDriver implements ApcuDriverInterface
 {
     use ApcuDriverTrait;
 
-    private PDO $pdo;
+    /**
+     * Idle connections. One process may run many requests at once (coroutines: phasync, Swoole,
+     * Fibers), and a connection serves one operation at a time: ext-phasync refuses a second
+     * coroutine's statement on a connection another coroutine's statement still holds
+     * ("Concurrent operations on the same resource are not supported"). So every operation
+     * borrows a connection of its own and gives it back; concurrent operations open more.
+     *
+     * @var list<PDO>
+     */
+    private array $idle = [];
 
     /**
      * @param string $path Path to SQLite file. On Linux, /dev/shm/... gives
      *                     tmpfs-backed "in-memory" speed with persistence
      *                     across worker processes.
      */
-    public function __construct(string $path)
+    public function __construct(private readonly string $path)
     {
-        $dsn = 'sqlite:' . $path;
-        $this->pdo = new PDO($dsn, null, null, [
-            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        ]);
-
-        $this->initSchema();
-        $this->configurePragmas();
-    }
-
-    private function initSchema(): void
-    {
-        $this->pdo->exec(
+        $this->with(fn (PDO $pdo) => $pdo->exec(
             'CREATE TABLE IF NOT EXISTS cache (
                  key     TEXT PRIMARY KEY,
                  payload BLOB NOT NULL
              )'
-        );
-        // Optional index is redundant with PRIMARY KEY
+        ));
+    }
+
+    private function connect(): PDO
+    {
+        $pdo = new PDO('sqlite:' . $this->path, null, null, [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        ]);
+        // Tuned for speed; tweak as needed.
+        $pdo->exec('PRAGMA journal_mode = WAL');
+        $pdo->exec('PRAGMA synchronous = OFF');
+        $pdo->exec('PRAGMA temp_store = MEMORY');
+        $pdo->exec('PRAGMA locking_mode = NORMAL');
+        $pdo->exec('PRAGMA busy_timeout = 5000');
+
+        return $pdo;
     }
 
     /**
-     * Tuned for speed; tweak as needed.
+     * Run $fn with a connection no other operation is using.
+     *
+     * @template T
+     * @param \Closure(PDO): T $fn
+     * @return T
      */
-    private function configurePragmas(): void
+    private function with(\Closure $fn): mixed
     {
-        $this->pdo->exec('PRAGMA journal_mode = WAL');
-        $this->pdo->exec('PRAGMA synchronous = OFF');
-        $this->pdo->exec('PRAGMA temp_store = MEMORY');
-        $this->pdo->exec('PRAGMA locking_mode = NORMAL');
-        $this->pdo->exec('PRAGMA busy_timeout = 5000');
+        $pdo = \array_pop($this->idle) ?? $this->connect();
+        try {
+            return $fn($pdo);
+        } finally {
+            if (\count($this->idle) < 8) {   // (a burst's extra connections close as it ends)
+                $this->idle[] = $pdo;
+            }
+        }
     }
 
     /* --------------------------------------------------------------------
@@ -59,9 +78,12 @@ class PDOSqlite3ApcuDriver implements ApcuDriverInterface
      */
     protected function _fetch(string $key, bool &$found = null): ?string
     {
-        $stmt = $this->pdo->prepare('SELECT payload FROM cache WHERE key = :key');
-        $stmt->execute([':key' => $key]);
-        $row = $stmt->fetch();
+        $row = $this->with(function (PDO $pdo) use ($key) {
+            $stmt = $pdo->prepare('SELECT payload FROM cache WHERE key = :key');
+            $stmt->execute([':key' => $key]);
+
+            return $stmt->fetch();
+        });
 
         if ($row === false) {
             $found = false;
@@ -79,17 +101,18 @@ class PDOSqlite3ApcuDriver implements ApcuDriverInterface
      */
     protected function _add(string $key, string $payload, int $ttl): bool
     {
-        $stmt = $this->pdo->prepare(
-            'INSERT OR IGNORE INTO cache (key, payload) VALUES (:key, :payload)'
-        );
+        return $this->with(function (PDO $pdo) use ($key, $payload) {
+            $stmt = $pdo->prepare(
+                'INSERT OR IGNORE INTO cache (key, payload) VALUES (:key, :payload)'
+            );
+            $stmt->execute([
+                ':key'     => $key,
+                ':payload' => $payload,
+            ]);
 
-        $stmt->execute([
-            ':key'     => $key,
-            ':payload' => $payload,
-        ]);
-
-        // INSERT OR IGNORE: rowCount() == 1 means insert happened, 0 = existed
-        return $stmt->rowCount() === 1;
+            // INSERT OR IGNORE: rowCount() == 1 means insert happened, 0 = existed
+            return $stmt->rowCount() === 1;
+        });
     }
 
     /**
@@ -97,16 +120,14 @@ class PDOSqlite3ApcuDriver implements ApcuDriverInterface
      */
     protected function _store(string $key, string $payload, int $ttl): bool
     {
-        $stmt = $this->pdo->prepare(
+        return $this->with(fn (PDO $pdo) => $pdo->prepare(
             'INSERT INTO cache (key, payload)
              VALUES (:key, :payload)
              ON CONFLICT(key) DO UPDATE SET payload = excluded.payload'
-        );
-
-        return $stmt->execute([
+        )->execute([
             ':key'     => $key,
             ':payload' => $payload,
-        ]);
+        ]));
     }
 
     /**
@@ -114,10 +135,12 @@ class PDOSqlite3ApcuDriver implements ApcuDriverInterface
      */
     protected function _delete(string $key): bool
     {
-        $stmt = $this->pdo->prepare('DELETE FROM cache WHERE key = :key');
-        $stmt->execute([':key' => $key]);
+        return $this->with(function (PDO $pdo) use ($key) {
+            $stmt = $pdo->prepare('DELETE FROM cache WHERE key = :key');
+            $stmt->execute([':key' => $key]);
 
-        return $stmt->rowCount() > 0;
+            return $stmt->rowCount() > 0;
+        });
     }
 
     /* --------------------------------------------------------------------
@@ -139,10 +162,8 @@ class PDOSqlite3ApcuDriver implements ApcuDriverInterface
         // Scan all entries and delete expired ones
         // This is expensive but runs rarely (0.01% of writes)
         try {
-            $stmt = $this->pdo->query('SELECT key, payload FROM cache');
             $toDelete = [];
-
-            while ($row = $stmt->fetch()) {
+            foreach ($this->with(fn (PDO $pdo) => $pdo->query('SELECT key, payload FROM cache')->fetchAll()) as $row) {
                 $expired = false;
                 $expiresAt = null;
                 $this->unpackValue($row['payload'], $expired, $expiresAt);
@@ -154,8 +175,7 @@ class PDOSqlite3ApcuDriver implements ApcuDriverInterface
 
             if (!empty($toDelete)) {
                 $placeholders = implode(',', array_fill(0, count($toDelete), '?'));
-                $deleteStmt = $this->pdo->prepare("DELETE FROM cache WHERE key IN ($placeholders)");
-                $deleteStmt->execute($toDelete);
+                $this->with(fn (PDO $pdo) => $pdo->prepare("DELETE FROM cache WHERE key IN ($placeholders)")->execute($toDelete));
             }
         } catch (\PDOException $e) {
             // GC failure is not critical - ignore
@@ -169,9 +189,7 @@ class PDOSqlite3ApcuDriver implements ApcuDriverInterface
     public function info(bool $limited = false): array|false
     {
         // Just return something minimal and cheap.
-        $count = (int)$this->pdo
-            ->query('SELECT COUNT(*) AS c FROM cache')
-            ->fetch()['c'];
+        $count = (int)$this->with(fn (PDO $pdo) => $pdo->query('SELECT COUNT(*) AS c FROM cache')->fetch()['c']);
 
         return [
             'num_entries' => $count,
@@ -195,7 +213,7 @@ class PDOSqlite3ApcuDriver implements ApcuDriverInterface
 
     public function clear_cache(): bool
     {
-        $this->pdo->exec('DELETE FROM cache');
+        $this->with(fn (PDO $pdo) => $pdo->exec('DELETE FROM cache'));
         return true;
     }
 

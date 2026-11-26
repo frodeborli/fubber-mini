@@ -57,6 +57,8 @@ MINI_APCU_SWOOLE_VALUE_SIZE=4096    # Max value size (bytes)
 **Characteristics:**
 - Persists across requests and process restarts
 - Shared across all PHP processes
+- Coroutine-safe: each operation borrows a connection of its own (a process keeps up to 8 idle),
+  so concurrent coroutines (phasync, Fibers) never share one
 - Uses `/dev/shm` on Linux (tmpfs = RAM speed)
 - Falls back to `sys_get_temp_dir()` on other systems
 - Fast (~microseconds to low milliseconds)
