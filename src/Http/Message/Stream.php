@@ -71,8 +71,11 @@ class Stream implements StreamInterface {
 
     /**
      * @deprecated Use cast() instead
+     *
+     * @return StreamInterface as cast(): a stream given is returned as it is, whatever its class (a streamed body of
+     *                         another library's, such as phasync's UnbufferedStream)
      */
-    public static function create(mixed $source): static {
+    public static function create(mixed $source): StreamInterface {
         return static::cast($source);
     }
 }
