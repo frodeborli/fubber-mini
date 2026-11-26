@@ -4,6 +4,31 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Database: one connection per scope, no pool (0.18.0-alpha1, 2026-11-27)
+
+**BREAKING CHANGE** (under phasync only; for code that ran statements from several coroutines of
+one request at the same time)
+
+Under phasync (Swerve), `PDODatabase` borrowed a connection per statement from a process-wide
+`phasync\Util\Pool` and lent it again afterwards (see "Database: under phasync, statements borrow
+pooled connections" below). A connection lent again carries whatever its last use left on it: a
+transaction begun by hand that failed before its end made every later request that got that
+connection fail ("cannot start a transaction within a transaction"); and `exec('BEGIN')` landed on one
+connection while the statements after it ran on others.
+
+Now each scope has its own: the scope's `PDO` service (`Lifetime::Scoped`), as under PHP-FPM.
+Under Swerve each request runs in a `\Scope` of its own (`mini\Dispatcher\RequestScope`), so each
+request has a connection of its own, opened when it first needs one and closed when the scope is
+gone; none is lent again. `MINI_DATABASE_POOL_SIZE` is gone.
+
+Work that needs the database beside a request's own (a service holding a connection, a background
+coroutine) runs in a `\Scope` of its own (`(new \Scope())->run(...)`), which gives it a connection of
+its own, or opens a PDO of its own and keeps it: coroutines of one scope must not run statements at
+the same time (phasync-ext refuses it). Components get their data from services, not from a
+connection of the request's.
+
+Regression test: `tests/Database/PDODatabase.Scoped.php` (replaces `PDODatabase.Pooled.php`).
+
 ## Dehydrator: no recursion guard; `hydrateReflection()` is public (0.18.0-alpha1, 2026-10-13)
 
 **BREAKING CHANGE** (for a `fromSqlRow()` that calls `Dehydrator::hydrate()` on its own class to get the default mapping)

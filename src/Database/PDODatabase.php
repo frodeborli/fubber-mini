@@ -22,28 +22,20 @@ use function mini\sqlval;
  * operations pleasant while supporting any PDO-compatible database.
  * Fetches PDO from container lazily to ensure proper scoping.
  *
- * Under phasync (an application server such as Swerve, where many requests and their
- * coroutines run at once in one process), and without a PDO of its own: each statement borrows
- * a connection from the process's pool (phasync\Util\Pool, MINI_DATABASE_POOL_SIZE connections,
- * 5 by default) and gives it back when done, so concurrent coroutines never share one, and a
- * process never opens more than that. A transaction() keeps one connection for itself until it
- * ends; statements of the same coroutine inside it use it. lastInsertId() is the calling
- * coroutine's. Query results are fetched completely before the connection is given back.
+ * One connection per scope: the scope's PDO service (Lifetime::Scoped). Under Swerve each request
+ * runs in a \Scope of its own (mini\Dispatcher\RequestScope), so each request has a connection of its
+ * own, opened when it first needs one and closed when the scope is gone: nothing reaches another
+ * request through it, and none is lent from one use to the next. Work that needs the database beside a
+ * request's own (a service that holds a connection, a background coroutine) runs in a \Scope of its
+ * own ((new \Scope())->run(...)), which gives it a connection of its own, or opens a PDO of its own and
+ * keeps it: coroutines must not run statements on one connection at the same time. Connections are
+ * never persistent (PDO::ATTR_PERSISTENT is not safe with fibers).
  */
 class PDODatabase implements DatabaseInterface
 {
     private ?PDO $pdo = null;
     private bool $inTransaction = false;
     private ?SqlDialect $dialect = null;
-
-    /** @var \WeakMap<\Fiber, PDO> pooled: the connection each coroutine's transaction holds */
-    private \WeakMap $transactions;
-
-    /** @var \WeakMap<\Fiber, string> pooled: each coroutine's last insert id */
-    private \WeakMap $insertIds;
-
-    /** The process's connections, under phasync; see the class description */
-    private static ?\phasync\Util\Pool $pool = null;
 
     /** @var \WeakMap<Query, PartialQuery> Maps Query instances to their underlying PartialQuery */
     private \WeakMap $queryMap;
@@ -57,31 +49,10 @@ class PDODatabase implements DatabaseInterface
     {
         $this->pdo = $pdo;
         $this->queryMap = new \WeakMap();
-        $this->transactions = new \WeakMap();
-        $this->insertIds = new \WeakMap();
     }
 
     /**
-     * The process's connection pool when statements borrow from it: under phasync, in a
-     * coroutine, without a PDO of our own. Null otherwise.
-     */
-    private function pool(): ?\phasync\Util\Pool
-    {
-        if (null !== $this->pdo || !\class_exists(\phasync\Util\Pool::class) || !\phasync::isRunning() || null === \Fiber::getCurrent()) {
-            return null;
-        }
-
-        return self::$pool ??= new \phasync\Util\Pool(static function (): PDO {
-            $pdo = Mini::$mini->loadServiceConfig(PDO::class);
-            PDOService::configure($pdo);
-
-            return $pdo;
-        }, \max(1, (int) ($_ENV['MINI_DATABASE_POOL_SIZE'] ?? \getenv('MINI_DATABASE_POOL_SIZE') ?: 5)));
-    }
-
-    /**
-     * $fn with the connection for one statement: our own; or pooled, the coroutine's
-     * transaction's, else one borrowed for $fn alone.
+     * $fn with the scope's connection (see the class description).
      *
      * @template T
      * @param \Closure(PDO): T $fn
@@ -89,30 +60,7 @@ class PDODatabase implements DatabaseInterface
      */
     private function withPdo(\Closure $fn): mixed
     {
-        if (null === ($pool = $this->pool())) {
-            return $fn($this->lazyPdo());
-        }
-        $fiber = \Fiber::getCurrent();
-        if (isset($this->transactions[$fiber])) {
-            return $fn($this->transactions[$fiber]);
-        }
-
-        return $pool->use($fn);
-    }
-
-    /** Pooled: keep the coroutine's last insert id, as the connection goes back after the statement */
-    private function rememberInsertId(PDO $pdo): void
-    {
-        if (null !== $this->pool()) {
-            try {
-                $id = $pdo->lastInsertId();
-                if (false !== $id && '0' !== $id) {
-                    $this->insertIds[\Fiber::getCurrent()] = $id;
-                }
-            } catch (PDOException) {
-                // No insert id in this session (PostgreSQL without a sequence used)
-            }
-        }
+        return $fn($this->lazyPdo());
     }
 
     /**
@@ -184,17 +132,6 @@ class PDODatabase implements DatabaseInterface
                     [$sql, $params] = $query->getSql($dialect);
                 }
 
-                if (null !== $this->pool()) {
-                    // Fetched completely: the connection goes back before the caller iterates
-                    yield from $this->withPdo(static function (PDO $pdo) use ($sql, $params) {
-                        $stmt = $pdo->prepare($sql);
-                        self::bindAndExecute($stmt, $params);
-
-                        return $stmt->fetchAll(PDO::FETCH_OBJ);
-                    });
-
-                    return;
-                }
                 $stmt = $this->lazyPdo()->prepare($sql);
                 self::bindAndExecute($stmt, $params);
 
@@ -265,7 +202,6 @@ class PDODatabase implements DatabaseInterface
             return $this->withPdo(function (PDO $pdo) use ($sql, $params) {
                 $stmt = $pdo->prepare($sql);
                 self::bindAndExecute($stmt, $params);
-                $this->rememberInsertId($pdo);
                 return $stmt->rowCount();
             });
         } catch (PDOException $e) {
@@ -278,15 +214,6 @@ class PDODatabase implements DatabaseInterface
      */
     public function lastInsertId(): ?string
     {
-        if (null !== $this->pool()) {
-            $fiber = \Fiber::getCurrent();
-            if (isset($this->transactions[$fiber])) {
-                $id = $this->transactions[$fiber]->lastInsertId();
-                return $id !== false ? $id : null;
-            }
-
-            return $this->insertIds[$fiber] ?? null;
-        }
         $id = $this->lazyPdo()->lastInsertId();
         return $id !== false ? $id : null;
     }
@@ -368,25 +295,6 @@ class PDODatabase implements DatabaseInterface
      */
     public function transaction(\Closure $task): mixed
     {
-        if (null !== ($pool = $this->pool())) {
-            // Pooled: a connection for this coroutine's transaction alone, until it ends
-            $fiber = \Fiber::getCurrent();
-            if (isset($this->transactions[$fiber])) {
-                throw new \RuntimeException(
-                    "Already in a transaction. Nested transactions are not supported. " .
-                    "Restructure your code to use a single transaction block."
-                );
-            }
-            $pdo = $pool->borrow();
-            $this->transactions[$fiber] = $pdo;
-            try {
-                return $this->runTransaction($pdo, $task);
-            } finally {
-                unset($this->transactions[$fiber]);
-                $pool->release($pdo);
-            }
-        }
-
         if ($this->inTransaction) {
             throw new \RuntimeException(
                 "Already in a transaction. Nested transactions are not supported. " .
@@ -458,17 +366,12 @@ class PDODatabase implements DatabaseInterface
      * This allows access to PDO-specific functionality when needed,
      * while keeping the common operations clean through the interface.
      *
-     * Pooled (under phasync): inside this coroutine's transaction(), its connection; otherwise
-     * the request scope's own PDO service, which is not from the pool: prefer this class's
-     * methods there, or phasync's Pool for work that needs a connection of its own.
+     * The scope's connection (see the class description).
      *
      * @return PDO The underlying PDO instance
      */
     public function getPdo(): PDO
     {
-        if (null !== $this->pool() && isset($this->transactions[\Fiber::getCurrent()])) {
-            return $this->transactions[\Fiber::getCurrent()];
-        }
         return $this->lazyPdo();
     }
 
@@ -595,7 +498,6 @@ class PDODatabase implements DatabaseInterface
             return $this->withPdo(function (PDO $pdo) use ($sql, $values) {
                 $stmt = $pdo->prepare($sql);
                 self::bindAndExecute($stmt, $values);
-                $this->rememberInsertId($pdo);
                 $id = $pdo->lastInsertId();
                 return $id !== false ? $id : '';
             });
@@ -653,7 +555,6 @@ class PDODatabase implements DatabaseInterface
                     $stmt = $pdo->prepare($sql);
                     $stmt->execute($values);
                 }
-                $this->rememberInsertId($pdo);
 
                 return $stmt->rowCount();
             });
