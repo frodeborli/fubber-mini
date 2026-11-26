@@ -84,7 +84,13 @@ $dispatcher->registerExceptionConverter(function(\Throwable $e): ResponseInterfa
     } catch (\Throwable) {
         $what = 'a request';
     }
-    \mini\log()->error('{request} failed: {class}: {message}', ['request' => $what, 'class' => \get_class($e), 'message' => $e->getMessage(), 'exception' => $e]);
+    try {
+        \mini\log()->error('{request} failed: {class}: {message}', ['request' => $what, 'class' => \get_class($e), 'message' => $e->getMessage(), 'exception' => $e]);
+    } catch (\Throwable $logFailed) {
+        // The logger failed too (its config, its backend): the request's own error must still be
+        // told, not replaced by the logger's
+        \error_log("$what failed: " . $e . "\n(and logging it failed: " . $logFailed . ')');
+    }
     $body = \mini\Http\ErrorHandler::renderExceptionPage($e, 500);
     return new Response($body, ['Content-Type' => 'text/html; charset=utf-8'], 500);
 });
