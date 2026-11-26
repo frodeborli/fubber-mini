@@ -51,7 +51,7 @@ trait RequestTrait {
         $this->method = $method;
         $this->requestTarget = $requestTarget;
 
-        $this->MessageTrait(Stream::create($body), $headers, $protocolVersion);
+        $this->MessageTrait(Stream::cast($body), $headers, $protocolVersion);
     }
 
     /**

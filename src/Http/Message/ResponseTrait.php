@@ -27,7 +27,7 @@ trait ResponseTrait {
     /**
      * Configure the response trait
      *
-     * @param mixed $body               Body as an instance of Psr\Http\Message\StreamInterface or the types accepted by {$see Stream::create()}
+     * @param mixed $body               Body as an instance of Psr\Http\Message\StreamInterface or the types accepted by {@see Stream::cast()}
      * @param array $headers            Array of header names => values
      * @param int $statusCode           HTTP status code
      * @param string $reasonPhrase      The HTTP reason phrase
@@ -40,7 +40,7 @@ trait ResponseTrait {
         } else {
             $this->reasonPhrase = $reasonPhrase;
         }
-        $this->MessageTrait(Stream::create($body), $headers, $protocolVersion);
+        $this->MessageTrait(Stream::cast($body), $headers, $protocolVersion);
     }
 
     /**
