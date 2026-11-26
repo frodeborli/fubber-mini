@@ -11,13 +11,17 @@ use mini\Phase;
 /**
  * The default {@see RequestScopeInterface}: adapts to the runtime it finds.
  *
- * - Under phasync (Swerve), the phasync context of the running coroutine: each request has one.
+ * - Where the `Scope` class exists (the PHP Scope RFC; ext-scope, or its polyfill
+ *   fiber-interop/scope, which phasync and Swerve use), `Scope::getCurrent()`, unless that is the
+ *   root scope: Swerve runs each request in a Scope of its own, and coroutines a request starts
+ *   inherit it. The root scope is the process's, shared by every plain Fiber that runs in no
+ *   Scope of its own.
  * - In another Fiber, the Fiber.
  * - Otherwise one object per `run()`: the process handles one request at a time (PHP-FPM, and
  *   workers such as RoadRunner and FrankenPHP), so a request's Scoped services are gone when
  *   it ends, and the next request does not inherit them. Outside `run()` it is the Mini instance.
  *
- * phasync is not a dependency: it is only asked when it is loaded and running.
+ * Neither Scope nor phasync is a dependency: Scope is only asked when it is loaded.
  */
 final class RequestScope implements RequestScopeInterface
 {
@@ -25,8 +29,9 @@ final class RequestScope implements RequestScopeInterface
 
     public function current(): object
     {
-        if (\class_exists(\phasync::class, false) && \phasync::isRunning() && Fiber::getCurrent() !== null) {
-            return \phasync::getContext();
+        // (the root scope is the whole process's: not a request's, so it does not count)
+        if (\class_exists(\Scope::class, false) && ($scope = \Scope::getCurrent()) !== \Scope::getRootScope()) {
+            return $scope;
         }
         if (null !== ($fiber = Fiber::getCurrent())) {
             return $fiber;
