@@ -312,7 +312,13 @@ class PDODatabase implements DatabaseInterface
     private function runTransaction(PDO $pdo, \Closure $task): mixed
     {
         try {
-            $pdo->beginTransaction();
+            if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+                // (IMMEDIATE: the write lock taken now, waited for here; a transaction begun deferred and writing after
+                // it read is refused at once ("database is locked", with no wait) when another connection wrote between)
+                $this->withPdo(static fn (PDO $p) => $p->exec('BEGIN IMMEDIATE'));
+            } else {
+                $pdo->beginTransaction();
+            }
         } catch (PDOException $e) {
             throw new \RuntimeException("Failed to start transaction: " . $e->getMessage(), 0, $e);
         }
@@ -326,7 +332,7 @@ class PDODatabase implements DatabaseInterface
             // caller knows the transaction boundary they asked for was
             // not actually honored, then proceed.
             if ($pdo->inTransaction()) {
-                $pdo->commit();
+                $this->withPdo(static fn (PDO $p) => $p->commit());
             } else {
                 trigger_error(
                     "Database transaction was implicitly committed mid-task "

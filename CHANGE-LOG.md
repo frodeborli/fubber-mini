@@ -4,6 +4,17 @@ Mini framework is in active internal development. We prioritize clean, simple co
 
 This log tracks breaking changes for reference when reviewing old code or conversations.
 
+## Database: SQLite transactions begin IMMEDIATE (0.18.0-alpha1, 2026-11-27)
+
+Not breaking. `transaction()` on SQLite begins with `BEGIN IMMEDIATE`, taking the write lock at once,
+instead of PDO's deferred `BEGIN`. A deferred transaction that read and then wrote was refused at
+once ("database is locked", without waiting for busy_timeout) when another connection had written in
+between: in WAL mode its snapshot was out of date. Now the other connection waits for it instead
+(its busy_timeout). A transaction that only reads takes the write lock too, so read-only work is
+better done outside `transaction()`.
+
+Regression test: `tests/Database/PDODatabase.Scoped.php` (testATransactionThatReadsThenWritesIsNotRefused).
+
 ## Database: one connection per scope, no pool (0.18.0-alpha1, 2026-11-27)
 
 **BREAKING CHANGE** (under phasync only; for code that ran statements from several coroutines of

@@ -135,6 +135,47 @@ $test = new class extends Test {
         }));
         $this->assertTrue((int) $b === (int) $a + 1, "ids $a, $b");
     }
+
+    public function testATransactionThatReadsThenWritesIsNotRefused(): void
+    {
+        // (begun deferred, a transaction that read and then writes is refused at once, "database is locked" with no
+        // wait, when another connection wrote in between; begun IMMEDIATE it holds the write lock from the start, and
+        // the other connection waits for it instead)
+        $r = \phasync::run(function () {
+            $out = ['a' => null, 'b' => null];
+            $a = \phasync::go(function () use (&$out) {
+                (new \Scope())->run(function () use (&$out) {
+                    try {
+                        $this->db()->transaction(function () {
+                            $this->db()->queryField('SELECT COUNT(*) FROM t');
+                            \phasync::sleep(0.2);   // (b writes meanwhile, or waits to)
+                            $this->db()->exec("INSERT INTO t (name) VALUES ('a')");
+                        });
+                        $out['a'] = 'committed';
+                    } catch (\Throwable $e) {
+                        $out['a'] = $e->getMessage();
+                    }
+                });
+            });
+            $b = \phasync::go(function () use (&$out) {
+                (new \Scope())->run(function () use (&$out) {
+                    \phasync::sleep(0.05);
+                    try {
+                        $this->db()->exec('PRAGMA busy_timeout = 3000');
+                        $this->db()->exec("INSERT INTO t (name) VALUES ('b')");
+                        $out['b'] = 'committed';
+                    } catch (\Throwable $e) {
+                        $out['b'] = $e->getMessage();
+                    }
+                });
+            });
+            \phasync::await($a);
+            \phasync::await($b);
+
+            return $out;
+        });
+        $this->assertSame(['a' => 'committed', 'b' => 'committed'], $r);
+    }
 };
 
 exit($test->run());
